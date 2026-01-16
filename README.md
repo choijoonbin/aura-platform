@@ -3,7 +3,7 @@
 > **혁신적인 에이전틱 AI 시스템 for DWP**  
 > Modular Monolith Architecture로 설계된 확장 가능한 SDLC 자동화 플랫폼
 
-![Version](https://img.shields.io/badge/version-0.1.0-blue)
+![Version](https://img.shields.io/badge/version-0.3.1-blue)
 ![Python](https://img.shields.io/badge/python-3.10+-green)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 
@@ -137,36 +137,34 @@ aura-platform/
 │   ├── dev/                   # 개발팀 도메인 (첫 번째 타겟)
 │   │   ├── agents/           # LangGraph 에이전트
 │   │   │   ├── __init__.py
-│   │   │   ├── code_review_agent.py
-│   │   │   └── issue_manager_agent.py
+│   │   │   ├── code_agent.py          # 기본 코드 분석 에이전트
+│   │   │   ├── enhanced_agent.py      # 고도화된 에이전트 (v1.0)
+│   │   │   └── hooks.py               # SSE 이벤트 Hook
 │   │   ├── workflows/        # 복잡한 워크플로우
 │   │   │   ├── __init__.py
-│   │   │   └── sdlc_workflow.py
-│   │   ├── schemas.py        # 도메인 데이터 모델
+│   │   │   └── sdlc_workflow.py       # (예정)
 │   │   └── __init__.py
 │   └── __init__.py
 │
 ├── api/                       # FastAPI 애플리케이션
 │   ├── routes/               # API 엔드포인트
 │   │   ├── __init__.py
-│   │   ├── health.py         # 헬스체크
-│   │   ├── agents.py         # 에이전트 API
-│   │   └── domains/          # 도메인별 라우트
+│   │   ├── agents.py         # 기본 에이전트 API
+│   │   └── agents_enhanced.py # 고도화된 에이전트 API (v1.0)
 │   ├── schemas/              # API 스키마
 │   │   ├── __init__.py
-│   │   ├── base.py
-│   │   └── requests.py
-│   ├── middleware.py         # 미들웨어
+│   │   └── events.py         # SSE 이벤트 스키마
+│   ├── middleware.py         # 미들웨어 (JWT, Tenant, Logging)
 │   ├── dependencies.py       # 의존성 주입
 │   └── __init__.py
 │
 ├── tools/                    # 재사용 가능한 통합 도구
 │   ├── integrations/        # 외부 서비스 연동
 │   │   ├── __init__.py
-│   │   ├── git_tool.py      # Git 작업
-│   │   ├── jira_tool.py     # Jira API
-│   │   ├── slack_tool.py    # Slack 알림
-│   │   └── github_tool.py   # GitHub API
+│   │   ├── git_tool.py      # Git 작업 (5개 도구) ✅
+│   │   ├── github_tool.py    # GitHub API (4개 도구) ✅
+│   │   ├── jira_tool.py      # Jira API (예정)
+│   │   └── slack_tool.py     # Slack 알림 (예정)
 │   ├── base.py              # 기본 도구 클래스
 │   └── __init__.py
 │
@@ -438,30 +436,50 @@ mypy core domains api tools
 - [x] **테스트 스크립트**
   - `scripts/test_agent_stream.py` - 에이전트 스트리밍 검증
 
+### ✅ 완료된 작업 (프론트엔드 명세 v1.0: Enhanced Agent)
+
+- [x] **SSE 이벤트 스키마**
+  - `api/schemas/events.py` - 프론트엔드 명세 v1.0 이벤트 스키마 (완성)
+  - thought, plan_step, tool_execution, content 이벤트 타입
+  - Pydantic v2 모델 기반 타입 안전성
+- [x] **Enhanced Agent State**
+  - `domains/dev/agents/enhanced_agent.py` - 고도화된 에이전트 (완성)
+  - thought_chain, plan_steps, execution_logs 추적
+  - 5개 노드 워크플로우 (analyze → plan → execute → tools → reflect)
+- [x] **LangGraph Hook**
+  - `domains/dev/agents/hooks.py` - SSE 이벤트 발행 Hook (완성)
+  - 노드 실행 시 자동 이벤트 생성
+- [x] **HITL Interrupt**
+  - 중요 도구 실행 전 승인 대기 기능
+  - Checkpoint 기반 상태 저장
+  - pending_approvals 상태 관리
+- [x] **Confidence Score**
+  - LLM logprobs 기반 신뢰도 계산 (0.0~1.0)
+  - plan_step에 confidence 포함
+- [x] **Source Attribution**
+  - 참고 파일 경로 추출
+  - thought 이벤트에 sources 배열 포함
+- [x] **Enhanced API 엔드포인트**
+  - `api/routes/agents_enhanced.py` - 고도화된 스트리밍 API (완성)
+  - POST /agents/v2/chat/stream - 프론트엔드 명세 v1.0 스트리밍
+  - POST /agents/v2/approve - 도구 실행 승인
+
 ### 🚧 진행 중 (Phase 4: 고도화)
 
 - [ ] `database/session.py` - SQLAlchemy 세션 관리
 - [ ] `database/models/base.py` - Base 모델
 - [ ] Code Review Agent 특화
-- [ ] Slack 통합
+- [ ] Jira, Slack 통합 도구
+- [ ] LangGraph 표준 Checkpointer 인터페이스 완성
 
 ### 📅 예정된 작업
 
-**Phase 3: Dev Domain 구현**
-- [ ] `tools/integrations/git_tool.py` - Git 작업 자동화
-- [ ] `tools/integrations/github_tool.py` - GitHub API 통합
+**Phase 4: 추가 통합**
 - [ ] `tools/integrations/jira_tool.py` - Jira API 통합
 - [ ] `tools/integrations/slack_tool.py` - Slack 알림
-- [ ] `domains/dev/agents/code_review_agent.py` - 코드 리뷰 에이전트
+- [ ] `domains/dev/agents/code_review_agent.py` - 코드 리뷰 에이전트 특화
 - [ ] `domains/dev/agents/issue_manager_agent.py` - Issue 관리 에이전트
 - [ ] `domains/dev/workflows/sdlc_workflow.py` - SDLC 워크플로우
-
-**Phase 4: API 레이어 확장**
-- [ ] `api/routes/agents.py` - 에이전트 실행 API
-- [ ] `api/routes/domains/dev.py` - Dev Domain 라우트
-- [ ] `api/middleware.py` - 로깅, 인증 미들웨어
-- [ ] `api/dependencies.py` - 의존성 주입
-- [ ] WebSocket 지원 (실시간 응답)
 
 **Phase 5: 테스트 & 문서화**
 - [ ] 단위 테스트 작성
@@ -475,8 +493,9 @@ mypy core domains api tools
 
 ### Q1 2026: 기초 구축
 - ✅ 프로젝트 초기화 및 아키텍처 설계
-- 🚧 Core 엔진 개발
-- Dev Domain 기본 기능 구현
+- ✅ Core 엔진 개발 (Redis, JWT, 메모리)
+- ✅ Dev Domain 기본 기능 구현 (Git/GitHub 도구, 에이전트)
+- ✅ 프론트엔드 명세 v1.0 구현 (Enhanced Agent)
 
 ### Q2 2026: Dev Domain 완성
 - Git/GitHub/GitLab 완전 통합
@@ -500,6 +519,38 @@ mypy core domains api tools
 ## 📝 변경 이력
 
 모든 주요 변경사항은 [CHANGELOG.md](CHANGELOG.md)에 기록됩니다.
+
+### [0.3.1] - 2026-01-16
+
+**Added**
+- 프론트엔드 명세 v1.0 구현 완료
+  - Enhanced Agent (사고 과정 추적, 계획 수립)
+  - SSE 이벤트 스키마 (thought, plan_step, tool_execution, content)
+  - HITL Interrupt (승인 대기)
+  - Confidence Score 계산
+  - Source Attribution
+  - POST /agents/v2/chat/stream 엔드포인트
+
+**Fixed**
+- JWT Python-Java 호환성 개선 (Unix timestamp)
+- API 인증 미들웨어 개선
+
+### [0.3.0] - 2026-01-15
+
+**Added**
+- Phase 3: Dev Domain 구현
+  - Git/GitHub 도구 통합 (9개 도구)
+  - LangGraph 에이전트
+  - SSE 스트리밍 API
+
+### [0.2.0] - 2026-01-15
+
+**Added**
+- Phase 2: Core 확장
+  - Redis 기반 LangGraph Checkpointer
+  - JWT 인증 시스템
+  - RBAC 권한 관리
+  - 대화 히스토리 관리
 
 ### [0.1.0] - 2026-01-15
 
