@@ -303,8 +303,9 @@ curl http://localhost:8080/api/aura/hitl/signals/{sessionId} \
 
 ### 3. 주의사항
 
-1. **포트 충돌**: Auth Server와 Aura-Platform이 모두 포트 8000 사용
-   - 해결: Auth Server를 다른 포트로 변경하거나, Aura-Platform을 다른 포트로 변경
+1. **포트 충돌**: ✅ 해결 완료
+   - Aura-Platform: 포트 9000으로 변경 완료
+   - Auth Server: 포트 8001 (또는 다른 포트) 사용
 
 2. **Redis 연결**: dwp-backend의 Docker Compose Redis 사용 가능
    - 호스트: `localhost:6379`
