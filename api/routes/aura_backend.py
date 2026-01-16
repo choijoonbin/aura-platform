@@ -5,6 +5,7 @@ dwp-backend와의 연동을 위한 엔드포인트입니다.
 백엔드 요구사항에 맞춘 SSE 스트리밍 및 HITL 통신을 제공합니다.
 """
 
+import asyncio
 import json
 import logging
 import uuid
@@ -19,11 +20,14 @@ from api.dependencies import CurrentUser, TenantId
 from api.schemas.events import (
     ThoughtEvent,
     PlanStepEvent,
+    PlanStepUpdateEvent,
+    TimelineStepUpdateEvent,
     ToolExecutionEvent,
     ContentEvent,
     StartEvent,
     EndEvent,
     ErrorEvent,
+    FailedEvent,
 )
 from api.schemas.hitl_events import HITLEvent
 from core.memory.hitl_manager import get_hitl_manager
@@ -35,12 +39,15 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/aura", tags=["aura-backend"])
 
+# 스트리밍 이벤트 간 최소 지연시간 (초) - 프론트엔드 UI 안정성을 위해
+STREAMING_EVENT_DELAY = 0.05  # 50ms
+
 
 class BackendStreamRequest(BaseModel):
-    """백엔드 스트리밍 요청 모델"""
-    message: str = Field(..., min_length=1, description="사용자 메시지")
-    context: dict[str, Any] = Field(default_factory=dict, description="추가 컨텍스트")
-    thread_id: str | None = Field(default=None, description="스레드 ID")
+    """백엔드 스트리밍 요청 모델 (프론트엔드 API 스펙 준수)"""
+    prompt: str = Field(..., min_length=1, description="사용자 프롬프트")
+    context: dict[str, Any] = Field(default_factory=dict, description="컨텍스트 정보 (url, path, title, activeApp, itemId, metadata 등)")
+    thread_id: str | None = Field(default=None, description="스레드 ID (선택)")
 
 
 def format_sse_event(event_type: str, data: dict[str, Any]) -> str:
@@ -61,23 +68,37 @@ def format_sse_event(event_type: str, data: dict[str, Any]) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-@router.get("/test/stream")
+@router.post("/test/stream")
 async def backend_stream(
-    message: str,
+    request: BackendStreamRequest,
     user: CurrentUser,
     tenant_id: TenantId,
     x_dwp_source: str | None = Header(None, alias="X-DWP-Source"),
     x_dwp_caller_type: str | None = Header(None, alias="X-DWP-Caller-Type"),
 ):
     """
-    백엔드 연동용 SSE 스트리밍 엔드포인트
+    백엔드 연동용 SSE 스트리밍 엔드포인트 (POST)
     
-    Gateway를 통한 접근: GET /api/aura/test/stream?message=...
-    실제 경로: GET /aura/test/stream?message=...
+    Gateway를 통한 접근: POST /api/aura/test/stream
+    실제 경로: POST /aura/test/stream
+    
+    요청 본문:
+    {
+        "prompt": "사용자 질문",
+        "context": {
+            "url": "http://localhost:4200/mail",
+            "path": "/mail",
+            "title": "메일 인박스",
+            "activeApp": "mail",
+            "itemId": "msg-123",
+            "metadata": {...}
+        }
+    }
     
     백엔드 요구사항:
     - SSE 이벤트 형식: `event: {type}\ndata: {json}`
-    - 5가지 이벤트 타입: thought, plan_step, tool_execution, hitl, content
+    - 이벤트 타입: thought, plan_step, plan_step_update, timeline_step_update, tool_execution, hitl, content
+    - 스트림 종료: `data: [DONE]\n\n`
     - HITL 이벤트 전송 시 실행 중지 및 Redis Pub/Sub 대기
     """
     async def event_generator():
@@ -104,7 +125,14 @@ async def backend_stream(
             hook = create_sse_hook(event_queue)
             
             # Thread ID 생성
-            thread_id = f"{user.user_id}_{tenant_id}_{int(datetime.utcnow().timestamp())}"
+            thread_id = request.thread_id or f"{user.user_id}_{tenant_id}_{int(datetime.utcnow().timestamp())}"
+            
+            # 컨텍스트 병합 (요청의 context와 헤더 정보)
+            merged_context = {
+                **(request.context or {}),
+                "source": x_dwp_source,
+                "caller_type": x_dwp_caller_type,
+            }
             
             # 현재 상태 추적
             current_state: dict[str, Any] = {
@@ -115,12 +143,12 @@ async def backend_stream(
                 "sources": [],
             }
             
-            # 에이전트 스트리밍 실행
+            # 에이전트 스트리밍 실행 (prompt 사용)
             async for graph_event in agent.stream(
-                user_input=message,
+                user_input=request.prompt,
                 user_id=user.user_id,
                 tenant_id=tenant_id,
-                context={"source": x_dwp_source, "caller_type": x_dwp_caller_type},
+                context=merged_context,
                 thread_id=thread_id,
             ):
                 # LangGraph 이벤트 처리
@@ -176,13 +204,41 @@ async def backend_stream(
                             )
                             
                             if signal is None:
-                                # 타임아웃
-                                error_data = {
-                                    "type": "error",
+                                # 타임아웃 처리: failed 이벤트 전송 및 상태 업데이트
+                                logger.warning(f"HITL timeout after 300 seconds (session: {session_id}, request: {request_id})")
+                                
+                                # failed 이벤트 전송 (프론트엔드에 작업 취소 알림)
+                                failed_data = {
+                                    "type": "failed",
+                                    "message": "사용자 응답 지연으로 작업이 취소되었습니다",
                                     "error": "HITL approval timeout",
                                     "errorType": "TimeoutError",
+                                    "requestId": request_id,
+                                    "sessionId": session_id,
+                                    "timestamp": int(datetime.utcnow().timestamp()),
+                                }
+                                yield format_sse_event("failed", failed_data)
+                                
+                                # error 이벤트도 함께 전송 (기존 호환성 유지)
+                                error_data = {
+                                    "type": "error",
+                                    "error": "사용자 응답 지연으로 작업이 취소되었습니다",
+                                    "errorType": "TimeoutError",
+                                    "message": "HITL 승인 요청이 300초 내에 응답되지 않아 작업이 중단되었습니다.",
                                 }
                                 yield format_sse_event("error", error_data)
+                                
+                                # 종료 이벤트 전송
+                                end_data = {
+                                    "type": "end",
+                                    "message": "작업이 타임아웃으로 인해 중단되었습니다",
+                                    "status": "failed",
+                                    "timestamp": int(datetime.utcnow().timestamp()),
+                                }
+                                yield format_sse_event("end", end_data)
+                                
+                                # 스트림 종료 표시
+                                yield "data: [DONE]\n\n"
                                 return
                             
                             if signal.get("type") == "rejection":
@@ -199,6 +255,7 @@ async def backend_stream(
                             logger.info(f"HITL: Request approved (request: {request_id})")
                 
                 # 큐에 쌓인 이벤트 발행 (백엔드 요구 형식으로 변환)
+                # 스트리밍 버퍼 관리: 이벤트 사이 최소 지연시간 적용
                 while event_queue:
                     event = event_queue.pop(0)
                     event_type = event.get("type", "message")
@@ -210,6 +267,10 @@ async def backend_stream(
                         formatted_data = event
                     
                     yield format_sse_event(event_type, formatted_data)
+                    
+                    # 프론트엔드 UI 안정성을 위한 최소 지연시간 적용
+                    # 너무 빠른 이벤트 연속 전송 시 UI 깨짐 방지
+                    await asyncio.sleep(STREAMING_EVENT_DELAY)
             
             # 종료 이벤트
             end_data = {
@@ -218,6 +279,9 @@ async def backend_stream(
                 "timestamp": int(datetime.utcnow().timestamp()),
             }
             yield format_sse_event("end", end_data)
+            
+            # 스트림 종료 표시 (프론트엔드 요구사항)
+            yield "data: [DONE]\n\n"
             
         except Exception as e:
             logger.error(f"Backend streaming failed: {e}", exc_info=True)

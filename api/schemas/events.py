@@ -59,6 +59,27 @@ class PlanStepEvent(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict, description="추가 메타데이터")
 
 
+class PlanStepUpdateEvent(BaseModel):
+    """계획 단계 업데이트 이벤트 (프론트엔드 요구사항)"""
+    type: str = Field(default="plan_step_update", description="이벤트 타입")
+    stepId: str = Field(..., description="단계 ID")
+    status: PlanStepStatus = Field(..., description="업데이트된 상태")
+    progress: float = Field(default=0.0, ge=0.0, le=1.0, description="진행률 (0.0~1.0)")
+    timestamp: datetime = Field(default_factory=datetime.utcnow, description="타임스탬프")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="추가 메타데이터")
+
+
+class TimelineStepUpdateEvent(BaseModel):
+    """타임라인 단계 업데이트 이벤트 (프론트엔드 요구사항)"""
+    type: str = Field(default="timeline_step_update", description="이벤트 타입")
+    stepId: str = Field(..., description="단계 ID")
+    title: str = Field(..., description="단계 제목")
+    status: PlanStepStatus = Field(..., description="단계 상태")
+    progress: float = Field(default=0.0, ge=0.0, le=1.0, description="진행률 (0.0~1.0)")
+    timestamp: datetime = Field(default_factory=datetime.utcnow, description="타임스탬프")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="추가 메타데이터")
+
+
 class ToolExecutionEvent(BaseModel):
     """도구 실행 이벤트"""
     type: str = Field(default="tool_execution", description="이벤트 타입")
@@ -88,6 +109,19 @@ class ErrorEvent(BaseModel):
     errorType: str = Field(default="unknown", description="에러 타입")
     timestamp: datetime = Field(default_factory=datetime.utcnow, description="타임스탬프")
     metadata: dict[str, Any] = Field(default_factory=dict, description="추가 메타데이터")
+    message: str | None = Field(default=None, description="에러 상세 메시지")
+
+
+class FailedEvent(BaseModel):
+    """작업 실패 이벤트 (HITL 타임아웃 등)"""
+    type: str = Field(default="failed", description="이벤트 타입")
+    message: str = Field(..., description="실패 메시지")
+    error: str = Field(..., description="에러 메시지")
+    errorType: str = Field(..., description="에러 타입")
+    requestId: str | None = Field(default=None, description="요청 ID (HITL의 경우)")
+    sessionId: str | None = Field(default=None, description="세션 ID (HITL의 경우)")
+    timestamp: datetime = Field(default_factory=datetime.utcnow, description="타임스탬프")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="추가 메타데이터")
 
 
 class StartEvent(BaseModel):
@@ -105,4 +139,7 @@ class EndEvent(BaseModel):
 
 
 # 타입 유니온
-SSEEvent = ThoughtEvent | PlanStepEvent | ToolExecutionEvent | ContentEvent | ErrorEvent | StartEvent | EndEvent
+SSEEvent = (
+    ThoughtEvent | PlanStepEvent | PlanStepUpdateEvent | TimelineStepUpdateEvent |
+    ToolExecutionEvent | ContentEvent | ErrorEvent | FailedEvent | StartEvent | EndEvent
+)

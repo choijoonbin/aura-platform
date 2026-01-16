@@ -201,10 +201,18 @@ class EnhancedCodeAgent:
         """실행 노드: LLM 호출 및 도구 선택"""
         messages = state["messages"]
         
+        # Context 기반 프롬프트 생성 (activeApp, selectedItemIds 포함)
+        context = state.get("context", {})
+        context_for_prompt = {
+            "user_id": state.get("user_id"),
+            "tenant_id": state.get("tenant_id"),
+            **context,  # 프론트엔드에서 전달된 context 정보 포함
+        }
+        
         system_message = HumanMessage(
             content=get_system_prompt(
                 domain="dev",
-                context=f"User: {state['user_id']}, Tenant: {state.get('tenant_id')}",
+                context=context_for_prompt,  # dict 형태로 전달하여 activeApp, selectedItemIds 자동 추출
             )
         )
         

@@ -18,6 +18,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.1] - 2026-01-16
 
+### Added
+- **DWP Backend 연동 구현 완료 (Aura-Platform 측)**
+  - `api/routes/aura_backend.py`: 백엔드 연동용 SSE 스트리밍 엔드포인트
+    - `GET /aura/test/stream`: 백엔드 요구 형식 준수 (event: {type}\ndata: {json})
+    - 5가지 이벤트 타입: thought, plan_step, tool_execution, hitl, content
+  - `core/memory/hitl_manager.py`: HITL Manager 구현
+    - Redis Pub/Sub 구독 (`hitl:channel:{sessionId}`)
+    - 승인 요청 저장/조회 (`hitl:request:{requestId}`, `hitl:session:{sessionId}`)
+    - 승인 신호 대기 및 처리 (타임아웃 300초)
+  - `api/schemas/hitl_events.py`: HITL 이벤트 스키마
+  - HITL API 엔드포인트:
+    - `GET /aura/hitl/requests/{request_id}`: 승인 요청 조회
+    - `GET /aura/hitl/signals/{session_id}`: 승인 신호 조회
+  - 전달 문서:
+    - `docs/BACKEND_HANDOFF.md`: 백엔드 전달 문서
+    - `docs/FRONTEND_HANDOFF.md`: 프론트엔드 전달 문서
+    - `docs/INTEGRATION_STATUS.md`: 통합 상태 요약
+- **백엔드 HITL API 구현 완료 확인** (2026-01-16)
+  - 백엔드에서 HITL 승인/거절 API 구현 완료 확인
+  - `docs/AURA_PLATFORM_UPDATE.md`: 백엔드 업데이트 문서 추가
+  - 전체 통합 진행률: 100% ✅
+  - 통합 테스트 준비 완료
+
 ### Fixed
 - **JWT Python-Java 호환성 개선**
   - `exp`와 `iat` 클레임을 Unix timestamp (초 단위 정수)로 변환
@@ -31,6 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `docs/JWT_COMPATIBILITY.md`: Python-Java 호환성 가이드 추가
 
 ### Changed
+- **포트 변경**: API 포트 8000 → 9000 (포트 충돌 해결)
+  - `core/config.py`: `api_port` 기본값 변경
+  - Auth Server와 포트 분리 완료
 - `TokenPayload.exp`, `TokenPayload.iat`: `datetime` → `int` (Unix timestamp)
 - `create_access_token()`: Unix timestamp 변환 로직 추가
 - `verify_token()`: 자동 만료 검증 (추가 로직 제거)

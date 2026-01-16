@@ -2,7 +2,9 @@
 System Prompts Module
 
 에이전트 및 워크플로우에 사용되는 시스템 프롬프트를 정의합니다.
+Context 기반 동적 프롬프트 주입을 지원합니다.
 """
+from typing import Any
 
 # ==================== Base System Prompt ====================
 BASE_SYSTEM_PROMPT = """
@@ -107,13 +109,17 @@ Your expertise includes:
 """
 
 # ==================== Prompt Templates ====================
-def get_system_prompt(domain: str = "base", **kwargs: str) -> str:
+def get_system_prompt(domain: str = "base", **kwargs: Any) -> str:
     """
     도메인에 따른 시스템 프롬프트를 반환합니다.
     
     Args:
         domain: 도메인 이름 (base, dev, hr, code_review, issue_manager)
         **kwargs: 프롬프트에 삽입할 컨텍스트 변수
+            - context: 기본 컨텍스트 문자열 또는 dict
+            - code: 코드 내용 (code_review용)
+            - activeApp: 현재 활성화된 앱 (프론트엔드 context에서)
+            - selectedItemIds: 선택된 항목 ID 목록 (프론트엔드 context에서)
         
     Returns:
         포맷된 시스템 프롬프트
@@ -132,4 +138,47 @@ def get_system_prompt(domain: str = "base", **kwargs: str) -> str:
     context = kwargs.get("context", "No additional context provided.")
     code = kwargs.get("code", "")
     
-    return prompt_template.format(context=context, code=code)
+    # Context가 dict인 경우 프론트엔드 컨텍스트 정보 추출
+    context_str = context
+    if isinstance(context, dict):
+        # 기본 컨텍스트 정보 구성
+        context_parts = []
+        
+        # activeApp 정보 추가
+        active_app = context.get("activeApp")
+        if active_app:
+            context_parts.append(f"현재 사용자가 보고 있는 화면: {active_app}")
+        
+        # selectedItemIds 정보 추가
+        selected_item_ids = context.get("selectedItemIds")
+        if selected_item_ids:
+            if isinstance(selected_item_ids, list):
+                items_str = ", ".join(str(item_id) for item_id in selected_item_ids)
+                context_parts.append(f"선택된 항목 ID: {items_str}")
+            else:
+                context_parts.append(f"선택된 항목 ID: {selected_item_ids}")
+        
+        # 추가 컨텍스트 정보 (url, path, title 등)
+        if context.get("url"):
+            context_parts.append(f"현재 URL: {context['url']}")
+        if context.get("path"):
+            context_parts.append(f"경로: {context['path']}")
+        if context.get("title"):
+            context_parts.append(f"페이지 제목: {context['title']}")
+        if context.get("itemId"):
+            context_parts.append(f"항목 ID: {context['itemId']}")
+        
+        # 기타 메타데이터
+        metadata = context.get("metadata", {})
+        if metadata:
+            metadata_str = ", ".join(f"{k}: {v}" for k, v in metadata.items() if v)
+            if metadata_str:
+                context_parts.append(f"추가 정보: {metadata_str}")
+        
+        # 컨텍스트 문자열 생성
+        if context_parts:
+            context_str = "\n".join(context_parts)
+        else:
+            context_str = "No additional context provided."
+    
+    return prompt_template.format(context=context_str, code=code)

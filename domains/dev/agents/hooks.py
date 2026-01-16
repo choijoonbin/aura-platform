@@ -13,6 +13,8 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from api.schemas.events import (
     ThoughtEvent,
     PlanStepEvent,
+    PlanStepUpdateEvent,
+    TimelineStepUpdateEvent,
     ToolExecutionEvent,
     ContentEvent,
     ThoughtType,

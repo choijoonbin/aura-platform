@@ -125,7 +125,8 @@ aura-platform/
 │   ├── memory/                # 메모리 및 상태 관리
 │   │   ├── __init__.py
 │   │   ├── redis_store.py     # Redis 기반 메모리
-│   │   └── conversation.py    # 대화 히스토리
+│   │   ├── conversation.py    # 대화 히스토리
+│   │   └── hitl_manager.py    # HITL 통신 관리
 │   ├── security/              # 인증 및 권한
 │   │   ├── __init__.py
 │   │   ├── auth.py            # JWT 인증
@@ -150,10 +151,12 @@ aura-platform/
 │   ├── routes/               # API 엔드포인트
 │   │   ├── __init__.py
 │   │   ├── agents.py         # 기본 에이전트 API
-│   │   └── agents_enhanced.py # 고도화된 에이전트 API (v1.0)
+│   │   ├── agents_enhanced.py # 고도화된 에이전트 API (v1.0)
+│   │   └── aura_backend.py   # 백엔드 연동 API
 │   ├── schemas/              # API 스키마
 │   │   ├── __init__.py
-│   │   └── events.py         # SSE 이벤트 스키마
+│   │   ├── events.py         # SSE 이벤트 스키마
+│   │   └── hitl_events.py    # HITL 이벤트 스키마
 │   ├── middleware.py         # 미들웨어 (JWT, Tenant, Logging)
 │   ├── dependencies.py       # 의존성 주입
 │   └── __init__.py
@@ -464,6 +467,32 @@ mypy core domains api tools
   - POST /agents/v2/chat/stream - 프론트엔드 명세 v1.0 스트리밍
   - POST /agents/v2/approve - 도구 실행 승인
 
+### ✅ 완료된 작업 (DWP Backend 연동)
+
+- [x] **백엔드 연동용 SSE 스트리밍**
+  - `api/routes/aura_backend.py` - 백엔드 연동 엔드포인트 (완성)
+  - POST /aura/test/stream - 백엔드 요구 형식 준수 (event: {type}\ndata: {json})
+  - 요청 본문: `{"prompt": "...", "context": {...}}` 형식
+  - 이벤트 타입: thought, plan_step, plan_step_update, timeline_step_update, tool_execution, hitl, content
+  - 스트림 종료: `data: [DONE]\n\n` 전송
+- [x] **HITL 통신 시스템**
+  - `core/memory/hitl_manager.py` - HITL Manager 구현 (완성)
+  - Redis Pub/Sub 구독 (`hitl:channel:{sessionId}`)
+  - 승인 요청 저장/조회 (`hitl:request:{requestId}`, `hitl:session:{sessionId}`)
+  - 승인 신호 대기 및 처리 (타임아웃 300초)
+- [x] **HITL API 엔드포인트**
+  - GET /aura/hitl/requests/{request_id} - 승인 요청 조회
+  - GET /aura/hitl/signals/{session_id} - 승인 신호 조회
+  - 백엔드 ApiResponse<T> 형식 준수
+- [x] **포트 변경**
+  - API 포트 8000 → 9000으로 변경 (포트 충돌 해결)
+  - Auth Server와 포트 분리 완료
+- [x] **백엔드 HITL API 구현 완료** ✅ (2026-01-16)
+  - POST /api/aura/hitl/approve/{requestId} - 승인 처리 (백엔드 구현 완료)
+  - POST /api/aura/hitl/reject/{requestId} - 거절 처리 (백엔드 구현 완료)
+  - Redis Pub/Sub 발행 및 신호 저장 (백엔드 구현 완료)
+  - 전체 통합 진행률: 100% ✅
+
 ### 🚧 진행 중 (Phase 4: 고도화)
 
 - [ ] `database/session.py` - SQLAlchemy 세션 관리
@@ -530,6 +559,27 @@ mypy core domains api tools
   - Confidence Score 계산
   - Source Attribution
   - POST /agents/v2/chat/stream 엔드포인트
+- DWP Backend 연동 구현 완료
+  - 백엔드 연동용 SSE 스트리밍 (`POST /aura/test/stream`)
+  - 요청 형식: `{"prompt": "...", "context": {...}}`
+  - 새로운 이벤트 타입: plan_step_update, timeline_step_update
+  - 스트림 종료 표시: `data: [DONE]\n\n`
+  - HITL 통신 시스템 (Redis Pub/Sub 구독)
+  - HITL API 엔드포인트 (승인 요청/신호 조회)
+  - 백엔드 전달 문서 (`docs/BACKEND_HANDOFF.md`)
+  - 프론트엔드 전달 문서 (`docs/FRONTEND_HANDOFF.md`)
+- 백엔드 HITL API 구현 완료 확인 (2026-01-16)
+  - 백엔드에서 HITL 승인/거절 API 구현 완료
+  - 전체 통합 진행률: 100% ✅
+  - 백엔드 업데이트 문서 (`docs/AURA_PLATFORM_UPDATE.md`)
+- 백엔드 업데이트 반영 (2026-01-16)
+  - SSE 엔드포인트 GET → POST 변경
+  - 요청 본문에 prompt와 context 포함
+  - 새로운 이벤트 타입 구현 (plan_step_update, timeline_step_update)
+  - 스트림 종료 시 data: [DONE] 전송
+
+**Changed**
+- API 포트 8000 → 9000으로 변경 (포트 충돌 해결)
 
 **Fixed**
 - JWT Python-Java 호환성 개선 (Unix timestamp)
@@ -587,6 +637,18 @@ DWP Development Team
 ## 📞 문의
 
 프로젝트 관련 문의사항은 이슈 트래커를 통해 등록해주세요.
+
+---
+
+## 🔗 통합/협업 문서
+
+프론트엔드 및 백엔드 팀과의 협업을 위한 상세 문서:
+
+- **[통합/협업 체크리스트](docs/INTEGRATION_CHECKLIST.md)** - 통합 시 확인해야 할 사항
+- **[백엔드 전달 문서](docs/BACKEND_HANDOFF.md)** - 백엔드 팀 전달 문서
+- **[프론트엔드 전달 문서](docs/FRONTEND_HANDOFF.md)** - 프론트엔드 팀 전달 문서
+- **[통합 가이드](docs/AURA_PLATFORM_INTEGRATION_GUIDE.md)** - 상세 통합 가이드
+- **[빠른 참조](docs/AURA_PLATFORM_QUICK_REFERENCE.md)** - 핵심 정보 빠른 참조
 
 ---
 

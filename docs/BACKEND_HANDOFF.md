@@ -16,9 +16,24 @@ Aura-Platform에서 dwp-backend와의 연동을 위해 구현 완료된 사항�
 
 ### 1. SSE 스트리밍 엔드포인트
 
-**엔드포인트**: `GET /aura/test/stream?message={message}`
+**엔드포인트**: `POST /aura/test/stream`
 
-**Gateway 경로**: `GET /api/aura/test/stream?message={message}`
+**Gateway 경로**: `POST /api/aura/test/stream`
+
+**요청 본문**:
+```json
+{
+  "prompt": "사용자 질문",
+  "context": {
+    "url": "http://localhost:4200/mail",
+    "path": "/mail",
+    "title": "메일 인박스",
+    "activeApp": "mail",
+    "itemId": "msg-123",
+    "metadata": {...}
+  }
+}
+```
 
 **구현 내용**:
 - ✅ 백엔드 요구 형식 준수: `event: {type}\ndata: {json}`
@@ -249,12 +264,15 @@ public class HITLService {
 - [x] HITL 신호 대기
 - [x] HITL API 엔드포인트 (조회)
 
-### DWP Backend (구현 필요 ⚠️)
+### DWP Backend (구현 완료 ✅)
 
-- [ ] `POST /api/aura/hitl/approve/{requestId}` - 승인 처리
-- [ ] `POST /api/aura/hitl/reject/{requestId}` - 거절 처리
-- [ ] Redis Pub/Sub 발행 (`hitl:channel:{sessionId}`)
-- [ ] 신호 저장 (`hitl:signal:{sessionId}`)
+- [x] `POST /api/aura/hitl/approve/{requestId}` - 승인 처리 ✅
+- [x] `POST /api/aura/hitl/reject/{requestId}` - 거절 처리 ✅
+- [x] Redis Pub/Sub 발행 (`hitl:channel:{sessionId}`) ✅
+- [x] 신호 저장 (`hitl:signal:{sessionId}`) ✅
+
+**구현 완료일**: 2026-01-16  
+**자세한 내용**: [AURA_PLATFORM_UPDATE.md](AURA_PLATFORM_UPDATE.md) 참조
 
 ---
 
@@ -377,10 +395,10 @@ docker exec -it dwp-redis redis-cli ping
 | SSE 스트리밍 | ✅ 100% | ✅ 100% | 완료 |
 | JWT 인증 | ✅ 100% | ✅ 100% | 완료 |
 | HITL 구독 | ✅ 100% | - | 완료 |
-| HITL 발행 | - | ⚠️ 0% | **구현 필요** |
-| HITL API | ✅ 50% | ⚠️ 0% | **구현 필요** |
+| HITL 발행 | - | ✅ 100% | 완료 |
+| HITL API | ✅ 50% | ✅ 100% | 완료 |
 
-**전체 진행률**: 70% (Aura-Platform 완료, Backend HITL 발행 필요)
+**전체 진행률**: 100% ✅ (모든 기능 구현 완료)
 
 ---
 
@@ -401,7 +419,9 @@ docker exec -it dwp-redis redis-cli ping
 
 통합 과정에서 문제가 발생하거나 추가 정보가 필요한 경우, Aura-Platform 개발팀에 문의하세요.
 
-**다음 단계**: DWP Backend에서 HITL 승인/거절 API 구현 후 통합 테스트 진행
+**다음 단계**: ✅ 백엔드 HITL API 구현 완료 - 통합 테스트 진행 가능
+
+**백엔드 업데이트 사항**: [AURA_PLATFORM_UPDATE.md](AURA_PLATFORM_UPDATE.md) 참조
 
 ---
 
