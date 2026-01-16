@@ -16,6 +16,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.3] - 2026-01-16
+
+### Added
+- **백엔드 통합 체크리스트 응답 구현**
+  - X-User-ID 헤더 검증: JWT `sub`와 `X-User-ID` 헤더 값 일치 확인
+  - 불일치 시 에러 이벤트 전송 및 요청 중단
+  - `docs/BACKEND_INTEGRATION_RESPONSE.md`: 백엔드 응답 문서 추가
+
+### Changed
+- `api/routes/aura_backend.py`:
+  - `X-User-ID` 헤더 파라미터 추가
+  - JWT `sub`와 `X-User-ID` 일치 검증 로직 추가
+  - 불일치 시 즉시 에러 이벤트 전송 및 요청 중단
+
+### Documentation
+- **요청 본문 크기 제한 가이드**
+  - Gateway 기본 제한: 256KB
+  - `context` 데이터 최적화 권장사항
+  - 큰 데이터 처리 방법 안내
+
+---
+
+## [0.3.2] - 2026-01-16
+
+### Added
+- **백엔드 검증 문서 응답 구현**
+  - SSE 이벤트 ID 포함: 각 이벤트에 `id: {event_id}` 라인 추가 (재연결 지원)
+  - Last-Event-ID 헤더 처리: 재연결 시 중단 지점부터 이벤트 재개
+  - SSE 응답 헤더 설정: Content-Type, Cache-Control, Connection, X-Accel-Buffering
+  - `docs/BACKEND_VERIFICATION_RESPONSE.md`: 백엔드 검증 문서 응답 추가
+  - 모든 백엔드 검증 요구사항 구현 완료 ✅
+
+### Changed
+- `api/routes/aura_backend.py`:
+  - `format_sse_event` 함수에 `event_id` 파라미터 추가
+  - 모든 SSE 이벤트에 고유 ID 부여 (Unix timestamp 기반)
+  - `Last-Event-ID` 헤더 읽기 및 처리 로직 추가
+  - 이벤트 ID 카운터를 통한 순차적 ID 생성
+
+---
+
 ## [0.3.1] - 2026-01-16
 
 ### Added

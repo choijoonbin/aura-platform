@@ -50,22 +50,28 @@ class BackendStreamRequest(BaseModel):
     thread_id: str | None = Field(default=None, description="스레드 ID (선택)")
 
 
-def format_sse_event(event_type: str, data: dict[str, Any]) -> str:
+def format_sse_event(event_type: str, data: dict[str, Any], event_id: str | None = None) -> str:
     """
     SSE 이벤트 형식으로 변환 (백엔드 요구사항)
     
     백엔드 요구 형식:
+        id: {event_id}  # 재연결 지원을 위한 이벤트 ID
         event: {event_type}
         data: {json_data}
     
     Args:
         event_type: 이벤트 타입 (thought, plan_step, tool_execution, hitl, content)
         data: 이벤트 데이터
+        event_id: 이벤트 ID (재연결 지원용, None이면 자동 생성)
         
     Returns:
         SSE 형식 문자열
     """
-    return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+    if event_id is None:
+        # Unix timestamp (밀리초)를 이벤트 ID로 사용
+        event_id = str(int(datetime.utcnow().timestamp() * 1000))
+    
+    return f"id: {event_id}\nevent: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 @router.post("/test/stream")
@@ -75,6 +81,8 @@ async def backend_stream(
     tenant_id: TenantId,
     x_dwp_source: str | None = Header(None, alias="X-DWP-Source"),
     x_dwp_caller_type: str | None = Header(None, alias="X-DWP-Caller-Type"),
+    last_event_id: str | None = Header(None, alias="Last-Event-ID"),
+    x_user_id: str | None = Header(None, alias="X-User-ID"),
 ):
     """
     백엔드 연동용 SSE 스트리밍 엔드포인트 (POST)
@@ -96,15 +104,41 @@ async def backend_stream(
     }
     
     백엔드 요구사항:
-    - SSE 이벤트 형식: `event: {type}\ndata: {json}`
+    - SSE 이벤트 형식: `id: {event_id}\nevent: {type}\ndata: {json}` (재연결 지원)
     - 이벤트 타입: thought, plan_step, plan_step_update, timeline_step_update, tool_execution, hitl, content
     - 스트림 종료: `data: [DONE]\n\n`
     - HITL 이벤트 전송 시 실행 중지 및 Redis Pub/Sub 대기
+    - Last-Event-ID 헤더 지원: 재연결 시 중단 지점부터 재개 (이벤트 ID 기반)
     """
     async def event_generator():
         """SSE 이벤트 생성기 (백엔드 요구사항 준수)"""
+        # X-User-ID 헤더 검증 (백엔드 요구사항: JWT sub와 일치해야 함)
+        if x_user_id and x_user_id != user.user_id:
+            logger.warning(
+                f"User ID mismatch: JWT sub={user.user_id}, X-User-ID header={x_user_id}"
+            )
+            error_data = {
+                "type": "error",
+                "error": "User ID mismatch",
+                "errorType": "ValidationError",
+                "message": f"X-User-ID header ({x_user_id}) does not match JWT sub claim ({user.user_id})",
+            }
+            yield format_sse_event("error", error_data, "0")
+            return
+        
         event_queue: list[dict[str, Any]] = []
         session_id = f"session_{user.user_id}_{int(datetime.utcnow().timestamp())}"
+        
+        # 이벤트 ID 카운터 (재연결 지원)
+        event_id_counter = 0
+        if last_event_id:
+            try:
+                # Last-Event-ID가 있으면 해당 지점부터 재개
+                last_id = int(last_event_id)
+                event_id_counter = last_id + 1
+                logger.info(f"Resuming from event ID: {last_event_id}")
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid Last-Event-ID: {last_event_id}, starting from 0")
         
         try:
             # 시작 이벤트
@@ -113,7 +147,8 @@ async def backend_stream(
                 "message": "Agent started",
                 "timestamp": int(datetime.utcnow().timestamp()),
             }
-            yield format_sse_event("start", start_data)
+            event_id_counter += 1
+            yield format_sse_event("start", start_data, str(event_id_counter))
             
             # Checkpointer 가져오기
             checkpointer = await get_checkpointer()
@@ -194,7 +229,8 @@ async def backend_stream(
                                 message=f"{approval['toolName']} 실행을 승인하시겠습니까?",
                                 context=approval["toolArgs"],
                             )
-                            yield format_sse_event("hitl", hitl_event.model_dump())
+                            event_id_counter += 1
+                            yield format_sse_event("hitl", hitl_event.model_dump(), str(event_id_counter))
                             
                             # 승인 신호 대기 (Redis Pub/Sub)
                             logger.info(f"HITL: Waiting for approval signal (session: {session_id})")
@@ -217,7 +253,8 @@ async def backend_stream(
                                     "sessionId": session_id,
                                     "timestamp": int(datetime.utcnow().timestamp()),
                                 }
-                                yield format_sse_event("failed", failed_data)
+                                event_id_counter += 1
+                                yield format_sse_event("failed", failed_data, str(event_id_counter))
                                 
                                 # error 이벤트도 함께 전송 (기존 호환성 유지)
                                 error_data = {
@@ -226,7 +263,8 @@ async def backend_stream(
                                     "errorType": "TimeoutError",
                                     "message": "HITL 승인 요청이 300초 내에 응답되지 않아 작업이 중단되었습니다.",
                                 }
-                                yield format_sse_event("error", error_data)
+                                event_id_counter += 1
+                                yield format_sse_event("error", error_data, str(event_id_counter))
                                 
                                 # 종료 이벤트 전송
                                 end_data = {
@@ -235,7 +273,8 @@ async def backend_stream(
                                     "status": "failed",
                                     "timestamp": int(datetime.utcnow().timestamp()),
                                 }
-                                yield format_sse_event("end", end_data)
+                                event_id_counter += 1
+                                yield format_sse_event("end", end_data, str(event_id_counter))
                                 
                                 # 스트림 종료 표시
                                 yield "data: [DONE]\n\n"
@@ -248,7 +287,8 @@ async def backend_stream(
                                     "error": signal.get("reason", "Request rejected"),
                                     "errorType": "RejectionError",
                                 }
-                                yield format_sse_event("error", error_data)
+                                event_id_counter += 1
+                                yield format_sse_event("error", error_data, str(event_id_counter))
                                 return
                             
                             # 승인됨 - 실행 계속
@@ -266,7 +306,8 @@ async def backend_stream(
                     else:
                         formatted_data = event
                     
-                    yield format_sse_event(event_type, formatted_data)
+                    event_id_counter += 1
+                    yield format_sse_event(event_type, formatted_data, str(event_id_counter))
                     
                     # 프론트엔드 UI 안정성을 위한 최소 지연시간 적용
                     # 너무 빠른 이벤트 연속 전송 시 UI 깨짐 방지
@@ -278,7 +319,8 @@ async def backend_stream(
                 "message": "Agent finished",
                 "timestamp": int(datetime.utcnow().timestamp()),
             }
-            yield format_sse_event("end", end_data)
+            event_id_counter += 1
+            yield format_sse_event("end", end_data, str(event_id_counter))
             
             # 스트림 종료 표시 (프론트엔드 요구사항)
             yield "data: [DONE]\n\n"
@@ -290,7 +332,8 @@ async def backend_stream(
                 "error": str(e),
                 "errorType": type(e).__name__,
             }
-            yield format_sse_event("error", error_data)
+            event_id_counter += 1
+            yield format_sse_event("error", error_data, str(event_id_counter))
     
     return StreamingResponse(
         event_generator(),

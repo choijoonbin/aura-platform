@@ -471,10 +471,13 @@ mypy core domains api tools
 
 - [x] **백엔드 연동용 SSE 스트리밍**
   - `api/routes/aura_backend.py` - 백엔드 연동 엔드포인트 (완성)
-  - POST /aura/test/stream - 백엔드 요구 형식 준수 (event: {type}\ndata: {json})
+  - POST /aura/test/stream - 백엔드 요구 형식 준수
+  - SSE 이벤트 형식: `id: {event_id}\nevent: {type}\ndata: {json}` (재연결 지원)
   - 요청 본문: `{"prompt": "...", "context": {...}}` 형식
   - 이벤트 타입: thought, plan_step, plan_step_update, timeline_step_update, tool_execution, hitl, content
   - 스트림 종료: `data: [DONE]\n\n` 전송
+  - Last-Event-ID 헤더 지원: 재연결 시 중단 지점부터 재개
+  - SSE 응답 헤더: Content-Type, Cache-Control, Connection, X-Accel-Buffering
 - [x] **HITL 통신 시스템**
   - `core/memory/hitl_manager.py` - HITL Manager 구현 (완성)
   - Redis Pub/Sub 구독 (`hitl:channel:{sessionId}`)
@@ -571,6 +574,15 @@ mypy core domains api tools
 - 백엔드 HITL API 구현 완료 확인 (2026-01-16)
   - 백엔드에서 HITL 승인/거절 API 구현 완료
   - 전체 통합 진행률: 100% ✅
+- 백엔드 검증 문서 응답 (2026-01-16)
+  - SSE 이벤트 ID 포함 (재연결 지원)
+  - Last-Event-ID 헤더 처리 구현
+  - SSE 응답 헤더 설정 완료
+  - `docs/BACKEND_VERIFICATION_RESPONSE.md`: 검증 응답 문서 추가
+- 백엔드 통합 체크리스트 응답 (2026-01-16)
+  - X-User-ID 헤더 검증 로직 추가 (JWT sub와 일치 확인)
+  - 요청 본문 크기 제한 문서화 (Gateway 256KB 제한)
+  - `docs/BACKEND_INTEGRATION_RESPONSE.md`: 백엔드 응답 문서 추가
   - 백엔드 업데이트 문서 (`docs/AURA_PLATFORM_UPDATE.md`)
 - 백엔드 업데이트 반영 (2026-01-16)
   - SSE 엔드포인트 GET → POST 변경
