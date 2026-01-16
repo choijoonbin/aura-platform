@@ -1,0 +1,43 @@
+# Aura-Platform Integrated Project Rules (v1.1.1)
+
+## 🌌 Project Identity & Architecture
+- **Name**: Aura-Platform (The Intelligent Brain of DWP)
+- **Role**: Specialized Agentic AI Service providing reasoning, RAG, and tool execution.
+- **Architecture**: Modular Monolith with Domain-Driven Design (DDD).
+- **Communication Flow**: 
+    - [User] ↔ [dwp_frontend (React)]
+    - [dwp_frontend] ↔ [dwp_backend (Spring Boot)]
+    - [dwp_backend] ↔ [aura-platform (FastAPI/LangGraph)] ↔ [Pinecone (Vector DB)]
+
+## 🛠 Tech Stack
+- **Language**: Python 3.10+ (Strict Type Hinting)
+- **Orchestration**: LangGraph (for stateful multi-agent workflows)
+- **LLM Framework**: LangChain, OpenAI GPT-4o
+- **API Framework**: FastAPI (Asynchronous)
+- **Vector Database**: Pinecone (Hybrid Search)
+- **Data Validation**: Pydantic v2
+
+## 📂 Directory Structure Rules
+1. `core/`: Shared LLM configs, security, prompts, and shared memory.
+2. `domains/`: Department-specific logic (agents, workflows, schemas).
+3. `api/`: REST/SSE/WebSocket endpoints and middleware.
+4. `tools/`: Atomic tools for External API (GitHub, Jira, Slack).
+5. `database/`: Pinecone client and metadata schemas.
+
+## 📜 Development & Coding Standards
+1. **Asynchronous First**: 모든 I/O 작업(API, DB, Tools)은 `async/await`를 필수 사용한다.
+2. **State Management**: 2단계 이상의 에이전트 로직은 LangGraph의 `StateGraph`를 사용하여 관리한다.
+3. **Reasoning Format**: 에이전트 응답은 `thought`와 `action`이 분리된 상태를 유지하며, 프론트엔드 타임라인용 `AgentStep` 스키마로 반환한다.
+4. **Prompt Management**: 모든 시스템 프롬프트는 `core/llm/prompts/` 내의 `.yaml` 또는 `.txt` 파일로 관리하며 코드 내 하드코딩을 금지한다.
+5. **Streaming Protocol**: SSE 데이터 전송 시 `event: thought`, `event: tool`, `event: message`, `event: error` 타입을 명확히 구분한다.
+6. **Tool Idempotency**: 모든 외부 연동 도구(Git, Jira 등)는 멱등성(Idempotency)을 보장하도록 설계한다.
+
+## 🧠 Agent & RAG Logic
+1. **RAG Strategy**: Pinecone을 활용한 Hybrid Search 및 Metadata filtering을 적용한다.
+2. **Human-in-the-loop (HITL)**: 중요 액션(Code Merge 등) 전에는 `waiting_for_approval` 상태로 전환하여 사용자 승인을 대기한다.
+3. **Tool Calling**: LLM의 정확도를 위해 모든 도구는 상세한 docstring을 포함해야 한다.
+
+## 📝 Traceability & Quality
+1. **Automatic Updates**: 중요 변경 사항은 `README.md`와 `CHANGELOG.md`에 즉시 반영한다.
+2. **Trajectory Logging**: 에이전트의 사고 궤적(Input -> Thought -> Tool -> Output)을 디버깅 가능하도록 기록한다.
+3. **Error Handling**: Raw LLM 에러를 노출하지 않고, 커스텀 예외 클래스를 통해 구조화된 JSON을 반환한다.
