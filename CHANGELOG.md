@@ -11,8 +11,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Database session management (SQLAlchemy)
 - Code Review Agent 특화
 - Jira, Slack 통합
-- Frontend/Backend integration testing
 - Performance optimization
+
+---
+
+## [0.3.4] - 2026-01-16
+
+### Added
+- **통합 테스트 문서 작성**
+  - `docs/INTEGRATION_TEST_SUMMARY.md`: 통합 테스트 전체 요약
+  - `docs/BACKEND_INTEGRATION_TEST.md`: 백엔드 팀용 통합 테스트 가이드
+  - `docs/FRONTEND_INTEGRATION_TEST.md`: 프론트엔드 팀용 통합 테스트 가이드
+  - 각 모듈별 상세 테스트 시나리오 및 검증 방법 포함
+  - React 예제 코드 및 문제 해결 가이드 포함
 
 ---
 
