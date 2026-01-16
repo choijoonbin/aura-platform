@@ -322,14 +322,14 @@ curl -X POST http://localhost:8080/api/aura/hitl/approve/req-12345 \
 
 ### 1. 포트 충돌
 
-**문제**: Auth Server와 Aura-Platform이 모두 포트 8000 사용
+**해결 완료**: Aura-Platform 포트를 9000으로 변경 완료
 
-**해결 방안**:
-- **옵션 1**: Auth Server를 다른 포트로 변경 (예: 8001)
-- **옵션 2**: Aura-Platform을 다른 포트로 변경 (예: 8002)
-- **옵션 3**: Gateway 라우팅에서 포트 분리
+**포트 구성**:
+- **Aura-Platform**: 포트 9000
+- **Auth Server**: 포트 8001 (또는 다른 포트)
+- **Gateway**: 포트 8080
 
-**권장**: 옵션 1 (Auth Server 포트 변경)
+**포트 충돌 해결됨** ✅
 
 ---
 

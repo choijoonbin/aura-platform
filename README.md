@@ -249,17 +249,17 @@ alembic upgrade head
 
 ```bash
 # 개발 모드
-uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn api.main:app --reload --host 0.0.0.0 --port 9000
 
 # 프로덕션 모드
-uvicorn api.main:app --host 0.0.0.0 --port 8000 --workers 4
+uvicorn api.main:app --host 0.0.0.0 --port 9000 --workers 4
 ```
 
 ### 6. API 문서 확인
 
 브라우저에서 다음 주소로 접속:
-- Swagger UI: http://localhost:8000/docs
-- ReDoc: http://localhost:8000/redoc
+- Swagger UI: http://localhost:9000/docs
+- ReDoc: http://localhost:9000/redoc
 
 ---
 
@@ -375,7 +375,7 @@ mypy core domains api tools
 - [x] **서버 시작 및 검증**
   - Uvicorn 서버 정상 작동 확인 ✅
   - API 엔드포인트 테스트 완료 ✅
-  - Swagger UI 접근 가능 (http://localhost:8000/docs) ✅
+  - Swagger UI 접근 가능 (http://localhost:9000/docs) ✅
 - [x] **검증 스크립트**
   - `scripts/test_setup.py` - 자동 설정 검증 스크립트
   - 5/5 테스트 통과 ✅

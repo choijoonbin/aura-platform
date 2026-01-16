@@ -55,9 +55,9 @@ Gateway (포트 8080)
 
 **Aura-Platform 라우팅:**
 - **경로**: `/api/aura/**`
-- **대상**: `http://localhost:8000` (로컬 개발) / `http://aura-platform:8000` (운영)
+- **대상**: `http://localhost:9000` (로컬 개발) / `http://aura-platform:9000` (운영)
 - **변환**: `StripPrefix=1` 필터 적용
-  - 예: `/api/aura/test/stream` → `http://localhost:8000/aura/test/stream`
+  - 예: `/api/aura/test/stream` → `http://localhost:9000/aura/test/stream`
 
 **HITL API 라우팅:**
 - **경로**: `/api/aura/hitl/**`
@@ -701,7 +701,7 @@ REDIS_PASSWORD=  # 선택
 
 ```bash
 # Aura-Platform URI (Gateway에서 사용)
-AURA_PLATFORM_URI=http://localhost:8000
+AURA_PLATFORM_URI=http://localhost:9000
 ```
 
 ---

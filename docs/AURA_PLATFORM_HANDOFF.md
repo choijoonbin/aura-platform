@@ -104,7 +104,7 @@ X-Tenant-ID: {tenant_id}
 | 서비스 | 포트 | 접근 방법 |
 |--------|------|----------|
 | Gateway | 8080 | `http://localhost:8080` |
-| Aura-Platform | 8000 | 직접 접근 또는 Gateway 경유 |
+| Aura-Platform | 9000 | 직접 접근 또는 Gateway 경유 |
 | Main Service | 8081 | Gateway 경유 (`/api/main/**`) |
 | Redis | 6379 | `localhost:6379` |
 

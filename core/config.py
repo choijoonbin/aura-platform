@@ -75,7 +75,7 @@ class Settings(BaseSettings):
         description="API 서버 호스트"
     )
     api_port: int = Field(
-        default=8000,
+        default=9000,
         gt=0,
         lt=65536,
         description="API 서버 포트"
