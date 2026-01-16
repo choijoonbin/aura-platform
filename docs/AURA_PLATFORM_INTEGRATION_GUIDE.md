@@ -70,12 +70,12 @@ Gateway (포트 8080)
 | 서비스 | 포트 | 용도 |
 |--------|------|------|
 | Gateway | 8080 | 모든 외부 요청 진입점 |
-| Aura-Platform | 8000 | AI 에이전트 서비스 |
+| Aura-Platform | 9000 | AI 에이전트 서비스 |
 | Main Service | 8081 | HITL 관리, AgentTask 관리 |
-| Auth Server | 8000 | JWT 인증 (포트 충돌 주의) |
+| Auth Server | 8001 | JWT 인증 |
 | Redis | 6379 | 세션 관리, Pub/Sub |
 
-**⚠️ 주의**: Auth Server와 Aura-Platform이 동일한 포트(8000)를 사용하므로, 동시 실행 시 포트 분리 필요
+**✅ 포트 구성**: Aura-Platform은 포트 9000, Auth Server는 포트 8001을 사용하여 포트 충돌을 방지합니다.
 
 ---
 
