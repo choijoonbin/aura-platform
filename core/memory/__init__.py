@@ -21,6 +21,10 @@ from core.memory.conversation import (
     add_assistant_message,
     get_recent_context,
 )
+from core.memory.hitl_manager import (
+    HITLManager,
+    get_hitl_manager,
+)
 
 __all__ = [
     "RedisStore",
@@ -35,4 +39,6 @@ __all__ = [
     "add_user_message",
     "add_assistant_message",
     "get_recent_context",
+    "HITLManager",
+    "get_hitl_manager",
 ]
