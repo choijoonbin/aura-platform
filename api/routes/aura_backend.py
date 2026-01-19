@@ -14,7 +14,7 @@ from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from api.dependencies import CurrentUser, TenantId
 from api.schemas.events import (
@@ -48,6 +48,29 @@ class BackendStreamRequest(BaseModel):
     prompt: str = Field(..., min_length=1, description="사용자 프롬프트")
     context: dict[str, Any] = Field(default_factory=dict, description="컨텍스트 정보 (url, path, title, activeApp, itemId, metadata 등)")
     thread_id: str | None = Field(default=None, description="스레드 ID (선택)")
+    
+    @field_validator('context')
+    @classmethod
+    def validate_context_size(cls, v: dict[str, Any]) -> dict[str, Any]:
+        """
+        context 데이터 크기 검증 (Gateway 제한: 256KB)
+        
+        Gateway의 요청 본문 크기 제한은 256KB입니다.
+        context 데이터가 이 제한을 초과하면 Gateway에서 요청이 거부될 수 있습니다.
+        """
+        import json
+        context_json = json.dumps(v)
+        context_size = len(context_json.encode('utf-8'))
+        
+        # Gateway 기본 제한: 256KB (262,144 bytes)
+        MAX_CONTEXT_SIZE = 256 * 1024
+        
+        if context_size > MAX_CONTEXT_SIZE:
+            raise ValueError(
+                f"Context data size ({context_size} bytes) exceeds Gateway limit ({MAX_CONTEXT_SIZE} bytes). "
+                "Please optimize context data by removing unnecessary metadata or reducing nested structures."
+            )
+        return v
 
 
 def format_sse_event(event_type: str, data: dict[str, Any], event_id: str | None = None) -> str:
@@ -71,7 +94,21 @@ def format_sse_event(event_type: str, data: dict[str, Any], event_id: str | None
         # Unix timestamp (밀리초)를 이벤트 ID로 사용
         event_id = str(int(datetime.utcnow().timestamp() * 1000))
     
-    return f"id: {event_id}\nevent: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+    # datetime 객체를 Unix timestamp (초 단위 정수)로 변환
+    def convert_datetime(obj: Any) -> Any:
+        """datetime 객체를 Unix timestamp로 변환"""
+        if isinstance(obj, datetime):
+            return int(obj.timestamp())
+        elif isinstance(obj, dict):
+            return {k: convert_datetime(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_datetime(item) for item in obj]
+        return obj
+    
+    # datetime 객체 변환
+    converted_data = convert_datetime(data)
+    
+    return f"id: {event_id}\nevent: {event_type}\ndata: {json.dumps(converted_data, ensure_ascii=False)}\n\n"
 
 
 @router.post("/test/stream")
@@ -122,8 +159,10 @@ async def backend_stream(
                 "error": "User ID mismatch",
                 "errorType": "ValidationError",
                 "message": f"X-User-ID header ({x_user_id}) does not match JWT sub claim ({user.user_id})",
+                "timestamp": int(datetime.utcnow().timestamp()),
             }
             yield format_sse_event("error", error_data, "0")
+            yield "data: [DONE]\n\n"
             return
         
         event_queue: list[dict[str, Any]] = []
@@ -150,8 +189,10 @@ async def backend_stream(
             event_id_counter += 1
             yield format_sse_event("start", start_data, str(event_id_counter))
             
-            # Checkpointer 가져오기
-            checkpointer = await get_checkpointer()
+            # Checkpointer 설정
+            # TODO: LangGraphCheckpointer를 BaseCheckpointSaver 인터페이스에 맞게 수정 필요
+            # 현재는 MemorySaver를 기본값으로 사용 (None 전달 시 MemorySaver 사용)
+            checkpointer = None  # MemorySaver 사용 (임시 해결책)
             
             # Enhanced Agent 가져오기
             agent = get_enhanced_agent(checkpointer=checkpointer)
@@ -286,9 +327,11 @@ async def backend_stream(
                                     "type": "error",
                                     "error": signal.get("reason", "Request rejected"),
                                     "errorType": "RejectionError",
+                                    "timestamp": int(datetime.utcnow().timestamp()),
                                 }
                                 event_id_counter += 1
                                 yield format_sse_event("error", error_data, str(event_id_counter))
+                                yield "data: [DONE]\n\n"
                                 return
                             
                             # 승인됨 - 실행 계속
@@ -331,9 +374,11 @@ async def backend_stream(
                 "type": "error",
                 "error": str(e),
                 "errorType": type(e).__name__,
+                "timestamp": int(datetime.utcnow().timestamp()),
             }
             event_id_counter += 1
             yield format_sse_event("error", error_data, str(event_id_counter))
+            yield "data: [DONE]\n\n"
     
     return StreamingResponse(
         event_generator(),

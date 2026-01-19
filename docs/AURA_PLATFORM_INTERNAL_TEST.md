@@ -47,6 +47,24 @@ redis-cli ping
 cat .env | grep -E "OPENAI_API_KEY|JWT_SECRET|REDIS"
 ```
 
+### ⚠️ OPENAI_API_KEY 필요 여부
+
+**OPENAI_API_KEY 없이 테스트 가능한 항목**:
+- ✅ SSE 이벤트 스키마 검증 (에러 이벤트 포함)
+- ✅ 종료 플래그 전송 (`data: [DONE]`)
+- ✅ Context 활용 (프롬프트 생성 로직만)
+- ✅ 에러 처리 및 응답 형식
+
+**OPENAI_API_KEY가 필요한 항목**:
+- ❌ 실제 LLM 호출 및 응답 생성
+- ❌ `thought`, `plan_step`, `content` 이벤트 생성
+- ❌ HITL Interrupt 실제 동작 (승인이 필요한 도구 실행)
+- ❌ 승인 신호 대기 및 재개
+- ❌ 에이전트의 실제 추론 과정
+
+> **참고**: OPENAI_API_KEY가 없어도 기본적인 스키마 검증과 에러 처리는 테스트할 수 있습니다.  
+> 실제 에이전트 동작을 테스트하려면 OPENAI_API_KEY가 필요합니다.
+
 ### 2. 테스트 도구 준비
 
 ```bash

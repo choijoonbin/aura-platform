@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **통합 테스트 문서 작성**
   - `docs/INTEGRATION_TEST_SUMMARY.md`: 통합 테스트 전체 요약
+  - `docs/AURA_PLATFORM_INTERNAL_TEST.md`: Aura-Platform 내부 동작 검증 가이드
+    - SSE 이벤트 스키마 준수 검증
+    - LangGraph Interrupt 검증 (HITL 중단 및 체크포인트 저장)
+    - 승인 신호 대기 및 재개 검증
+    - Context 활용 검증 (프롬프트 동적 반영)
+    - 종료 플래그 검증 (`data: [DONE]` 전송)
   - `docs/BACKEND_INTEGRATION_TEST.md`: 백엔드 팀용 통합 테스트 가이드
   - `docs/FRONTEND_INTEGRATION_TEST.md`: 프론트엔드 팀용 통합 테스트 가이드
   - 각 모듈별 상세 테스트 시나리오 및 검증 방법 포함

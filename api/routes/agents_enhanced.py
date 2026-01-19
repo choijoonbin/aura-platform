@@ -63,8 +63,10 @@ async def enhanced_chat_stream(
             start_event = StartEvent(message="Enhanced agent started")
             yield f"data: {json.dumps(start_event.model_dump())}\n\n"
             
-            # Checkpointer 가져오기
-            checkpointer = await get_checkpointer()
+            # Checkpointer 설정
+            # TODO: LangGraphCheckpointer를 BaseCheckpointSaver 인터페이스에 맞게 수정 필요
+            # 현재는 MemorySaver를 기본값으로 사용 (None 전달 시 MemorySaver 사용)
+            checkpointer = None  # MemorySaver 사용 (임시 해결책)
             
             # Enhanced Agent 가져오기
             agent = get_enhanced_agent(checkpointer=checkpointer)

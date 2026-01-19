@@ -656,10 +656,12 @@ DWP Development Team
 
 프론트엔드 및 백엔드 팀과의 협업을 위한 상세 문서:
 
-- **[통합 테스트 요약](docs/INTEGRATION_TEST_SUMMARY.md)** - 통합 테스트 전체 요약
-- **[Aura-Platform 내부 테스트](docs/AURA_PLATFORM_INTERNAL_TEST.md)** - 에이전트 엔진 내부 동작 검증
+- **[통합 테스트 문서 전달 가이드](docs/INTEGRATION_TEST_DELIVERY_GUIDE.md)** - 문서 전달 대상 및 방법 안내
+- **[통합 테스트 요약](docs/INTEGRATION_TEST_SUMMARY.md)** - 통합 테스트 전체 요약 (PM/QA/모든 팀 공유)
+- **[Aura-Platform 내부 테스트](docs/AURA_PLATFORM_INTERNAL_TEST.md)** - 에이전트 엔진 내부 동작 검증 (Aura-Platform 팀/QA 팀)
 - **[백엔드 통합 테스트](docs/BACKEND_INTEGRATION_TEST.md)** - 백엔드 팀용 통합 테스트 가이드
 - **[프론트엔드 통합 테스트](docs/FRONTEND_INTEGRATION_TEST.md)** - 프론트엔드 팀용 통합 테스트 가이드
+- **[백엔드 통합 체크리스트 응답 검토](docs/BACKEND_INTEGRATION_CHECKLIST_RESPONSE.md)** - 백엔드 통합 체크리스트 응답 검토 및 대응 완료 보고서
 - **[통합/협업 체크리스트](docs/INTEGRATION_CHECKLIST.md)** - 통합 시 확인해야 할 사항
 - **[백엔드 전달 문서](docs/BACKEND_HANDOFF.md)** - 백엔드 팀 전달 문서
 - **[프론트엔드 전달 문서](docs/FRONTEND_HANDOFF.md)** - 프론트엔드 팀 전달 문서
