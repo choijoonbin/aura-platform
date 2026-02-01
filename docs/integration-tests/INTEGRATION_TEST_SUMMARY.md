@@ -11,9 +11,9 @@
 이 문서는 Aura-Platform과 DWP Backend, DWP Frontend 간의 통합 테스트를 위한 요약 문서입니다.
 
 각 모듈별 상세 테스트 가이드는 다음 문서를 참조하세요:
-- **Aura-Platform 팀**: `docs/AURA_PLATFORM_INTERNAL_TEST.md` - 에이전트 엔진 내부 동작 검증
-- **백엔드 팀**: `docs/BACKEND_INTEGRATION_TEST.md` - Gateway 및 HITL API 테스트
-- **프론트엔드 팀**: `docs/FRONTEND_INTEGRATION_TEST.md` - SSE 스트리밍 및 UI 테스트
+- **Aura-Platform 팀**: [`AURA_PLATFORM_INTERNAL_TEST.md`](AURA_PLATFORM_INTERNAL_TEST.md) - 에이전트 엔진 내부 동작 검증
+- **백엔드 팀**: [`BACKEND_INTEGRATION_TEST.md`](BACKEND_INTEGRATION_TEST.md) - Gateway 및 HITL API 테스트
+- **프론트엔드 팀**: [`FRONTEND_INTEGRATION_TEST.md`](FRONTEND_INTEGRATION_TEST.md) - SSE 스트리밍 및 UI 테스트
 
 ---
 
