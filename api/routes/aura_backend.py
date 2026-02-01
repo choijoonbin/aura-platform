@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from api.dependencies import CurrentUser, TenantId
 from api.schemas.events import (
+    SSE_EVENT_PAYLOAD_VERSION,
     ThoughtEvent,
     PlanStepEvent,
     PlanStepUpdateEvent,
@@ -107,7 +108,10 @@ def format_sse_event(event_type: str, data: dict[str, Any], event_id: str | None
     
     # datetime 객체 변환
     converted_data = convert_datetime(data)
-    
+    # 페이로드 스키마 버전 보강 (권장: {"version":"1.0", "type":..., ...})
+    if isinstance(converted_data, dict):
+        converted_data.setdefault("version", SSE_EVENT_PAYLOAD_VERSION)
+
     return f"id: {event_id}\nevent: {event_type}\ndata: {json.dumps(converted_data, ensure_ascii=False)}\n\n"
 
 

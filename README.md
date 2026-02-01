@@ -210,7 +210,7 @@ aura-platform/
 **Redis 설정 방법**:
 - **권장**: dwp_backend의 Docker Compose Redis 사용 (`localhost:6379`)
   - 별도 설치 불필요
-  - 자세한 내용: [`docs/DOCKER_REDIS_SETUP.md`](docs/DOCKER_REDIS_SETUP.md)
+  - 자세한 내용: [`docs/guides/DOCKER_REDIS_SETUP.md`](docs/guides/DOCKER_REDIS_SETUP.md)
 - **대안**: 로컬에 Redis 직접 설치 (`brew install redis`)
 
 ### 1. 프로젝트 클론
@@ -569,8 +569,8 @@ mypy core domains api tools
   - 스트림 종료 표시: `data: [DONE]\n\n`
   - HITL 통신 시스템 (Redis Pub/Sub 구독)
   - HITL API 엔드포인트 (승인 요청/신호 조회)
-  - 백엔드 전달 문서 (`docs/BACKEND_HANDOFF.md`)
-  - 프론트엔드 전달 문서 (`docs/FRONTEND_HANDOFF.md`)
+  - 백엔드 전달 문서 (`docs/handoff/BACKEND_HANDOFF.md`)
+  - 프론트엔드 전달 문서 (`docs/handoff/FRONTEND_HANDOFF.md`)
 - 백엔드 HITL API 구현 완료 확인 (2026-01-16)
   - 백엔드에서 HITL 승인/거절 API 구현 완료
   - 전체 통합 진행률: 100% ✅
@@ -578,12 +578,12 @@ mypy core domains api tools
   - SSE 이벤트 ID 포함 (재연결 지원)
   - Last-Event-ID 헤더 처리 구현
   - SSE 응답 헤더 설정 완료
-  - `docs/BACKEND_VERIFICATION_RESPONSE.md`: 검증 응답 문서 추가
+  - `docs/backend-integration/BACKEND_VERIFICATION_RESPONSE.md`: 검증 응답 문서 추가
 - 백엔드 통합 체크리스트 응답 (2026-01-16)
   - X-User-ID 헤더 검증 로직 추가 (JWT sub와 일치 확인)
   - 요청 본문 크기 제한 문서화 (Gateway 256KB 제한)
-  - `docs/BACKEND_INTEGRATION_RESPONSE.md`: 백엔드 응답 문서 추가
-  - 백엔드 업데이트 문서 (`docs/AURA_PLATFORM_UPDATE.md`)
+  - `docs/backend-integration/BACKEND_INTEGRATION_RESPONSE.md`: 백엔드 응답 문서 추가
+  - 백엔드 업데이트 문서 (`docs/updates/AURA_PLATFORM_UPDATE.md`)
 - 백엔드 업데이트 반영 (2026-01-16)
   - SSE 엔드포인트 GET → POST 변경
   - 요청 본문에 prompt와 context 포함
@@ -656,17 +656,17 @@ DWP Development Team
 
 프론트엔드 및 백엔드 팀과의 협업을 위한 상세 문서:
 
-- **[통합 테스트 문서 전달 가이드](docs/INTEGRATION_TEST_DELIVERY_GUIDE.md)** - 문서 전달 대상 및 방법 안내
-- **[통합 테스트 요약](docs/INTEGRATION_TEST_SUMMARY.md)** - 통합 테스트 전체 요약 (PM/QA/모든 팀 공유)
-- **[Aura-Platform 내부 테스트](docs/AURA_PLATFORM_INTERNAL_TEST.md)** - 에이전트 엔진 내부 동작 검증 (Aura-Platform 팀/QA 팀)
-- **[백엔드 통합 테스트](docs/BACKEND_INTEGRATION_TEST.md)** - 백엔드 팀용 통합 테스트 가이드
-- **[프론트엔드 통합 테스트](docs/FRONTEND_INTEGRATION_TEST.md)** - 프론트엔드 팀용 통합 테스트 가이드
-- **[백엔드 통합 체크리스트 응답 검토](docs/BACKEND_INTEGRATION_CHECKLIST_RESPONSE.md)** - 백엔드 통합 체크리스트 응답 검토 및 대응 완료 보고서
-- **[통합/협업 체크리스트](docs/INTEGRATION_CHECKLIST.md)** - 통합 시 확인해야 할 사항
-- **[백엔드 전달 문서](docs/BACKEND_HANDOFF.md)** - 백엔드 팀 전달 문서
-- **[프론트엔드 전달 문서](docs/FRONTEND_HANDOFF.md)** - 프론트엔드 팀 전달 문서
-- **[통합 가이드](docs/AURA_PLATFORM_INTEGRATION_GUIDE.md)** - 상세 통합 가이드
-- **[빠른 참조](docs/AURA_PLATFORM_QUICK_REFERENCE.md)** - 핵심 정보 빠른 참조
+- **[통합 테스트 문서 전달 가이드](docs/integration-tests/INTEGRATION_TEST_DELIVERY_GUIDE.md)** - 문서 전달 대상 및 방법 안내
+- **[통합 테스트 요약](docs/integration-tests/INTEGRATION_TEST_SUMMARY.md)** - 통합 테스트 전체 요약 (PM/QA/모든 팀 공유)
+- **[Aura-Platform 내부 테스트](docs/integration-tests/AURA_PLATFORM_INTERNAL_TEST.md)** - 에이전트 엔진 내부 동작 검증 (Aura-Platform 팀/QA 팀)
+- **[백엔드 통합 테스트](docs/integration-tests/BACKEND_INTEGRATION_TEST.md)** - 백엔드 팀용 통합 테스트 가이드
+- **[프론트엔드 통합 테스트](docs/integration-tests/FRONTEND_INTEGRATION_TEST.md)** - 프론트엔드 팀용 통합 테스트 가이드
+- **[백엔드 통합 체크리스트 응답 검토](docs/backend-integration/BACKEND_INTEGRATION_CHECKLIST_RESPONSE.md)** - 백엔드 통합 체크리스트 응답 검토 및 대응 완료 보고서
+- **[통합/협업 체크리스트](docs/backend-integration/INTEGRATION_CHECKLIST.md)** - 통합 시 확인해야 할 사항
+- **[백엔드 전달 문서](docs/handoff/BACKEND_HANDOFF.md)** - 백엔드 팀 전달 문서
+- **[프론트엔드 전달 문서](docs/handoff/FRONTEND_HANDOFF.md)** - 프론트엔드 팀 전달 문서
+- **[통합 가이드](docs/guides/AURA_PLATFORM_INTEGRATION_GUIDE.md)** - 상세 통합 가이드
+- **[빠른 참조](docs/guides/AURA_PLATFORM_QUICK_REFERENCE.md)** - 핵심 정보 빠른 참조
 
 ---
 

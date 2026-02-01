@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **SSE 이벤트 페이로드 스키마 버전(version) 필드**
+  - 모든 SSE 이벤트 페이로드에 `version: "1.0"` 포함 (권장 스펙)
+  - `api/schemas/events.py`: `SSEEventPayloadBase` 및 상수 `SSE_EVENT_PAYLOAD_VERSION` 추가, 각 이벤트 모델 상속
+  - `api/schemas/hitl_events.py`: `HITLEvent`에 `version` 필드 추가
+  - `api/routes/aura_backend.py`: `format_sse_event`에서 누락 시 `version` 자동 보강
+- **SSE 재연결 정책 문서** (`docs/backend-integration/SSE_RECONNECT_POLICY.md`)
+  - 모든 SSE 이벤트에 `id: <eventId>` 필수 여부 코드 근거
+  - Last-Event-ID 수신 시 그 이후 이벤트만 재전송 정책 및 구현 근거
+  - 중복/순서: At-least-once + 클라이언트 dedupe(id) 기준 문서화
+  - 모든 서버 종료 경로에서 `data: [DONE]\n\n` 보장 근거 및 테스트 시나리오(중간 끊김, 재연결, 중복 클릭, HITL 대기 포함)
+
 ### Planned
 - Database session management (SQLAlchemy)
 - Code Review Agent 특화
@@ -19,15 +31,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **통합 테스트 문서 작성**
-  - `docs/INTEGRATION_TEST_SUMMARY.md`: 통합 테스트 전체 요약
-  - `docs/AURA_PLATFORM_INTERNAL_TEST.md`: Aura-Platform 내부 동작 검증 가이드
+  - `docs/integration-tests/INTEGRATION_TEST_SUMMARY.md`: 통합 테스트 전체 요약
+  - `docs/integration-tests/AURA_PLATFORM_INTERNAL_TEST.md`: Aura-Platform 내부 동작 검증 가이드
     - SSE 이벤트 스키마 준수 검증
     - LangGraph Interrupt 검증 (HITL 중단 및 체크포인트 저장)
     - 승인 신호 대기 및 재개 검증
     - Context 활용 검증 (프롬프트 동적 반영)
     - 종료 플래그 검증 (`data: [DONE]` 전송)
-  - `docs/BACKEND_INTEGRATION_TEST.md`: 백엔드 팀용 통합 테스트 가이드
-  - `docs/FRONTEND_INTEGRATION_TEST.md`: 프론트엔드 팀용 통합 테스트 가이드
+  - `docs/integration-tests/BACKEND_INTEGRATION_TEST.md`: 백엔드 팀용 통합 테스트 가이드
+  - `docs/integration-tests/FRONTEND_INTEGRATION_TEST.md`: 프론트엔드 팀용 통합 테스트 가이드
   - 각 모듈별 상세 테스트 시나리오 및 검증 방법 포함
   - React 예제 코드 및 문제 해결 가이드 포함
 
@@ -39,7 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **백엔드 통합 체크리스트 응답 구현**
   - X-User-ID 헤더 검증: JWT `sub`와 `X-User-ID` 헤더 값 일치 확인
   - 불일치 시 에러 이벤트 전송 및 요청 중단
-  - `docs/BACKEND_INTEGRATION_RESPONSE.md`: 백엔드 응답 문서 추가
+  - `docs/backend-integration/BACKEND_INTEGRATION_RESPONSE.md`: 백엔드 응답 문서 추가
 
 ### Changed
 - `api/routes/aura_backend.py`:
@@ -62,7 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - SSE 이벤트 ID 포함: 각 이벤트에 `id: {event_id}` 라인 추가 (재연결 지원)
   - Last-Event-ID 헤더 처리: 재연결 시 중단 지점부터 이벤트 재개
   - SSE 응답 헤더 설정: Content-Type, Cache-Control, Connection, X-Accel-Buffering
-  - `docs/BACKEND_VERIFICATION_RESPONSE.md`: 백엔드 검증 문서 응답 추가
+  - `docs/backend-integration/BACKEND_VERIFICATION_RESPONSE.md`: 백엔드 검증 문서 응답 추가
   - 모든 백엔드 검증 요구사항 구현 완료 ✅
 
 ### Changed
@@ -90,12 +102,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - `GET /aura/hitl/requests/{request_id}`: 승인 요청 조회
     - `GET /aura/hitl/signals/{session_id}`: 승인 신호 조회
   - 전달 문서:
-    - `docs/BACKEND_HANDOFF.md`: 백엔드 전달 문서
-    - `docs/FRONTEND_HANDOFF.md`: 프론트엔드 전달 문서
-    - `docs/INTEGRATION_STATUS.md`: 통합 상태 요약
+    - `docs/handoff/BACKEND_HANDOFF.md`: 백엔드 전달 문서
+    - `docs/handoff/FRONTEND_HANDOFF.md`: 프론트엔드 전달 문서
+    - `docs/backend-integration/INTEGRATION_STATUS.md`: 통합 상태 요약
 - **백엔드 HITL API 구현 완료 확인** (2026-01-16)
   - 백엔드에서 HITL 승인/거절 API 구현 완료 확인
-  - `docs/AURA_PLATFORM_UPDATE.md`: 백엔드 업데이트 문서 추가
+  - `docs/updates/AURA_PLATFORM_UPDATE.md`: 백엔드 업데이트 문서 추가
   - 전체 통합 진행률: 100% ✅
   - 통합 테스트 준비 완료
 
@@ -109,7 +121,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   
 - **테스트 및 문서**
   - `scripts/test_jwt_compatibility.py`: JWT 호환성 테스트 추가
-  - `docs/JWT_COMPATIBILITY.md`: Python-Java 호환성 가이드 추가
+  - `docs/guides/JWT_COMPATIBILITY.md`: Python-Java 호환성 가이드 추가
 
 ### Changed
 - **포트 변경**: API 포트 8000 → 9000 (포트 충돌 해결)
@@ -304,8 +316,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Auto-generated API documentation (Swagger UI, ReDoc)
   
 - **Documentation**
-  - `docs/SETUP_SUCCESS.md`: Detailed setup completion report
-  - `docs/QUICK_START.md`: Quick start guide for developers
+  - `docs/updates/SETUP_SUCCESS.md`: Detailed setup completion report
+  - `docs/guides/QUICK_START.md`: Quick start guide for developers
   - `scripts/test_setup.py`: Automated setup verification script
     - Tests imports, configuration, LLM client, project structure, and .env file
     - 5/5 tests passing ✅

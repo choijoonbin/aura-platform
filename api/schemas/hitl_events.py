@@ -2,15 +2,19 @@
 HITL Event Schemas
 
 백엔드 연동을 위한 HITL 이벤트 스키마를 정의합니다.
+이벤트 페이로드에는 스키마 버전(version) 필드를 포함합니다.
 """
 
 from typing import Any
 
 from pydantic import BaseModel, Field
 
+from api.schemas.events import SSE_EVENT_PAYLOAD_VERSION
+
 
 class HITLEvent(BaseModel):
     """HITL 승인 요청 이벤트"""
+    version: str = Field(default=SSE_EVENT_PAYLOAD_VERSION, description="페이로드 스키마 버전")
     type: str = Field(default="hitl", description="이벤트 타입")
     data: dict[str, Any] = Field(..., description="HITL 데이터")
     

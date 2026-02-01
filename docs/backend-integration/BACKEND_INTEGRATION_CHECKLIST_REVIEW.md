@@ -208,7 +208,7 @@ class BackendStreamRequest(BaseModel):
 
 ### 2. 문서화 업데이트
 
-**문서 위치**: `docs/BACKEND_INTEGRATION_RESPONSE.md` 또는 새 문서 생성
+**문서 위치**: `BACKEND_INTEGRATION_RESPONSE.md` (같은 폴더) 또는 새 문서 생성
 
 **추가 내용**:
 - 요청 본문 크기 제한 (256KB)

@@ -28,6 +28,7 @@
 - ✅ 승인 신호 대기 및 재개
 - ✅ Context 활용 (프롬프트 동적 반영)
 - ✅ 종료 플래그 전송
+- ✅ **SSE 재연결**: `id` / `Last-Event-ID` 정책 및 중복·순서 보장 → [SSE 재연결 정책](../backend-integration/SSE_RECONNECT_POLICY.md) 참고
 
 ---
 
