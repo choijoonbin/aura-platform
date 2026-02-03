@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Finance Agent HITL interrupt/resume (LangGraph + Checkpointer)** (2026-02-03)
+  - LangGraph `interrupt()` 기반 HITL: `_tools_node`에서 propose_action 등 승인 필요 시 `interrupt(payload)` 호출
+  - `Command(resume=...)`로 재개: route에서 Redis Pub/Sub 신호 수신 후 `stream(resume_value=...)` 호출
+  - `approval_results` state: 승인/거절 결과를 agent state에 반영 (audit용)
+  - Checkpointer: `core/memory/checkpointer_factory.py` - SqliteSaver(영속) 또는 MemorySaver(폴백)
+  - `langgraph-checkpoint-sqlite` 의존성 추가 (pyproject.toml)
+  - HITL 통합 테스트: `test_finance_stream_hitl_interrupt_resume` (Redis/HITL Manager mock)
+- **Finance Agent Runtime 안정화 (운영형)** (2026-02-03)
+  - Tool 호출 표준화: X-Tenant-ID, X-User-ID, X-Trace-ID, X-Idempotency-Key 헤더
+  - 5xx/timeout 시 exponential backoff 재시도 (synapse_max_retries)
+  - simulate/execute 멱등성: idempotency key로 중복 방지
+  - HITL 타임아웃: hitl_timeout_seconds 설정, 만료 시 failed/error/end 이벤트
+  - SSE 이벤트 순서 문서화, Last-Event-ID dedupe
+  - pytest: tool mocking, idempotency, SSE 순서 검증
 - **SSE 이벤트 페이로드 스키마 버전(version) 필드**
   - 모든 SSE 이벤트 페이로드에 `version: "1.0"` 포함 (권장 스펙)
   - `api/schemas/events.py`: `SSEEventPayloadBase` 및 상수 `SSE_EVENT_PAYLOAD_VERSION` 추가, 각 이벤트 모델 상속

@@ -255,11 +255,14 @@ data: {"type": "end", "message": "Enhanced agent finished", "timestamp": "2026-0
 - [x] SSE Generator 구현
 
 ### 추가 작업 필요
-- [ ] LangGraph 표준 Checkpointer 인터페이스 구현 (BaseCheckpointSaver)
-- [ ] 실제 interrupt 메커니즘 완성 (checkpoint 기반 대기)
-- [ ] 승인 API 완성 (`/agents/v2/approve`)
-- [ ] 테스트 스크립트 작성
-- [ ] 문서화 완성
+- [x] LangGraph 표준 Checkpointer 인터페이스 구현 (SqliteSaver/MemorySaver - `core/memory/checkpointer_factory.py`)
+- [x] 실제 interrupt 메커니즘 완성 (Finance Agent: LangGraph `interrupt()` + `Command(resume=...)` + checkpoint)
+- [ ] 승인 API 완성 (`/agents/v2/approve`) → **백엔드** 담당
+- [ ] HITL 승인 UI 연동 → **프론트엔드** 담당
+- [ ] 테스트 스크립트 작성 → Aura-Platform 또는 QA
+- [ ] 문서화 완성 → Aura-Platform
+
+**담당별 전달 프롬프트**: `docs/20260203/ADDITIONAL_WORK_PROMPTS.md` 참고
 
 ---
 

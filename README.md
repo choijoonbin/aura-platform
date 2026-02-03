@@ -3,7 +3,7 @@
 > **혁신적인 에이전틱 AI 시스템 for DWP**  
 > Modular Monolith Architecture로 설계된 확장 가능한 SDLC 자동화 플랫폼
 
-![Version](https://img.shields.io/badge/version-0.3.1-blue)
+![Version](https://img.shields.io/badge/version-0.3.4-blue)
 ![Python](https://img.shields.io/badge/python-3.10+-green)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 
@@ -66,7 +66,7 @@ Aura-Platform은 **Modular Monolith** 아키텍처를 채택하여 마이크로�
 │                   Domain Agents                          │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
 │  │  Dev Agent   │  │   HR Agent   │  │ Finance Agent│  │
-│  │ (LangGraph)  │  │  (Future)    │  │   (Future)   │  │
+│  │ (LangGraph)  │  │  (Future)    │  │   (v1)       │  │
 │  └──────────────┘  └──────────────┘  └──────────────┘  │
 └─────────────┬───────────────────────────────────────────┘
               │
@@ -136,15 +136,15 @@ aura-platform/
 │
 ├── domains/                   # 부서별 도메인 모듈
 │   ├── dev/                   # 개발팀 도메인 (첫 번째 타겟)
-│   │   ├── agents/           # LangGraph 에이전트
-│   │   │   ├── __init__.py
+│   │   ├── agents/
 │   │   │   ├── code_agent.py          # 기본 코드 분석 에이전트
-│   │   │   ├── enhanced_agent.py      # 고도화된 에이전트 (v1.0)
-│   │   │   └── hooks.py               # SSE 이벤트 Hook
-│   │   ├── workflows/        # 복잡한 워크플로우
-│   │   │   ├── __init__.py
-│   │   │   └── sdlc_workflow.py       # (예정)
-│   │   └── __init__.py
+│   │   │   ├── enhanced_agent.py     # 고도화된 에이전트 (v1.0)
+│   │   │   └── hooks.py              # SSE 이벤트 Hook
+│   │   └── workflows/
+│   ├── finance/               # 재무 도메인 (v1) ✅
+│   │   └── agents/
+│   │       ├── finance_agent.py      # LangGraph Finance 에이전트
+│   │       └── hooks.py              # SSE Hook
 │   └── __init__.py
 │
 ├── api/                       # FastAPI 애플리케이션
@@ -152,7 +152,8 @@ aura-platform/
 │   │   ├── __init__.py
 │   │   ├── agents.py         # 기본 에이전트 API
 │   │   ├── agents_enhanced.py # 고도화된 에이전트 API (v1.0)
-│   │   └── aura_backend.py   # 백엔드 연동 API
+│   │   ├── aura_backend.py   # 백엔드 연동 API
+│   │   └── finance_agent.py  # Finance 도메인 API
 │   ├── schemas/              # API 스키마
 │   │   ├── __init__.py
 │   │   ├── events.py         # SSE 이벤트 스키마
@@ -164,10 +165,11 @@ aura-platform/
 ├── tools/                    # 재사용 가능한 통합 도구
 │   ├── integrations/        # 외부 서비스 연동
 │   │   ├── __init__.py
-│   │   ├── git_tool.py      # Git 작업 (5개 도구) ✅
+│   │   ├── git_tool.py       # Git 작업 (5개 도구) ✅
 │   │   ├── github_tool.py    # GitHub API (4개 도구) ✅
 │   │   ├── jira_tool.py      # Jira API (예정)
 │   │   └── slack_tool.py     # Slack 알림 (예정)
+│   ├── synapse_finance_tool.py  # Synapse Finance Tool API (8개 도구) ✅
 │   ├── base.py              # 기본 도구 클래스
 │   └── __init__.py
 │
@@ -252,10 +254,10 @@ alembic upgrade head
 
 ```bash
 # 개발 모드
-uvicorn api.main:app --reload --host 0.0.0.0 --port 9000
+uvicorn main:app --reload --host 0.0.0.0 --port 9000
 
 # 프로덕션 모드
-uvicorn api.main:app --host 0.0.0.0 --port 9000 --workers 4
+uvicorn main:app --host 0.0.0.0 --port 9000 --workers 4
 ```
 
 ### 6. API 문서 확인
@@ -496,6 +498,30 @@ mypy core domains api tools
   - Redis Pub/Sub 발행 및 신호 저장 (백엔드 구현 완료)
   - 전체 통합 진행률: 100% ✅
 
+### ✅ 완료된 작업 (SSE 재연결 및 페이로드 버전 - 2026-02-01)
+
+- [x] **SSE 이벤트 페이로드 version 필드**
+  - 모든 SSE 이벤트에 `version: "1.0"` 포함
+  - `api/schemas/events.py`: SSEEventPayloadBase, 각 이벤트 모델 상속
+- [x] **SSE 재연결 정책 문서** (`docs/backend-integration/SSE_RECONNECT_POLICY.md`)
+  - `id: <eventId>` 필수, Last-Event-ID 이후 이벤트만 재전송
+  - At-least-once + 클라이언트 dedupe(id) 정책
+  - 모든 종료 경로에서 `data: [DONE]\n\n` 보장
+
+### ✅ 완료된 작업 (Finance Domain v1 - 2026-02-01)
+
+- [x] **Finance 도메인 에이전트**
+  - `domains/finance/agents/finance_agent.py` - LangGraph 기반
+  - AgentState: tenant_id, user_id, goal, context(caseId/documentIds/entityIds/openItemIds), evidence, pending_approvals
+- [x] **Synapse Finance Tool API** (`tools/synapse_finance_tool.py`)
+  - get_case, search_documents, get_document, get_entity, get_open_items
+  - simulate_action, propose_action(HITL), execute_action
+  - X-Tenant-ID, X-User-ID, Authorization(JWT) 헤더 포함
+- [x] **Finance API 엔드포인트**
+  - POST /agents/finance/stream - SSE 스트리밍 (trace_id, case_id, tenant_id 포함)
+  - POST /agents/finance/approve - HITL 승인/거절
+- [x] **테스트** - pytest 단위 테스트 (tool mocking, agent 구조 검증)
+
 ### 🚧 진행 중 (Phase 4: 고도화)
 
 - [ ] `database/session.py` - SQLAlchemy 세션 관리
@@ -537,7 +563,7 @@ mypy core domains api tools
 
 ### Q3 2026: 다중 도메인 확장
 - HR Domain 추가 (채용, 온보딩)
-- Finance Domain 추가 (예산 관리)
+- ~~Finance Domain 추가~~ ✅ (2026-02 완료: Synapse Tool API, HITL)
 - 도메인 간 협업 워크플로우
 
 ### Q4 2026: 엔터프라이즈 기능
@@ -551,6 +577,14 @@ mypy core domains api tools
 ## 📝 변경 이력
 
 모든 주요 변경사항은 [CHANGELOG.md](CHANGELOG.md)에 기록됩니다.
+
+### [0.3.4] - 2026-02-01
+
+**Added**
+- Finance Domain v1: LangGraph 에이전트, Synapse Tool API (8개 도구), HITL 연동
+- SSE 이벤트 페이로드 version 필드, SSE 재연결 정책 문서
+- `core/context.py` - 요청 스코프 컨텍스트 (Synapse 헤더 전달)
+- `core/config.py` - synapse_base_url, finance_domain_enabled
 
 ### [0.3.1] - 2026-01-16
 
@@ -649,6 +683,15 @@ DWP Development Team
 ## 📞 문의
 
 프로젝트 관련 문의사항은 이슈 트래커를 통해 등록해주세요.
+
+---
+
+## ⚠️ 문서 통합 예정
+
+- **`README.md`** (루트): 프로젝트 개요, 아키텍처, 설치, 진행 상황
+- **`docs/README.md`**: docs 폴더 구조 및 문서 찾기 가이드
+
+> **참고**: `docs/README.md`와 루트 `README.md`가 역할이 다르나 내용 중복 가능성이 있어, 내일 확인 후 하나로 통합하고 하나는 삭제할 예정입니다.
 
 ---
 

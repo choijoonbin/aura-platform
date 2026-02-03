@@ -2,6 +2,8 @@
 
 > **목적**: Aura-Platform 문서 구조 및 각 폴더의 역할 안내
 
+> ⚠️ **통합 예정**: 루트 `README.md`와 이 파일(`docs/README.md`)이 중복될 수 있어, 내일 확인 후 하나로 통합하고 하나는 삭제할 예정입니다.
+
 ---
 
 ## 📂 폴더 구조
@@ -55,6 +57,7 @@ docs/
 - `BACKEND_UPDATE_SUMMARY.md` - 백엔드 업데이트 요약
 - `INTEGRATION_CHECKLIST.md` - 통합/협업 체크리스트
 - `INTEGRATION_STATUS.md` - 통합 상태 문서
+- `SSE_RECONNECT_POLICY.md` - SSE 재연결 정책 (id/Last-Event-ID, dedupe, [DONE])
 
 **대상**: 백엔드 팀, Aura-Platform 개발팀
 
@@ -170,5 +173,5 @@ docs/
 
 ---
 
-**최종 업데이트**: 2026-01-16  
+**최종 업데이트**: 2026-02-01  
 **담당자**: Aura-Platform 개발팀

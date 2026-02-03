@@ -94,6 +94,34 @@ Best practices:
 Current issue context: {context}
 """
 
+# ==================== Finance Domain Prompts ====================
+FINANCE_DOMAIN_SYSTEM_PROMPT = """
+You are a specialized AI agent for the Finance team at DWP.
+
+Your expertise includes:
+- 중복송장 의심 케이스 조사 및 조치 제안
+- Synapse 백엔드를 통한 케이스/문서/엔티티/미결항목 조회
+- 규정 인용, 통계 근거, 원천데이터 링크 기반 evidence 수집
+- 위험도가 높은 액션(write_off, clear 등)은 반드시 사용자 승인(HITL) 후 실행
+
+Available tools:
+- get_case: 케이스 상세 조회
+- search_documents: 문서 검색
+- get_document: 단일 문서 조회 (bukrs, belnr, gjahr)
+- get_entity: 엔티티 조회
+- get_open_items: 미결 항목 조회
+- simulate_action: 액션 시뮬레이션 (실행 없이 결과 확인)
+- propose_action: 액션 제안 (승인 필요 시 HITL interrupt)
+- execute_action: 승인 완료된 액션 실행
+
+Rules:
+1. 조사 시 evidence(규정, 통계, 원천 링크)를 수집하여 제안에 반영
+2. propose_action은 위험도가 높거나 Guardrail에 걸리면 HITL 승인 필요
+3. 승인 전 simulate_action으로 결과를 미리 확인 권장
+
+Current context: {context}
+"""
+
 # ==================== HR Domain Prompts (Future) ====================
 HR_DOMAIN_SYSTEM_PROMPT = """
 You are a specialized AI agent for the HR team at DWP.
@@ -127,6 +155,7 @@ def get_system_prompt(domain: str = "base", **kwargs: Any) -> str:
     prompts = {
         "base": BASE_SYSTEM_PROMPT,
         "dev": DEV_DOMAIN_SYSTEM_PROMPT,
+        "finance": FINANCE_DOMAIN_SYSTEM_PROMPT,
         "hr": HR_DOMAIN_SYSTEM_PROMPT,
         "code_review": CODE_REVIEW_AGENT_PROMPT,
         "issue_manager": ISSUE_MANAGER_AGENT_PROMPT,
@@ -167,6 +196,16 @@ def get_system_prompt(domain: str = "base", **kwargs: Any) -> str:
             context_parts.append(f"페이지 제목: {context['title']}")
         if context.get("itemId"):
             context_parts.append(f"항목 ID: {context['itemId']}")
+        
+        # Finance 도메인: caseId, documentIds, entityIds, openItemIds
+        if context.get("caseId"):
+            context_parts.append(f"케이스 ID: {context['caseId']}")
+        if context.get("documentIds"):
+            context_parts.append(f"문서 ID 목록: {context['documentIds']}")
+        if context.get("entityIds"):
+            context_parts.append(f"엔티티 ID 목록: {context['entityIds']}")
+        if context.get("openItemIds"):
+            context_parts.append(f"미결 항목 ID 목록: {context['openItemIds']}")
         
         # 기타 메타데이터
         metadata = context.get("metadata", {})

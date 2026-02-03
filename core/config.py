@@ -190,9 +190,34 @@ class Settings(BaseSettings):
         default=True,
         description="Dev Domain 활성화 여부"
     )
+    finance_domain_enabled: bool = Field(
+        default=True,
+        description="Finance Domain 활성화 여부"
+    )
     hr_domain_enabled: bool = Field(
         default=False,
         description="HR Domain 활성화 여부"
+    )
+    
+    # ==================== Synapse Backend (Finance Tool API) ====================
+    synapse_base_url: str = Field(
+        default="http://localhost:8081",
+        description="Synapse 백엔드 Tool API Base URL (Finance 도메인용)",
+    )
+    synapse_timeout: float = Field(
+        default=30.0,
+        gt=0,
+        description="Synapse HTTP 요청 타임아웃 (초)",
+    )
+    synapse_max_retries: int = Field(
+        default=3,
+        ge=0,
+        description="5xx/timeout 시 최대 재시도 횟수",
+    )
+    hitl_timeout_seconds: int = Field(
+        default=300,
+        gt=0,
+        description="HITL 승인 대기 타임아웃 (초, 기본 5분)",
     )
     
     # ==================== Integration Settings ====================

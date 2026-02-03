@@ -8,7 +8,8 @@ packages = [{include = "core"}, {include = "domains"}, {include = "api"}, {inclu
 
 [tool.poetry.dependencies]
 python = "^3.10"
-langgraph = "^0.2.0"
+langgraph = "^1.0.0"
+langgraph-checkpoint-sqlite = "^3.0.0"
 langchain = "^0.3.0"
 langchain-openai = "^0.2.0"
 langchain-core = "^0.3.0"
