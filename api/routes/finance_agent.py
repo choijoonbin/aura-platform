@@ -41,10 +41,17 @@ class FinanceStreamRequest(BaseModel):
     thread_id: str | None = Field(default=None, description="스레드 ID")
 
 
-def _enrich_event_data(data: dict[str, Any], trace_id: str, case_id: str | None, tenant_id: str) -> dict[str, Any]:
-    """이벤트 data에 trace_id, case_id, tenant_id 추가"""
+def _enrich_event_data(
+    data: dict[str, Any],
+    trace_id: str,
+    case_id: str | None,
+    tenant_id: str,
+    user_id: str,
+) -> dict[str, Any]:
+    """이벤트 data에 trace_id, tenant_id, user_id, case_id 추가 (P0-2)"""
     data["trace_id"] = trace_id
     data["tenant_id"] = tenant_id
+    data["user_id"] = user_id
     if case_id:
         data["case_id"] = case_id
     return data
@@ -57,6 +64,7 @@ async def finance_stream(
     tenant_id: TenantId,
     req: Request,
     last_event_id: str | None = Header(None, alias="Last-Event-ID"),
+    x_user_id: str | None = Header(None, alias="X-User-ID"),
 ):
     """
     Finance 에이전트 SSE 스트리밍
@@ -85,6 +93,23 @@ async def finance_stream(
     )
     
     async def event_generator():
+        # X-User-ID 헤더 검증 (JWT sub와 일치해야 함) — P0-1
+        if x_user_id and x_user_id != user.user_id:
+            logger.warning(
+                f"X-User-ID mismatch: header={x_user_id}, jwt_sub={user.user_id}, "
+                f"tenant_id={tenant_id_val}, trace_id={trace_id}"
+            )
+            error_data = {
+                "type": "error",
+                "error": "X-User-ID does not match JWT sub claim",
+                "errorType": "ValidationError",
+                "message": f"X-User-ID header ({x_user_id}) does not match JWT sub claim ({user.user_id})",
+                "timestamp": int(datetime.utcnow().timestamp()),
+            }
+            yield format_sse_event("error", error_data, "0")
+            yield "data: [DONE]\n\n"
+            return
+
         event_queue: list[dict[str, Any]] = []
         session_id = f"finance_{user.user_id}_{int(datetime.utcnow().timestamp())}"
         
@@ -100,7 +125,7 @@ async def finance_stream(
         try:
             start_data = _enrich_event_data(
                 {"type": "start", "message": "Finance agent started", "timestamp": int(datetime.utcnow().timestamp())},
-                trace_id, case_id, tenant_id_val,
+                trace_id, case_id, tenant_id_val, user.user_id,
             )
             event_id_counter += 1
             yield format_sse_event("start", start_data, str(event_id_counter))
@@ -154,7 +179,7 @@ async def finance_stream(
                                 )
                                 hitl_data = _enrich_event_data(
                                     hitl_event.model_dump(),
-                                    trace_id, case_id, tenant_id_val,
+                                    trace_id, case_id, tenant_id_val, user.user_id,
                                 )
                                 event_id_counter += 1
                                 yield format_sse_event("hitl", hitl_data, str(event_id_counter))
@@ -173,7 +198,7 @@ async def finance_stream(
                                         "requestId": request_id,
                                         "sessionId": session_id,
                                         "timestamp": int(datetime.utcnow().timestamp()),
-                                    }, trace_id, case_id, tenant_id_val)
+                                    }, trace_id, case_id, tenant_id_val, user.user_id)
                                     event_id_counter += 1
                                     yield format_sse_event("failed", failed_data, str(event_id_counter))
                                     error_data = _enrich_event_data({
@@ -181,7 +206,7 @@ async def finance_stream(
                                         "error": f"HITL 승인 요청이 {settings.hitl_timeout_seconds}초 내에 응답되지 않아 작업이 중단되었습니다.",
                                         "errorType": "TimeoutError",
                                         "timestamp": int(datetime.utcnow().timestamp()),
-                                    }, trace_id, case_id, tenant_id_val)
+                                    }, trace_id, case_id, tenant_id_val, user.user_id)
                                     event_id_counter += 1
                                     yield format_sse_event("error", error_data, str(event_id_counter))
                                     end_data = _enrich_event_data({
@@ -189,7 +214,7 @@ async def finance_stream(
                                         "message": "작업이 타임아웃으로 인해 중단되었습니다",
                                         "status": "failed",
                                         "timestamp": int(datetime.utcnow().timestamp()),
-                                    }, trace_id, case_id, tenant_id_val)
+                                    }, trace_id, case_id, tenant_id_val, user.user_id)
                                     event_id_counter += 1
                                     yield format_sse_event("end", end_data, str(event_id_counter))
                                     yield "data: [DONE]\n\n"
@@ -254,7 +279,7 @@ async def finance_stream(
                     event_type = event.get("type", "message")
                     enriched = _enrich_event_data(
                         event,
-                        trace_id, case_id, tenant_id_val,
+                        trace_id, case_id, tenant_id_val, user.user_id,
                     )
                     event_id_counter += 1
                     yield format_sse_event(event_type, enriched, str(event_id_counter))
@@ -264,7 +289,7 @@ async def finance_stream(
                 "type": "end",
                 "message": "Finance agent finished",
                 "timestamp": int(datetime.utcnow().timestamp()),
-            }, trace_id, case_id, tenant_id_val)
+            }, trace_id, case_id, tenant_id_val, user.user_id)
             event_id_counter += 1
             yield format_sse_event("end", end_data, str(event_id_counter))
             yield "data: [DONE]\n\n"
@@ -276,7 +301,7 @@ async def finance_stream(
                 "error": str(e),
                 "errorType": type(e).__name__,
                 "timestamp": int(datetime.utcnow().timestamp()),
-            }, trace_id, case_id, tenant_id_val)
+            }, trace_id, case_id, tenant_id_val, user.user_id)
             event_id_counter += 1
             yield format_sse_event("error", error_data, str(event_id_counter))
             yield "data: [DONE]\n\n"

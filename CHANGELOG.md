@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **SSE/HITL 추가 작업 여부 확인** (2026-02-01)
+  - `docs/guides/SSE_HITL_ADDITIONAL_WORK_VERIFICATION.md`: P0/P1/P2 완료 검증, 4항목 ✅ 확정, "Aura 추가 작업 없음" 결론
+- **SSE/HITL P0 실행 체크리스트 구현 (P0-1, P0-2)** (2026-02-01)
+  - P0-1: Finance stream `X-User-ID` 헤더 수용 및 JWT `sub` 검증 — 불일치 시 SSE `event: error` + [DONE] (aura_backend 패턴 통일)
+  - P0-2: `_enrich_event_data`에 `user_id` 추가 — 모든 SSE 이벤트 payload에 trace_id, tenant_id, user_id, case_id 일관 포함
+  - `docs/guides/SSE_HITL_EXECUTION_CHECKLIST.md`: 실행 체크리스트, DoD, 검증 시나리오, FE/BE 계약 문구
 - **Agent Stream 실제 로그 연동 (Prompt C)** (2026-02-01)
   - agent_event 스키마: tenantId, timestamp, stage, message, caseKey/caseId, severity, traceId
   - Aura → Synapse REST push: POST /api/synapse/agent/events (batch)
