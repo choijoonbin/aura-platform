@@ -20,13 +20,23 @@ def set_request_context(
     user_id: str,
     auth_token: str | None,
     trace_id: str | None = None,
+    gateway_request_id: str | None = None,
+    case_id: str | None = None,
+    case_key: str | None = None,
 ) -> None:
-    """요청 컨텍스트 설정 (스트림 핸들러 시작 시 호출)"""
+    """요청 컨텍스트 설정 (스트림 핸들러 시작 시 호출)
+    
+    C-2: correlation 키(traceId, gatewayRequestId, caseId, caseKey, actionId)를
+    Audit evidence_json에 보강하기 위해 case_id, case_key를 저장합니다.
+    """
     _request_context.set({
         "tenant_id": tenant_id,
         "user_id": user_id,
         "auth_token": auth_token,
         "trace_id": trace_id,
+        "gateway_request_id": gateway_request_id,
+        "case_id": case_id,
+        "case_key": case_key,
     })
 
 

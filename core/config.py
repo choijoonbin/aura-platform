@@ -219,7 +219,31 @@ class Settings(BaseSettings):
         gt=0,
         description="HITL 승인 대기 타임아웃 (초, 기본 5분)",
     )
-    
+    audit_events_enabled: bool = Field(
+        default=True,
+        description="Audit 이벤트 발행 활성화 (Synapse audit_event_log 연동)",
+    )
+    audit_delivery_mode: str = Field(
+        default="redis",
+        description="전달 방식: redis(2안, 권장) | http(1안). redis=Redis Pub/Sub, Synapse가 구독하여 audit_event_log 저장",
+    )
+    audit_redis_channel: str = Field(
+        default="audit:events:ingest",
+        description="Redis Pub/Sub 채널 (audit_delivery_mode=redis 시 사용)",
+    )
+    audit_ingest_url: str | None = Field(
+        default=None,
+        description="Audit API URL (audit_delivery_mode=http 시, 미지정 시 synapse_base_url + /api/synapse/audit/events/ingest)",
+    )
+    agent_stream_events_enabled: bool = Field(
+        default=True,
+        description="Agent Stream 이벤트 push 활성화 (Prompt C: Dashboard Agent Execution Stream)",
+    )
+    agent_stream_push_url: str | None = Field(
+        default=None,
+        description="Agent Stream push URL (미지정 시 synapse_base_url + /api/synapse/agent/events)",
+    )
+
     # ==================== Integration Settings ====================
     github_token: str | None = Field(
         default=None,

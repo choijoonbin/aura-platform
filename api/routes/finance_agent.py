@@ -66,16 +66,22 @@ async def finance_stream(
     각 이벤트 data에 trace_id, case_id, tenant_id 포함.
     """
     trace_id = str(uuid.uuid4())
-    case_id = request.context.get("caseId") if request.context else None
+    ctx = request.context or {}
+    case_id = ctx.get("caseId") or ctx.get("case_id")
+    case_key = ctx.get("caseKey") or ctx.get("case_key")
     tenant_id_val = tenant_id or "default"
+    gateway_request_id = req.headers.get("X-Request-ID") or req.headers.get("X-Gateway-Request-ID")
     
-    # Synapse Tool API 호출 시 사용할 컨텍스트 설정 (tenant/user/trace headers)
+    # Synapse Tool API 호출 시 사용할 컨텍스트 설정 (C-2: correlation 키 포함)
     auth_header = req.headers.get("Authorization")
     set_request_context(
         tenant_id=tenant_id_val,
         user_id=user.user_id,
         auth_token=auth_header,
         trace_id=trace_id,
+        gateway_request_id=gateway_request_id,
+        case_id=case_id,
+        case_key=case_key,
     )
     
     async def event_generator():
@@ -193,6 +199,17 @@ async def finance_stream(
                                     resume_value = {"approved": False}
                                 else:
                                     resume_value = {"approved": signal.get("approved", True)}
+                                    try:
+                                        from core.audit import AgentAuditEvent
+                                        from core.audit.writer import get_audit_writer
+                                        event = AgentAuditEvent.action_approved(
+                                            tenant_id=tenant_id_val,
+                                            action_id=request_id,
+                                            trace_id=trace_id,
+                                        )
+                                        get_audit_writer().ingest_fire_and_forget(event)
+                                    except Exception:
+                                        pass
                                 logger.info(f"Finance HITL: {request_id} -> {resume_value}")
                                 break
                             stream_done = False

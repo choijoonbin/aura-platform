@@ -8,11 +8,13 @@ Aura는 Postgres를 직접 읽지 않고 Synapse를 통해 데이터를 조회�
 - 모든 호출: X-Tenant-ID, X-User-ID, X-Trace-ID, Authorization(JWT)
 - 5xx/timeout 시 exponential backoff + max retry
 - simulate/execute: X-Idempotency-Key로 중복 방지
+- Audit: 주요 단계에서 audit_event_log용 이벤트 발행 (C-1 명세)
 """
 
 import asyncio
 import json
 import logging
+import time
 import uuid
 from typing import Any
 
@@ -21,11 +23,20 @@ from langchain_core.tools import tool
 from pydantic import Field
 
 from core.config import settings
-from core.context import get_synapse_headers
+from core.context import get_request_context, get_synapse_headers
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = settings.synapse_base_url.rstrip("/")
+
+
+def _emit_audit_event(event: Any) -> None:
+    """Audit 이벤트 발행 (fire-and-forget)"""
+    try:
+        from core.audit.writer import get_audit_writer
+        get_audit_writer().ingest_fire_and_forget(event)
+    except Exception as e:
+        logger.debug(f"Audit emit skipped: {e}")
 TIMEOUT = settings.synapse_timeout
 MAX_RETRIES = settings.synapse_max_retries
 
@@ -129,7 +140,27 @@ async def get_case(caseId: str = Field(..., description="케이스 ID")) -> str:
     Synapse 백엔드 Tool API를 통해 중복송장 의심 케이스 등의 상세를 가져옵니다.
     """
     try:
-        return await _synapse_get(f"/tools/finance/cases/{caseId}")
+        result = await _synapse_get(f"/tools/finance/cases/{caseId}")
+        try:
+            parsed = json.loads(result)
+            if parsed.get("riskTypeKey") or parsed.get("risk_type") or parsed.get("score") is not None:
+                from core.audit import AgentAuditEvent
+                ctx = get_request_context()
+                risk_key = parsed.get("riskTypeKey") or parsed.get("risk_type") or "unknown"
+                score = float(parsed.get("score", 0)) if parsed.get("score") is not None else 0.0
+                case_key = parsed.get("caseKey") or parsed.get("case_key") or ctx.get("case_key")
+                event = AgentAuditEvent.detection_found(
+                    tenant_id=ctx.get("tenant_id") or "default",
+                    case_id=caseId,
+                    risk_type_key=str(risk_key),
+                    score=score,
+                    trace_id=ctx.get("trace_id"),
+                    caseKey=case_key,
+                )
+                _emit_audit_event(event)
+        except (json.JSONDecodeError, TypeError, KeyError):
+            pass
+        return result
     except httpx.HTTPStatusError as e:
         logger.error(f"get_case failed: {e}")
         return json.dumps({"error": str(e), "status_code": e.response.status_code})
@@ -150,8 +181,28 @@ async def search_documents(
     
     filters에 caseId, documentIds, dateRange 등을 지정할 수 있습니다.
     """
+    start = time.perf_counter()
     try:
-        return await _synapse_post("/tools/finance/documents/search", filters)
+        result = await _synapse_post("/tools/finance/documents/search", filters)
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        doc_ids = filters.get("documentIds") or []
+        if isinstance(doc_ids, str):
+            doc_ids = [doc_ids]
+        top_k = filters.get("topK") or filters.get("top_k") or filters.get("size") or 10
+        try:
+            from core.audit import AgentAuditEvent
+            ctx = get_request_context()
+            event = AgentAuditEvent.rag_queried(
+                tenant_id=ctx.get("tenant_id") or "default",
+                doc_ids=doc_ids[:20] if isinstance(doc_ids, list) else [],
+                top_k=int(top_k) if isinstance(top_k, (int, float)) else 10,
+                latency_ms=latency_ms,
+                trace_id=ctx.get("trace_id"),
+            )
+            _emit_audit_event(event)
+        except Exception:
+            pass
+        return result
     except httpx.HTTPStatusError as e:
         logger.error(f"search_documents failed: {e}")
         return json.dumps({"error": str(e), "status_code": e.response.status_code})
@@ -231,13 +282,37 @@ async def simulate_action(
     액션을 시뮬레이션합니다. 실제 실행 없이 결과를 미리 확인합니다.
     X-Idempotency-Key로 중복 호출 방지.
     """
-    key = idempotency_key or f"sim_{uuid.uuid4().hex[:16]}"
+    key = idempotency_key if isinstance(idempotency_key, str) else f"sim_{uuid.uuid4().hex[:16]}"
+    action_id = f"sim_{caseId}_{actionType}_{key[:8]}"
     try:
-        return await _synapse_post(
+        result = await _synapse_post(
             "/tools/finance/actions/simulate",
             {"caseId": caseId, "actionType": actionType, "payload": payload},
             idempotency_key=key,
         )
+        try:
+            parsed = json.loads(result)
+            sim_result = parsed.get("result") or parsed.get("status") or "PASS"
+            diff_json = parsed.get("diffJson") or parsed.get("diff") or {}
+            result_id = parsed.get("actionId") or action_id
+        except (json.JSONDecodeError, TypeError):
+            sim_result, diff_json, result_id = "PASS", {}, action_id
+        try:
+            from core.audit import AgentAuditEvent
+            ctx = get_request_context()
+            event = AgentAuditEvent.simulation_run(
+                tenant_id=ctx.get("tenant_id") or "default",
+                action_id=result_id,
+                result=sim_result,
+                diff_json=diff_json,
+                trace_id=ctx.get("trace_id"),
+                caseId=caseId,
+                caseKey=ctx.get("case_key"),
+            )
+            _emit_audit_event(event)
+        except Exception:
+            pass
+        return result
     except httpx.HTTPStatusError as e:
         logger.error(f"simulate_action failed: {e}")
         return json.dumps({"error": str(e), "status_code": e.response.status_code})
@@ -257,11 +332,34 @@ async def propose_action(
     
     승인 필요 시 에이전트가 interrupt되고, 사용자 승인 후 execute_action으로 실행됩니다.
     """
+    action_id = f"prop_{caseId}_{actionType}_{uuid.uuid4().hex[:8]}"
     try:
-        return await _synapse_post(
+        result = await _synapse_post(
             "/tools/finance/actions/propose",
             {"caseId": caseId, "actionType": actionType, "payload": payload},
         )
+        try:
+            parsed = json.loads(result)
+            result_id = parsed.get("actionId") or parsed.get("id") or action_id
+        except (json.JSONDecodeError, TypeError):
+            result_id = action_id
+        try:
+            from core.audit import AgentAuditEvent
+            ctx = get_request_context()
+            case_key = ctx.get("case_key")
+            event = AgentAuditEvent.action_proposed(
+                tenant_id=ctx.get("tenant_id") or "default",
+                action_id=result_id,
+                requires_approval=True,
+                trace_id=ctx.get("trace_id"),
+                caseId=caseId,
+                caseKey=case_key,
+                actionType=actionType,
+            )
+            _emit_audit_event(event)
+        except Exception:
+            pass
+        return result
     except httpx.HTTPStatusError as e:
         logger.error(f"propose_action failed: {e}")
         return json.dumps({"error": str(e), "status_code": e.response.status_code})
@@ -286,14 +384,70 @@ async def execute_action(
     """
     key = idempotency_key or actionId
     try:
-        return await _synapse_post(
+        result = await _synapse_post(
             "/tools/finance/actions/execute",
             {"actionId": actionId},
             idempotency_key=key,
         )
+        try:
+            parsed = json.loads(result)
+            outcome = "SUCCESS" if not parsed.get("error") else "FAIL"
+            sap_ref = parsed.get("sapRef") or parsed.get("sap_ref") or parsed.get("reference")
+        except (json.JSONDecodeError, TypeError):
+            outcome, sap_ref, parsed = "SUCCESS", None, {}
+        try:
+            from core.audit import AgentAuditEvent
+            ctx = get_request_context()
+            event = AgentAuditEvent.action_executed(
+                tenant_id=ctx.get("tenant_id") or "default",
+                action_id=actionId,
+                outcome=outcome,
+                sap_ref=sap_ref,
+                trace_id=ctx.get("trace_id"),
+                caseId=ctx.get("case_id"),
+                caseKey=ctx.get("case_key"),
+            )
+            _emit_audit_event(event)
+            if outcome == "SUCCESS" and sap_ref:
+                sap_event = AgentAuditEvent.sap_write_success(
+                    tenant_id=ctx.get("tenant_id") or "default",
+                    sap_ref=sap_ref,
+                    resource_id=actionId,
+                    trace_id=ctx.get("trace_id"),
+                )
+                _emit_audit_event(sap_event)
+            elif outcome == "FAIL":
+                err_msg = parsed.get("error", "Unknown error") if parsed else "Unknown error"
+                sap_event = AgentAuditEvent.sap_write_failed(
+                    tenant_id=ctx.get("tenant_id") or "default",
+                    sap_ref=sap_ref,
+                    error=str(err_msg),
+                    resource_id=actionId,
+                    trace_id=ctx.get("trace_id"),
+                )
+                _emit_audit_event(sap_event)
+        except Exception:
+            pass
+        return result
     except httpx.HTTPStatusError as e:
         logger.error(f"execute_action failed: {e}")
-        return json.dumps({"error": str(e), "status_code": e.response.status_code})
+        err_result = json.dumps({"error": str(e), "status_code": e.response.status_code})
+        try:
+            from core.audit import AgentAuditEvent
+            ctx = get_request_context()
+            event = AgentAuditEvent.action_executed(
+                tenant_id=ctx.get("tenant_id") or "default",
+                action_id=actionId,
+                outcome="FAIL",
+                sap_ref=None,
+                trace_id=ctx.get("trace_id"),
+                caseId=ctx.get("case_id"),
+                caseKey=ctx.get("case_key"),
+            )
+            _emit_audit_event(event)
+        except Exception:
+            pass
+        return err_result
     except Exception as e:
         logger.error(f"execute_action failed: {e}")
         return json.dumps({"error": str(e)})

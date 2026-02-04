@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Agent Stream 실제 로그 연동 (Prompt C)** (2026-02-01)
+  - agent_event 스키마: tenantId, timestamp, stage, message, caseKey/caseId, severity, traceId
+  - Aura → Synapse REST push: POST /api/synapse/agent/events (batch)
+  - Audit 발행 시 자동 Agent Stream push (core/audit/writer 연동)
+  - stage 매핑: SCAN/DETECT/ANALYZE/SIMULATE/EXECUTE/MATCH
+  - scripts/seed_agent_stream_events.py: 20건+ 샘플 이벤트 시드
+  - docs/guides/AGENT_STREAM_SPEC.md
+- **Audit Event 대시보드 보강 (C-1/C-2/C-3)** (2026-02-01)
+  - C-1: event_category CASE 추가, SIMULATION_RUN→ACTION 카테고리, case_created/case_status_changed/case_assigned 헬퍼
+  - C-2: evidence_json correlation 키(traceId, gatewayRequestId, caseId, caseKey, actionId) 보장, context에 case_id/case_key 추가
+  - C-3: DETECTION_FOUND tags(driverType, severity), ACTION_PROPOSED 승인대기 시점 기록
+  - `core/context.py`: set_request_context에 case_id, case_key 파라미터 추가
+  - `api/routes/finance_agent.py`: 요청 context에서 caseKey 추출 후 set_request_context 전달
+  - `docs/handoff/AUDIT_DASHBOARD_CONFIRMATION_ITEMS.md`: 시스템별 확인사항 정리
 - **Finance Agent HITL interrupt/resume (LangGraph + Checkpointer)** (2026-02-03)
   - LangGraph `interrupt()` 기반 HITL: `_tools_node`에서 propose_action 등 승인 필요 시 `interrupt(payload)` 호출
   - `Command(resume=...)`로 재개: route에서 Redis Pub/Sub 신호 수신 후 `stream(resume_value=...)` 호출

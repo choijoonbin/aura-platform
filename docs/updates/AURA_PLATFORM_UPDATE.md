@@ -2,7 +2,8 @@
 
 > **대상**: Aura-Platform 개발팀  
 > **전달 일자**: 2026-01-16  
-> **DWP Backend 버전**: v1.0
+> **DWP Backend 버전**: v1.0  
+> **원본**: `dwp-backend/docs/integration/AURA_PLATFORM_UPDATE.md`
 
 ---
 
@@ -32,7 +33,18 @@ DWP Backend에서 완료된 작업 및 Aura-Platform에 전달할 업데이트 �
 
 ---
 
-### 2. 포트 변경 사항
+### 2. 프론트엔드 API 스펙 반영 ✅
+
+**프론트엔드 요구사항** (2026-01-16):
+- ✅ SSE 엔드포인트: `POST /api/aura/test/stream` (GET → POST 변경)
+- ✅ 요청 본문: `prompt`와 `context` 객체 포함
+- ✅ SSE 이벤트 타입 상세 정의
+- ✅ 새로운 이벤트 타입: `timeline_step_update`, `plan_step_update`
+- ✅ 스트림 종료: `data: [DONE]` 형식
+
+---
+
+### 3. 포트 변경 사항
 
 **변경 전**:
 - Auth Server: 포트 8000
@@ -48,7 +60,7 @@ DWP Backend에서 완료된 작업 및 Aura-Platform에 전달할 업데이트 �
 
 ---
 
-### 3. HITL 신호 형식
+### 4. HITL 신호 형식
 
 **승인 신호**:
 ```json
@@ -77,7 +89,46 @@ DWP Backend에서 완료된 작업 및 Aura-Platform에 전달할 업데이트 �
 
 ## 🔧 Aura-Platform에서 확인할 사항
 
-### 1. 포트 설정
+### 1. SSE 엔드포인트 변경 (중요 ⚠️)
+
+**변경 사항**:
+- **이전**: `GET /api/aura/test/stream?message={message}`
+- **현재**: `POST /api/aura/test/stream`
+
+**요청 형식**:
+```http
+POST /api/aura/test/stream
+Content-Type: application/json
+Authorization: Bearer {JWT_TOKEN}
+X-Tenant-ID: {TENANT_ID}
+
+{
+  "prompt": "사용자 질문",
+  "context": {
+    "url": "http://localhost:4200/mail",
+    "path": "/mail",
+    "title": "메일 인박스",
+    "activeApp": "mail",
+    "itemId": "msg-123",
+    "metadata": {
+      "headings": ["받은 메일함", "중요 메일"],
+      "hasTables": true,
+      "tableCount": 1
+    }
+  }
+}
+```
+
+**응답 형식**: `text/event-stream`
+
+**스트림 종료**:
+```
+data: [DONE]\n\n
+```
+
+---
+
+### 2. 포트 설정
 
 **Aura-Platform 실행 시 포트 확인**:
 ```bash
@@ -92,7 +143,7 @@ export PORT=9000
 
 ---
 
-### 2. Gateway 라우팅 확인
+### 3. Gateway 라우팅 확인
 
 **Gateway를 통한 접근**:
 - `http://localhost:8080/api/aura/test/stream` → Aura-Platform (포트 9000)
@@ -106,7 +157,20 @@ export PORT=9000
 
 ---
 
-### 3. Redis Pub/Sub 채널
+### 4. SSE 이벤트 타입 (프론트엔드 요구사항)
+
+**필수 이벤트 타입**:
+- `thought` / `thinking` - 사고 과정
+- `plan_step` - 작업 계획 단계
+- `plan_step_update` - 계획 단계 상태 업데이트 (선택)
+- `tool_execution` / `action` - 도구 실행
+- `hitl` / `approval_required` - 승인 요청
+- `content` / `message` - 최종 결과
+- `timeline_step_update` - 타임라인 단계 업데이트 (선택)
+
+---
+
+### 5. Redis Pub/Sub 채널
 
 **구독 채널**: `hitl:channel:{sessionId}`
 
@@ -163,10 +227,12 @@ for message in pubsub.listen():
 # Aura-Platform이 포트 9000에서 실행 중인지 확인
 curl http://localhost:9000/health
 
-# Gateway를 통한 접근 확인
-curl http://localhost:8080/api/aura/test/stream?message=test \
+# Gateway를 통한 접근 확인 (POST 요청)
+curl -X POST http://localhost:8080/api/aura/test/stream \
   -H "Authorization: Bearer {TOKEN}" \
-  -H "X-Tenant-ID: tenant1"
+  -H "X-Tenant-ID: tenant1" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "테스트 메시지", "context": {}}'
 ```
 
 ---
@@ -175,9 +241,11 @@ curl http://localhost:8080/api/aura/test/stream?message=test \
 
 ```bash
 # 1. SSE 스트리밍 시작 (HITL 이벤트 발생 대기)
-curl -N http://localhost:8080/api/aura/test/stream?message=test \
+curl -N -X POST http://localhost:8080/api/aura/test/stream \
   -H "Authorization: Bearer {TOKEN}" \
-  -H "X-Tenant-ID: tenant1"
+  -H "X-Tenant-ID: tenant1" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "메일 3개를 삭제해주세요", "context": {}}'
 
 # 2. HITL 이벤트 수신 후 requestId 확인
 
@@ -213,8 +281,8 @@ redis-cli PUBSUB CHANNELS hitl:channel:*
 
 ## 🔗 관련 문서
 
-- [Aura-Platform Backend 전달 문서](./AURA_PLATFORM_BACKEND_HANDOFF.md)
-- [프론트엔드 통합 가이드](./FRONTEND_INTEGRATION_GUIDE.md)
+- **원본**: `dwp-backend/docs/integration/AURA_PLATFORM_UPDATE.md`
+- dwp-backend: `docs/FRONTEND_API_SPEC.md`, `docs/integration/FRONTEND_INTEGRATION_GUIDE.md`
 
 ---
 

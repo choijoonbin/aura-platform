@@ -257,8 +257,8 @@ data: {"type": "end", "message": "Enhanced agent finished", "timestamp": "2026-0
 ### 추가 작업 필요
 - [x] LangGraph 표준 Checkpointer 인터페이스 구현 (SqliteSaver/MemorySaver - `core/memory/checkpointer_factory.py`)
 - [x] 실제 interrupt 메커니즘 완성 (Finance Agent: LangGraph `interrupt()` + `Command(resume=...)` + checkpoint)
-- [ ] 승인 API 완성 (`/agents/v2/approve`) → **백엔드** 담당
-- [ ] HITL 승인 UI 연동 → **프론트엔드** 담당
+- [x] 승인 API 완성 (`/api/aura/hitl/approve`, `/reject`) → **백엔드** ✅ 완료 (dwp-backend `AURA_PLATFORM_UPDATE.md`)
+- [x] HITL 승인 UI 연동 → **프론트엔드** ✅ 완료 (dwp-frontend `HITL_APPROVAL_UI_INTEGRATION.md` 참고)
 - [ ] 테스트 스크립트 작성 → Aura-Platform 또는 QA
 - [ ] 문서화 완성 → Aura-Platform
 

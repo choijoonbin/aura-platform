@@ -4,14 +4,48 @@
 
 ---
 
+## ✅ 프론트엔드 HITL UI 연동 완료 (회신 반영)
+
+**dwp-frontend** 팀에서 `HITL_APPROVAL_UI_INTEGRATION.md` 전달 후 구현 완료 회신 수신 완료.
+
+**참고 문서**: `dwp-frontend/docs/reference/HITL_APPROVAL_UI_INTEGRATION.md`
+
+**구현 위치** (dwp-frontend):
+- `libs/shared-utils/src/agent/hitl-api.ts` - approveHitlRequest, rejectHitlRequest
+- `libs/shared-utils/src/agent/use-synapse-agent-stream.ts` - hitl 이벤트 파싱
+- `apps/dwp/src/components/aura/aura-mini-overlay.tsx` - Mini Overlay HITL UI
+- `apps/dwp/src/pages/aiworkspace/hooks/use-ai-workspace.ts` - Full Workspace HITL
+- `apps/remotes/synapsex/.../case-hitl-drawer.tsx`, `use-case-hitl.ts` - Case Detail HITL
+
+---
+
+## ✅ 백엔드 HITL API 완료 (회신 반영)
+
+**dwp-backend** 팀에서 HITL 승인/거절 API 구현 완료 회신.
+
+**참고 문서**: `dwp-backend/docs/integration/AURA_PLATFORM_UPDATE.md`
+
+**구현 내용**:
+- `POST /api/aura/hitl/approve/{requestId}` - 승인 처리
+- `POST /api/aura/hitl/reject/{requestId}` - 거절 처리
+- Redis Pub/Sub 신호 발행 (`hitl:channel:{sessionId}`)
+- 신호 저장 (`hitl:signal:{sessionId}`) - TTL: 5분
+- 신호 조회 API: `GET /api/aura/hitl/signals/{sessionId}` (폴링 fallback)
+
+**HITL 신호 형식** (백엔드 → Aura-Platform):
+- 승인: `{ "type": "approval", "requestId": "...", "status": "approved", "timestamp": 1706152860 }`
+- 거절: `{ "type": "rejection", "requestId": "...", "status": "rejected", "reason": "...", "timestamp": 1706152860 }`
+
+---
+
 ## 📋 담당 매트릭스
 
-| 항목 | 담당 | 입력 필요 | 출력 |
-|------|------|-----------|------|
-| 승인 API 완성 | **백엔드** (dwp_backend/Synapse) | Aura-Platform HITL 스펙 | Redis Pub/Sub 발행 API |
-| HITL 승인 UI 연동 | **프론트엔드** | SSE `hitl` 이벤트 형식, 백엔드 API 경로 | 승인/거절 버튼 → API 호출 |
-| 테스트 스크립트 | **Aura-Platform** 또는 QA | API 스펙 | E2E/통합 테스트 |
-| 문서화 완성 | **Aura-Platform** | - | API 문서, 연동 가이드 |
+| 항목 | 담당 | 상태 | 비고 |
+|------|------|------|------|
+| 승인 API 완성 | **백엔드** (dwp_backend/Synapse) | ✅ 완료 | dwp-backend `docs/integration/AURA_PLATFORM_UPDATE.md` |
+| HITL 승인 UI 연동 | **프론트엔드** | ✅ 완료 | dwp-frontend `docs/reference/HITL_APPROVAL_UI_INTEGRATION.md` |
+| 테스트 스크립트 | **Aura-Platform** 또는 QA | 대기 | E2E/통합 테스트 |
+| 문서화 완성 | **Aura-Platform** | 대기 | API 문서, 연동 가이드 |
 
 ---
 

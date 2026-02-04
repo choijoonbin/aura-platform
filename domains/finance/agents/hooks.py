@@ -2,9 +2,11 @@
 Finance Agent SSE Hooks
 
 Finance 에이전트 노드 실행 시 SSE 이벤트를 발행하는 Hook입니다.
+Audit 이벤트(SCAN_STARTED, SCAN_COMPLETED, REASONING_COMPOSED)도 발행합니다.
 """
 
 import logging
+import time
 from typing import Any
 
 from api.schemas.events import (
@@ -25,12 +27,33 @@ class FinanceSSEHook:
     
     def __init__(self, event_queue: list[dict[str, Any]]):
         self.event_queue = event_queue
+        self._scan_started_at: float | None = None
+    
+    def _emit_audit(self, event: Any) -> None:
+        """Audit 이벤트 발행 (fire-and-forget)"""
+        try:
+            from core.audit.writer import get_audit_writer
+            get_audit_writer().ingest_fire_and_forget(event)
+        except Exception as e:
+            logger.debug(f"Audit emit skipped: {e}")
     
     async def on_node_start(self, node_name: str, state: dict[str, Any]) -> None:
         """노드 시작 시 호출"""
         logger.debug(f"Finance node started: {node_name}")
         
         if node_name == "analyze":
+            self._scan_started_at = time.perf_counter()
+            try:
+                from core.audit import AgentAuditEvent
+                tenant_id = state.get("tenant_id") or "default"
+                trace_id = state.get("trace_id")
+                event = AgentAuditEvent.scan_started(
+                    tenant_id=tenant_id,
+                    trace_id=trace_id,
+                )
+                self._emit_audit(event)
+            except Exception:
+                pass
             self.event_queue.append(
                 ThoughtEvent(
                     thoughtType=ThoughtType.ANALYSIS,
@@ -102,6 +125,21 @@ class FinanceSSEHook:
                         requiresApproval=last_log.get("requiresApproval", False),
                     ).model_dump()
                 )
+            try:
+                from core.audit import AgentAuditEvent
+                from core.context import get_request_context
+                tenant_id = state.get("tenant_id") or "default"
+                trace_id = get_request_context().get("trace_id") or state.get("trace_id")
+                duration_ms = int((time.perf_counter() - (self._scan_started_at or time.perf_counter())) * 1000)
+                event = AgentAuditEvent.scan_completed(
+                    tenant_id=tenant_id,
+                    processed_count=len(execution_logs),
+                    duration_ms=duration_ms,
+                    trace_id=trace_id,
+                )
+                self._emit_audit(event)
+            except Exception:
+                pass
         elif node_name == "reflect":
             messages = state.get("messages", [])
             if messages:
@@ -110,6 +148,22 @@ class FinanceSSEHook:
                     self.event_queue.append(
                         ContentEvent(content=last_message.content, chunk=False).model_dump()
                     )
+            try:
+                from core.audit import AgentAuditEvent
+                from core.context import get_request_context
+                tenant_id = state.get("tenant_id") or "default"
+                trace_id = get_request_context().get("trace_id") or state.get("trace_id")
+                context = state.get("context") or {}
+                case_id = context.get("caseId") or context.get("case_id") or ""
+                if case_id:
+                    event = AgentAuditEvent.reasoning_composed(
+                        tenant_id=tenant_id,
+                        case_id=case_id,
+                        trace_id=trace_id,
+                    )
+                    self._emit_audit(event)
+            except Exception:
+                pass
 
 
 def create_finance_sse_hook(event_queue: list[dict[str, Any]]) -> FinanceSSEHook:
