@@ -29,26 +29,44 @@ class Settings(BaseSettings):
         env_prefix="",
     )
     
-    # ==================== OpenAI Configuration ====================
-    openai_api_key: str = Field(
-        ...,
-        description="OpenAI API Key",
-        json_schema_extra={"env": "OPENAI_API_KEY"}
+    # ==================== LLM Configuration ====================
+    # OpenAI (직접 연결) 또는 Azure OpenAI 중 하나 사용
+    openai_api_key: str | None = Field(
+        default=None,
+        description="OpenAI API Key (Azure 미사용 시 필수)",
+        json_schema_extra={"env": "OPENAI_API_KEY"},
     )
     openai_model: str = Field(
         default="gpt-4o-mini",
-        description="OpenAI 모델 이름"
+        description="OpenAI 모델 이름 (또는 Azure deployment name)",
     )
     openai_temperature: float = Field(
         default=0.7,
         ge=0.0,
         le=2.0,
-        description="LLM 응답의 창의성 제어 (0.0-2.0)"
+        description="LLM 응답의 창의성 제어 (0.0-2.0)",
     )
     openai_max_tokens: int = Field(
         default=2000,
         gt=0,
-        description="LLM 응답의 최대 토큰 수"
+        description="LLM 응답의 최대 토큰 수",
+    )
+    # Azure OpenAI (설정 시 우선 사용)
+    azure_openai_endpoint: str | None = Field(
+        default=None,
+        description="Azure OpenAI Endpoint (예: https://xxx.openai.azure.com/)",
+    )
+    azure_openai_api_key: str | None = Field(
+        default=None,
+        description="Azure OpenAI API Key",
+    )
+    azure_openai_deployment: str | None = Field(
+        default=None,
+        description="Azure deployment name (예: gpt-4o-mini). 미지정 시 openai_model 사용",
+    )
+    azure_openai_api_version: str = Field(
+        default="2024-02-15-preview",
+        description="Azure OpenAI API version",
     )
     
     # ==================== Application Configuration ====================
@@ -147,19 +165,30 @@ class Settings(BaseSettings):
         """
         if not self.secret_key and self.jwt_secret:
             self.secret_key = self.jwt_secret
-        
+
         if not self.secret_key:
             raise ValueError(
                 "SECRET_KEY or JWT_SECRET environment variable is required "
                 "(minimum 32 bytes for HS256 algorithm)"
             )
-        
+
         if len(self.secret_key) < 32:
             raise ValueError(
                 f"SECRET_KEY must be at least 32 bytes (current: {len(self.secret_key)} bytes). "
                 "For HS256 algorithm, 256-bit (32-byte) key is required."
             )
-        
+
+        return self
+
+    @model_validator(mode="after")
+    def validate_llm_config(self) -> "Settings":
+        """OpenAI 또는 Azure OpenAI 중 하나는 설정되어야 합니다."""
+        use_azure = bool(self.azure_openai_endpoint and self.azure_openai_api_key)
+        use_openai = bool(self.openai_api_key)
+        if not use_azure and not use_openai:
+            raise ValueError(
+                "LLM 설정 필요: OPENAI_API_KEY 또는 (AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_API_KEY)"
+            )
         return self
     access_token_expire_minutes: int = Field(
         default=30,
@@ -300,14 +329,25 @@ class Settings(BaseSettings):
         return self.app_env == "development"
     
     @property
+    def use_azure_openai(self) -> bool:
+        """Azure OpenAI 사용 여부"""
+        return bool(self.azure_openai_endpoint and self.azure_openai_api_key)
+
+    @property
     def openai_config(self) -> dict[str, Any]:
-        """OpenAI 설정을 딕셔너리로 반환"""
-        return {
-            "api_key": self.openai_api_key,
-            "model": self.openai_model,
+        """OpenAI/Azure 설정을 딕셔너리로 반환"""
+        base = {
+            "model": self.azure_openai_deployment or self.openai_model,
             "temperature": self.openai_temperature,
             "max_tokens": self.openai_max_tokens,
         }
+        if self.use_azure_openai:
+            base["azure_endpoint"] = self.azure_openai_endpoint
+            base["api_key"] = self.azure_openai_api_key
+            base["api_version"] = self.azure_openai_api_version
+        else:
+            base["api_key"] = self.openai_api_key
+        return base
     
     @property
     def database_config(self) -> dict[str, Any]:

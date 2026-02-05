@@ -1,18 +1,38 @@
 """
 LLM Client Module
 
-OpenAI 클라이언트를 관리하고 LangChain과의 통합을 제공합니다.
+OpenAI / Azure OpenAI 클라이언트를 관리하고 LangChain과의 통합을 제공합니다.
 Streaming 지원을 포함하여 React 프론트엔드로 실시간 응답을 전송할 수 있습니다.
 """
 
 from functools import lru_cache
 from typing import Any, AsyncGenerator
 
-from langchain_openai import ChatOpenAI
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage
 
 from core.config import settings
+
+
+def _create_chat_model(**kwargs: Any) -> BaseChatModel:
+    """설정에 따라 ChatOpenAI 또는 AzureChatOpenAI 반환"""
+    if settings.use_azure_openai:
+        from langchain_openai import AzureChatOpenAI
+        return AzureChatOpenAI(
+            azure_endpoint=settings.azure_openai_endpoint,
+            api_key=settings.azure_openai_api_key,
+            azure_deployment=settings.azure_openai_deployment or settings.openai_model,
+            api_version=settings.azure_openai_api_version,
+            temperature=kwargs.get("temperature", settings.openai_temperature),
+            max_tokens=kwargs.get("max_tokens", settings.openai_max_tokens),
+        )
+    from langchain_openai import ChatOpenAI
+    return ChatOpenAI(
+        api_key=settings.openai_api_key,
+        model=settings.openai_model,
+        temperature=kwargs.get("temperature", settings.openai_temperature),
+        max_tokens=kwargs.get("max_tokens", settings.openai_max_tokens),
+    )
 
 
 class LLMClient:
@@ -40,8 +60,8 @@ class LLMClient:
             max_tokens: 최대 토큰 수 (None이면 설정에서 로드)
             **kwargs: ChatOpenAI에 전달할 추가 파라미터
         """
-        self.api_key = api_key or settings.openai_api_key
-        self.model = model or settings.openai_model
+        self.api_key = api_key or settings.openai_api_key or settings.azure_openai_api_key
+        self.model = model or settings.azure_openai_deployment or settings.openai_model
         self.temperature = temperature if temperature is not None else settings.openai_temperature
         self.max_tokens = max_tokens or settings.openai_max_tokens
         self.extra_kwargs = kwargs
@@ -59,9 +79,7 @@ class LLMClient:
             ChatOpenAI 인스턴스
         """
         if self._client is None:
-            self._client = ChatOpenAI(
-                api_key=self.api_key,
-                model=self.model,
+            self._client = _create_chat_model(
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
                 **self.extra_kwargs,
