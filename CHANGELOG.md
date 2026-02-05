@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **E2E 재테스트 체크리스트 (P0/P1)** (2026-02-01)
+  - P0-4: HITL payload에 proposal_id, action_type, evidence_refs 포함 (severity>=HIGH & status==NEW → hitl_proposed)
+  - P1: 중복 트리거 방지 — caseId+updated_at 기반 dedup (웹훅 payload에 updatedAt 필드 추가)
+  - `docs/phase-0/aura/event-schema.md`: hitl 이벤트 스키마 보강
+- **Follow-up: P1 Evidence 확장 + Audit 정합** (2026-02-01)
+  - P1-lineage: `get_lineage` 도구 추가, evidence_gather에서 lineage 4번째 evidence로 수집
+  - P1-audit: SCAN_STARTED/COMPLETED에 caseId, caseKey, resource_type/resource_id 포함 (케이스 상세 추적)
+  - SCAN_COMPLETED: tools 노드 미경유 시 reflect에서 발행 (tools 없이 완료된 run도 audit 추적)
+  - `docs/phase-0/aura/tools-contract.md`: get_lineage, lineage evidence_refs 규칙 추가
+- **Phase 0/A/B 작업** (2026-02-01)
+  - Phase 0: docs/phase-0/aura/ — event-schema, tools-contract, state-sync
+  - Phase A: evidence_gather 노드, evidence_refs 3종, hitl proposal payload, hooks 보강
+  - Phase B: docs/phase-b/TRIGGER_POLICY_AFTER_BATCH.md — auto-start, on-open 규칙
+- **AI 기능 적용 상세 가이드** (2026-02-01)
+  - `docs/guides/AGENTIC_AI_FEATURES_GUIDE.md`: 에이전트별 기능, 트리거, 동작 흐름, 도구, HITL, LLM 통합
 - **SSE/HITL 추가 작업 여부 확인** (2026-02-01)
   - `docs/guides/SSE_HITL_ADDITIONAL_WORK_VERIFICATION.md`: P0/P1/P2 완료 검증, 4항목 ✅ 확정, "Aura 추가 작업 없음" 결론
 - **SSE/HITL P0 실행 체크리스트 구현 (P0-1, P0-2)** (2026-02-01)

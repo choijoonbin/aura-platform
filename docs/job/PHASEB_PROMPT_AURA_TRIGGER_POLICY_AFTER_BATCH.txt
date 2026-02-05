@@ -1,0 +1,30 @@
+[PHASE B / Aura Prompt] Detection Batch 이후 Agentic Trigger 규칙(최소) — 조건부 자동 분석 시작
+(목표: 배치가 케이스를 생성/업데이트하면, Aura는 ‘조건’에 따라 분석을 시작하거나, 운영자 오픈 시 시작하는 규칙을 표준화)
+
+## 0) 원칙
+- 배치 단계에서 LLM을 무조건 돌리지 않는다.
+- Trigger 조건은 정책 프로파일로 옵션화(기본값만 제공).
+- 분석 시작도 audit 이벤트로 남긴다(SCAN_STARTED/COMPLETED).
+
+---
+
+## 1) Trigger 기본값(권장)
+- Auto-start 조건(기본):
+  - severity >= HIGH AND status == NEW
+  - 또는 Action Required로 전환된 케이스
+- 그 외는 운영자가 케이스를 열 때(on-open) 시작
+
+---
+
+## 2) 구현 범위(In)
+- case created/updated 이벤트(또는 detect_run 결과)를 수신하는 방식 정의(폴링/웹훅/메시지 중 실제 구현 기반)
+- auto-start 조건에 맞으면:
+  - START 이벤트 발행 → tool로 evidence 수집 → analysis/plan → hitl_proposed(필요시) → END
+- 조건 미충족이면:
+  - “대기” 상태로만 기록(분석 미실행)
+
+---
+
+## 3) Definition of Done
+- 배치로 생성된 케이스 중 HIGH 이상은 자동 분석이 시작되거나, 최소한 시작 조건/대기가 명확히 로그/이벤트로 남는다.
+- 케이스 오픈 시 분석 시작(on-open) 경로가 문서화되고 재현 가능

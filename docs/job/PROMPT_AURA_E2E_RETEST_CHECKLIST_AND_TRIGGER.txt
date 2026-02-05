@@ -1,0 +1,24 @@
+[AURA PROMPT] E2E 재테스트 전 점검/수정 체크리스트(P0/P1)
+(대상: Aura/Agent 서버)
+
+## P0(최우선)
+1) Trigger 방식 1개로 확정/고정(필수)
+- A 웹훅(BE→Aura), B 폴링, C on-open(FE→Aura) 중 “실제 동작 1개”만 E2E 기준으로 채택
+
+2) SSE 엔드포인트/헤더 검증(필수)
+- X-Tenant-ID, X-User-ID, Authorization, X-Trace-ID, Last-Event-ID 지원
+- 끊김 재연결 1회 이상 검증
+
+3) Evidence 최소 3종 확보(필수)
+- case/documents/open_items evidence_refs 구성(가능하면 lineage 4종)
+
+4) HITL propose 규칙 고정(필수)
+- severity>=HIGH & status==NEW → hitl_proposed 생성(기본)
+- payload에 proposal_id/action_type/evidence_refs 포함
+
+5) Audit 정합(필수)
+- SCAN_STARTED/COMPLETED, ACTION_PROPOSED를 audit_event_log에 남기는 방식 확정( Aura→BE 기록 or BE가 수신 후 기록 )
+
+## P1(권장)
+- 중복 트리거 방지(caseId+updated_at)
+- error 이벤트 표준화(trace_id 유지)

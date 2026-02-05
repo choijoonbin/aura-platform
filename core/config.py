@@ -273,6 +273,20 @@ class Settings(BaseSettings):
         description="Agent Stream push URL (미지정 시 synapse_base_url + /api/synapse/agent/events)",
     )
 
+    # ==================== Trigger (Phase B) ====================
+    trigger_webhook_secret: str | None = Field(
+        default=None,
+        description="웹훅 인증용 시크릿 (X-Trigger-Secret). 미설정 시 검증 스킵",
+    )
+    trigger_auto_start_severity_min: str = Field(
+        default="HIGH",
+        description="Auto-start 최소 severity (HIGH, CRITICAL)",
+    )
+    trigger_auto_start_statuses: str = Field(
+        default="NEW,ACTION_REQUIRED",
+        description="Auto-start status 목록 (쉼표 구분)",
+    )
+
     # ==================== Integration Settings ====================
     github_token: str | None = Field(
         default=None,

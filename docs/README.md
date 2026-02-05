@@ -83,6 +83,7 @@ docs/
 **목적**: 개발 가이드, 스펙, 빠른 참조 문서
 
 **주요 파일**:
+- `AGENTIC_AI_FEATURES_GUIDE.md` - AI 기능 적용 상세 (에이전트별 기능/트리거/동작)
 - `AURA_PLATFORM_INTEGRATION_GUIDE.md` - 상세 통합 가이드
 - `AURA_PLATFORM_QUICK_REFERENCE.md` - 핵심 정보 빠른 참조
 - `QUICK_START.md` - 빠른 시작 가이드

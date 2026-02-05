@@ -1,0 +1,21 @@
+[PHASE A / Aura Prompt] Finance Agent E2E(P0) — Evidence Pack 생성 → Plan → HITL Propose → Resume 이벤트
+(목표: 케이스 처리 단계에서 Agentic의 핵심(도구사용/상태유지/승인게이트/감사)을 런타임으로 증명)
+
+## 0) 원칙(Phase 0 스키마 준수)
+- 이벤트 타입+payload로 발행, trace/tenant/user/case 필수 포함
+- 도구 호출은 Synapse Tool API 계약 준수
+- propose_action 전까지는 실행 금지
+
+---
+
+## 1) 구현 범위(In)
+- caseId 입력 → tools로 evidence_refs 3종 이상 생성
+- analysis/plan 이벤트에 evidence_refs 포함
+- hitl_proposed 이벤트에 proposal payload 포함
+- approve/reject 이벤트 수신 후 resume 또는 추가 evidence 질문 후 종료
+
+---
+
+## 2) Definition of Done
+- 1개 케이스 실행 로그로 단계별 이벤트 + hitl_proposed + resume가 확인됨
+- BE audit_event_log에서 caseId로 관련 이벤트가 조회됨(연계)

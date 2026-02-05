@@ -171,12 +171,18 @@ async def finance_stream(
                                     user_id=user.user_id,
                                     tenant_id=tenant_id_val,
                                 )
+                                proposal_payload = payload.get("context", {})
+                                action_type_val = payload.get("actionType", payload.get("toolName", ""))
                                 hitl_event = HITLEvent.create(
                                     request_id=request_id,
-                                    action_type=payload.get("actionType", payload.get("toolName", "")),
+                                    action_type=action_type_val,
                                     message=payload.get("message", f"{payload.get('toolName', 'propose_action')} 실행을 승인하시겠습니까?"),
-                                    context=payload.get("context", {}),
+                                    context=proposal_payload,
                                 )
+                                hitl_event.data["proposal"] = proposal_payload
+                                hitl_event.data["proposal_id"] = request_id
+                                hitl_event.data["action_type"] = action_type_val
+                                hitl_event.data["evidence_refs"] = payload.get("evidence_refs", [])
                                 hitl_data = _enrich_event_data(
                                     hitl_event.model_dump(),
                                     trace_id, case_id, tenant_id_val, user.user_id,

@@ -143,7 +143,7 @@ def test_finance_hitl_tools():
 
 def test_finance_tools_count():
     """Finance 도구 8개 등록"""
-    assert len(FINANCE_TOOLS) == 8
+    assert len(FINANCE_TOOLS) == 9  # get_case, search_documents, get_document, get_entity, get_open_items, get_lineage, simulate, propose, execute
 
 
 @pytest.mark.asyncio

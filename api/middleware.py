@@ -39,6 +39,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         "/redoc",
         "/openapi.json",
         "/agents/health",  # 에이전트 헬스체크는 공개
+        "/aura/triggers/case-updated",  # Phase B: 배치 웹훅 (X-Trigger-Secret으로 검증)
     ]
     
     async def dispatch(

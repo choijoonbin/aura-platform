@@ -231,6 +231,38 @@ async def get_document(
 
 
 @tool
+async def get_lineage(
+    caseId: str | None = Field(default=None, description="케이스 ID (문서 조회용)"),
+    belnr: str | None = Field(default=None, description="전표 번호"),
+    gjahr: str | None = Field(default=None, description="회계 연도"),
+    bukrs: str | None = Field(default=None, description="회사 코드"),
+) -> str:
+    """
+    전표/문서의 라인리지(Lineage)를 조회합니다.
+    belnr/gjahr가 있으면 직접 조회, caseId만 있으면 케이스의 문서 lineage 조회.
+    """
+    try:
+        if belnr and gjahr:
+            params = {"belnr": belnr, "gjahr": gjahr}
+            if bukrs:
+                params["bukrs"] = bukrs
+            result = await _synapse_get("/tools/finance/lineage", params)
+        elif caseId:
+            result = await _synapse_get(f"/tools/finance/lineage", {"caseId": caseId})
+        else:
+            return json.dumps({"error": "caseId or (belnr, gjahr) required"})
+        return result
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return json.dumps({"lineage": [], "message": "Lineage endpoint not yet implemented"})
+        logger.error(f"get_lineage failed: {e}")
+        return json.dumps({"error": str(e), "status_code": e.response.status_code})
+    except Exception as e:
+        logger.error(f"get_lineage failed: {e}")
+        return json.dumps({"error": str(e)})
+
+
+@tool
 async def get_entity(entityId: str = Field(..., description="엔티티 ID")) -> str:
     """
     엔티티 정보를 조회합니다.
@@ -463,6 +495,7 @@ FINANCE_TOOLS = [
     get_document,
     get_entity,
     get_open_items,
+    get_lineage,
     simulate_action,
     propose_action,
     execute_action,

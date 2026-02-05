@@ -1,0 +1,46 @@
+[FOLLOW-UP / Aura Prompt] Phase 0~B 완료 점검 후 후속조치 — Trigger 수신 구현(웹훅/폴링) + Evidence 확장(라인리지) + 감사 이벤트 정합
+(목표: Phase B 배치 이후 ‘조건부 자동 분석’이 실제로 동작하여, Agentic가 운영에 녹아드는 표준 흐름을 완성)
+
+## 0) 이번 점검에서 확인된 상태(요약)
+- Finance Agent는 tools(get_case/search_documents/get_open_items)로 evidence_refs 3종을 수집하고,
+  thought/plan_step/hitl 이벤트에 evidence_refs를 포함함(Phase A 검증 문서).
+- Phase B Trigger 정책 문서는 작성됐으나, “case created/updated 이벤트 수신 방식”은 옵션 제시(웹훅/메시지/폴링) 단계.
+
+---
+
+## 1) P0 후속조치(필수) — ‘수신 방식’ 하나를 실제로 구현
+### 1.1 권장: 웹훅(가장 단순/표준)
+- BE 배치(DetectBatchService)가 케이스 생성/업데이트 후:
+  - `POST /api/aura/triggers/case-updated` 호출(tenant/caseId/severity/status/trace_id 포함)
+- Aura는:
+  - payload 수신 → Trigger 조건 평가 → (조건 충족 시) agent run 시작
+- 완료조건:
+  - 배치 실행 후 HIGH 이상 NEW 케이스가 자동으로 SCAN_STARTED 이벤트를 발행
+
+### 1.2 대안: 폴링(웹훅이 어렵다면)
+- Aura가 1~5분마다 BE에서 “최근 변경 케이스” 조회
+- 단, 중복 실행 방지 키 필요(caseId+updated_at)
+
+---
+
+## 2) P1 후속조치(권장)
+### 2.1 Evidence 확장: Lineage 추가(가능하면)
+- 현재 evidence_refs는 case/doc/open_items 중심.
+- lineageRef를 4번째 evidence로 추가(가능하면):
+  - tool: get_lineage(belnr/gjahr 등)
+- 완료조건:
+  - Case Detail에서 “왜”가 더 설득력 있게 보임(근거 연결 강화)
+
+### 2.2 Audit 이벤트 정합 강화
+- SCAN_STARTED/COMPLETED를 audit_event_log에 남기는 방식 확정:
+  - Aura가 BE audit API를 호출하는지,
+  - 또는 BE가 Aura 이벤트를 수신해 기록하는지
+- 완료조건:
+  - 케이스 상세에서 시작된 분석이 audit에서 추적됨
+
+---
+
+## 3) Definition of Done
+- 배치로 생성된 케이스가 조건을 만족하면 Aura가 자동 분석을 시작(또는 on-open)
+- 중복 트리거 방지(같은 케이스에 대해 짧은 시간에 재실행되지 않음)
+- audit에서 SCAN_* + ACTION_* 이벤트가 한 흐름으로 조회됨

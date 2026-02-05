@@ -20,16 +20,24 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMe
 
 from core.llm import get_llm_client
 from core.llm.prompts import get_system_prompt
-from tools.synapse_finance_tool import FINANCE_TOOLS, FINANCE_HITL_TOOLS
+from tools.synapse_finance_tool import (
+    FINANCE_TOOLS,
+    FINANCE_HITL_TOOLS,
+    get_case,
+    search_documents,
+    get_open_items,
+    get_lineage,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class EvidenceItem(TypedDict):
     """증거 항목 (규정 인용/RAG, 통계근거, 원천데이터 링크)"""
-    type: str  # regulation, stats, source_link
-    content: str
+    type: str  # case, documents, open_items, regulation, stats, source_link
     source: str
+    content: str
+    ref: str | None  # 원천 참조 (docId, entityId 등)
     timestamp: datetime
 
 
@@ -81,13 +89,19 @@ class FinanceAgent:
         workflow = StateGraph(FinanceAgentState)
         
         workflow.add_node("analyze", self._analyze_node)
+        workflow.add_node("evidence_gather", self._evidence_gather_node)
         workflow.add_node("plan", self._plan_node)
         workflow.add_node("execute", self._execute_node)
         workflow.add_node("tools", self._tools_node)
         workflow.add_node("reflect", self._reflect_node)
         
         workflow.set_entry_point("analyze")
-        workflow.add_edge("analyze", "plan")
+        workflow.add_conditional_edges(
+            "analyze",
+            self._should_gather_evidence,
+            {"gather": "evidence_gather", "plan": "plan"},
+        )
+        workflow.add_edge("evidence_gather", "plan")
         workflow.add_edge("plan", "execute")
         workflow.add_conditional_edges(
             "execute",
@@ -99,18 +113,109 @@ class FinanceAgent:
         
         return workflow.compile(checkpointer=self.checkpointer)
     
+    def _should_gather_evidence(self, state: FinanceAgentState) -> str:
+        """caseId가 있으면 evidence 수집, 없으면 plan으로"""
+        ctx = state.get("context") or {}
+        case_id = ctx.get("caseId") or ctx.get("case_id")
+        return "gather" if case_id else "plan"
+
+    async def _evidence_gather_node(self, state: FinanceAgentState) -> dict[str, Any]:
+        """증거 수집 노드: caseId로 get_case, search_documents, get_open_items 호출 (Phase A)"""
+        import json as _json
+
+        ctx = state.get("context") or {}
+        case_id = ctx.get("caseId") or ctx.get("case_id") or ""
+        if not case_id:
+            return {"evidence": state.get("evidence", [])}
+
+        evidence: list[EvidenceItem] = list(state.get("evidence", []))
+
+        # 1. get_case
+        try:
+            result = await get_case.ainvoke({"caseId": case_id})
+            parsed = _json.loads(result) if isinstance(result, str) else result
+            if "error" not in parsed:
+                evidence.append(EvidenceItem(
+                    type="case",
+                    source="get_case",
+                    content=_json.dumps(parsed, ensure_ascii=False)[:500],
+                    ref=case_id,
+                    timestamp=datetime.utcnow(),
+                ))
+        except Exception as e:
+            logger.debug(f"evidence_gather get_case: {e}")
+
+        # 2. search_documents
+        try:
+            result = await search_documents.ainvoke({"filters": {"caseId": case_id}})
+            parsed = _json.loads(result) if isinstance(result, str) else result
+            if not (isinstance(parsed, dict) and "error" in parsed):
+                doc_list = parsed if isinstance(parsed, list) else parsed.get("documents", parsed.get("items", []))
+                evidence.append(EvidenceItem(
+                    type="documents",
+                    source="search_documents",
+                    content=_json.dumps(doc_list[:5], ensure_ascii=False)[:500] if isinstance(doc_list, list) else str(parsed)[:500],
+                    ref=case_id,
+                    timestamp=datetime.utcnow(),
+                ))
+        except Exception as e:
+            logger.debug(f"evidence_gather search_documents: {e}")
+
+        # 3. get_open_items
+        try:
+            result = await get_open_items.ainvoke({"filters": {"caseId": case_id}})
+            parsed = _json.loads(result) if isinstance(result, str) else result
+            if not (isinstance(parsed, dict) and "error" in parsed):
+                items = parsed if isinstance(parsed, list) else parsed.get("items", parsed.get("openItems", []))
+                evidence.append(EvidenceItem(
+                    type="open_items",
+                    source="get_open_items",
+                    content=_json.dumps(items[:5], ensure_ascii=False)[:500] if isinstance(items, list) else str(parsed)[:500],
+                    ref=case_id,
+                    timestamp=datetime.utcnow(),
+                ))
+        except Exception as e:
+            logger.debug(f"evidence_gather get_open_items: {e}")
+
+        # 4. get_lineage (P1: lineageRef)
+        try:
+            result = await get_lineage.ainvoke({"caseId": case_id})
+            parsed = _json.loads(result) if isinstance(result, str) else result
+            if not (isinstance(parsed, dict) and "error" in parsed):
+                lineage = parsed.get("lineage", parsed) if isinstance(parsed, dict) else parsed
+                evidence.append(EvidenceItem(
+                    type="lineage",
+                    source="get_lineage",
+                    content=_json.dumps(lineage[:5], ensure_ascii=False)[:500] if isinstance(lineage, list) else str(parsed)[:500],
+                    ref=case_id,
+                    timestamp=datetime.utcnow(),
+                ))
+        except Exception as e:
+            logger.debug(f"evidence_gather get_lineage: {e}")
+
+        thought = {
+            "thoughtType": "analysis",
+            "content": f"evidence_refs {len(evidence)}종 수집 완료 (case, documents, open_items, lineage)",
+            "timestamp": datetime.utcnow(),
+            "sources": [e.get("source", "") for e in evidence],
+        }
+        return {
+            "evidence": evidence,
+            "thought_chain": state.get("thought_chain", []) + [thought],
+        }
+
     async def _analyze_node(self, state: FinanceAgentState) -> dict[str, Any]:
         """분석 노드: 목표 및 컨텍스트 분석"""
         user_input = state["messages"][-1].content if state["messages"] else ""
         goal = state.get("goal") or user_input
-        
+
         thought = {
             "thoughtType": "analysis",
             "content": f"목표 분석: {goal[:150]}...",
             "timestamp": datetime.utcnow(),
             "sources": [],
         }
-        
+
         return {
             "thought_chain": state.get("thought_chain", []) + [thought],
             "goal": goal,
@@ -135,13 +240,20 @@ class FinanceAgent:
         response = await self.llm_client.client.ainvoke(messages)
         
         plan_steps = self._parse_plan(response.content)
+        evidence_refs = [
+            {"type": e.get("type"), "source": e.get("source"), "ref": e.get("ref")}
+            for e in state.get("evidence", [])
+        ]
+        for step in plan_steps:
+            step["evidence_refs"] = evidence_refs
         thought = {
             "thoughtType": "planning",
-            "content": f"계획 수립 완료: {len(plan_steps)}개 단계",
+            "content": f"계획 수립 완료: {len(plan_steps)}개 단계 (evidence_refs {len(evidence_refs)}종)",
             "timestamp": datetime.utcnow(),
-            "sources": [],
+            "sources": [e.get("source", "") for e in state.get("evidence", [])],
+            "evidence_refs": evidence_refs,
         }
-        
+
         return {
             "plan_steps": plan_steps,
             "thought_chain": state.get("thought_chain", []) + [thought],
@@ -213,6 +325,10 @@ class FinanceAgent:
                 log["status"] = "pending"
         
         # HITL: 각 승인 요청마다 interrupt() 호출 (첫 실행 시 pause, resume 시 decision 반환)
+        evidence_refs = [
+            {"type": e.get("type"), "source": e.get("source"), "ref": e.get("ref")}
+            for e in state.get("evidence", [])
+        ]
         for _idx, approval_req in pending_approvals:
             request_id = approval_req["requestId"]
             payload = {
@@ -221,6 +337,7 @@ class FinanceAgent:
                 "actionType": approval_req["actionType"],
                 "context": approval_req["toolArgs"],
                 "message": f"{approval_req['toolName']} 실행을 승인하시겠습니까?",
+                "evidence_refs": evidence_refs,
             }
             logger.info(f"Finance HITL interrupt: {request_id} ({approval_req['toolName']})")
             decision = interrupt(payload)
