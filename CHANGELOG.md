@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Case Detail 탭 실데이터 연결 (Prompt C P0-P2)** (2026-02-06)
+  - P0: `GET /api/aura/cases/{caseId}/stream` — SSE Agent Stream, Last-Event-ID replay, in-memory ring buffer
+  - P0: `POST /api/aura/cases/{caseId}/stream/trigger` — 수동 트리거 (admin 전용)
+  - P1: `GET /api/aura/cases/{caseId}/rag/evidence` — RAG evidence 목록 (Synapse search_documents)
+  - P1: `GET /api/aura/cases/{caseId}/similar` — 유사 케이스 (규칙 기반)
+  - P1: `GET /api/aura/cases/{caseId}/confidence` — Confidence score breakdown
+  - P2: `GET /api/aura/cases/{caseId}/analysis` — Analysis summary (template+facts)
+  - `core/streaming/case_stream_store.py` — CaseStreamStore, CaseStreamEvent
+  - `api/routes/aura_cases.py` — Case Detail 탭 API 라우트
+  - `docs/prompts/PHASE_Cases_Aura_Bindings_P0-P2.md` — 구현 문서
 - **E2E 재테스트 체크리스트 (P0/P1)** (2026-02-01)
   - P0-4: HITL payload에 proposal_id, action_type, evidence_refs 포함 (severity>=HIGH & status==NEW → hitl_proposed)
   - P1: 중복 트리거 방지 — caseId+updated_at 기반 dedup (웹훅 payload에 updatedAt 필드 추가)
