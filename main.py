@@ -8,6 +8,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
 from core.config import settings
@@ -68,6 +69,22 @@ app.add_middleware(
 
 # 커스텀 미들웨어 설정
 setup_middlewares(app)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc: RequestValidationError):
+    """422 검증 실패 시 상세 로그 (디버깅용)"""
+    logger.warning(
+        "422 ValidationError path=%s body_errors=%s",
+        request.url.path,
+        exc.errors(),
+    )
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
+    )
+
 
 # API 라우터 등록
 from api.routes.agents import router as agents_router

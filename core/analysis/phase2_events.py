@@ -48,8 +48,11 @@ class AnalysisProposalEvent(BaseModel):
 
 
 class AnalysisCompletedEvent(BaseModel):
-    """completed: {"summary","score","severity"}"""
-    summary: str
+    """completed: {"status","runId","caseId","summary","score","severity"} — FE 정상 종료 인식용"""
+    status: str = "completed"
+    runId: str = ""
+    caseId: str = ""
+    summary: str = ""
     score: float = 0.0
     severity: str = "MEDIUM"
 

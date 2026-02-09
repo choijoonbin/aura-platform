@@ -14,7 +14,7 @@ from typing import Any
 
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from api.dependencies import AdminUser, CurrentUser, TenantId
 from core.context import set_request_context
@@ -132,11 +132,19 @@ async def case_stream_trigger(
 class AuraAnalyzeRequest(BaseModel):
     """BE 트리거 요청 (Phase2 표준)"""
     runId: str = Field(..., description="BE가 생성한 run 식별자")
-    caseId: str | None = Field(default=None, description="케이스 ID (path와 중복 가능)")
+    caseId: str | None = Field(default=None, description="케이스 ID (path와 중복 가능, BE는 Long으로 전송)")
     evidence: dict[str, Any] | None = Field(default=None, description="evidence snapshot (문서/라인/오픈아이템/거래처 등)")
     mode: str | None = Field(default="LIVE", description="LIVE | SIMULATION")
     requestedBy: str | None = Field(default="HUMAN", description="HUMAN | SYSTEM")
     options: dict[str, Any] | None = Field(default=None, description="model, policyVersion 등")
+
+    @field_validator("caseId", "runId", mode="before")
+    @classmethod
+    def _coerce_str(cls, v: Any) -> Any:
+        """BE가 caseId(Long), runId(UUID) 전송 시 JSON 숫자/UUID → str 변환"""
+        if v is None:
+            return None
+        return str(v)
 
 
 async def _run_analysis_background(
@@ -191,6 +199,8 @@ async def _run_analysis_background(
         put_event(run_id, "failed", {"error": str(e), "stage": "background"})
         await send_callback(run_id, case_id, "FAILED", error_message=str(e))
     finally:
+        # 스트림이 proposal·completed 수신할 시간 확보 (레이스 컨디션 방지)
+        await asyncio.sleep(2.0)
         remove_queue(run_id)
 
 
@@ -251,15 +261,23 @@ async def case_analysis_stream(
         return {"error": "runId not found or already completed", "runId": run_id}
 
     async def event_generator():
+        sent_completed = False
+        case_id = ""
         while True:
             ev = await get_event(run_id, timeout=300.0)
             if ev is None:
                 break
             event_type, payload = ev
+            if event_type == "started":
+                case_id = payload.get("caseId", "")
             yield f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
             await asyncio.sleep(STREAM_EVENT_DELAY)
             if event_type in ("completed", "failed"):
+                sent_completed = True
                 break
+        if not sent_completed:
+            fallback = {"status": "completed", "runId": run_id, "caseId": case_id}
+            yield f"event: completed\ndata: {json.dumps(fallback, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(

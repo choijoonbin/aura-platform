@@ -207,15 +207,6 @@ async def run_phase2_analysis(
                 payload=p.get("payload", {}),
             ).model_dump())
 
-        # completed
-        severity = "HIGH" if overall >= 0.8 else "MEDIUM" if overall >= 0.6 else "LOW"
-        completed_payload = AnalysisCompletedEvent(
-            summary=reason_text[:500],
-            score=overall,
-            severity=severity,
-        ).model_dump()
-        yield ("completed", completed_payload)
-
         # similarCases: key-based (벡터DB 없으면 거래처/금액/유형)
         similar_cases: list[dict[str, Any]] = []
         if isinstance(case_data, dict):
@@ -229,7 +220,8 @@ async def run_phase2_analysis(
                     "amount": amt * (0.9 + i * 0.1),
                 })
 
-        # finalResult 저장 (GET /analysis에서 반환)
+        # finalResult 저장 (콜백 전에 반드시 실행 — break 시 get_phase2_result 사용)
+        severity = "HIGH" if overall >= 0.8 else "MEDIUM" if overall >= 0.6 else "LOW"
         from core.streaming.case_stream_store import set_phase2_result
         set_phase2_result(case_id, {
             "reasonText": reason_text,
@@ -240,11 +232,23 @@ async def run_phase2_analysis(
                 "ruleCompliance": rule_compliance,
                 "overall": overall,
             },
+            "evidence": evidence_items[:10],  # BE 저장용 (없으면 null)
             "ragRefs": evidence_items[:5],
             "similarCases": similar_cases,
             "score": overall,
             "severity": severity,
         })
+
+        # completed (FE 정상 종료 인식용: status, runId, caseId 포함)
+        completed_payload = AnalysisCompletedEvent(
+            status="completed",
+            runId=run_id,
+            caseId=case_id,
+            summary=reason_text[:500],
+            score=overall,
+            severity=severity,
+        ).model_dump()
+        yield ("completed", completed_payload)
 
     except Exception as e:
         logger.exception(f"Phase2 analysis failed for {case_id}")
