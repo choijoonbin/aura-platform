@@ -1,24 +1,29 @@
 """
-Aura Cases Routes (Prompt C P0-P2)
+Aura Cases Routes (Prompt C P0-P2, Phase2)
 
 Case Detail 탭: Agent Stream, RAG Evidence, Similar, Confidence, Analysis
-실데이터 연결 최소 구현.
+Phase2-2: Trigger 202 JSON, Stream 별도, BE Callback
 """
 
 import asyncio
 import json
 import logging
+import os
 import uuid
 from typing import Any
 
 from fastapi import APIRouter, Header, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
 
 from api.dependencies import AdminUser, CurrentUser, TenantId
 from core.context import set_request_context
+from core.analysis.callback import send_callback
+from core.analysis.run_store import get_event, get_or_create_queue, put_event, queue_exists, remove_queue
 from core.streaming.case_stream_store import (
     CaseStreamEvent,
     get_case_stream_store,
+    get_phase2_result,
 )
 from tools.synapse_finance_tool import get_case, search_documents
 
@@ -119,6 +124,206 @@ async def case_stream_trigger(
         "traceId": trace_id,
         "message": "Sample events generated. Connect to GET /stream to receive them.",
     }
+
+
+# ==================== Phase2-2: Analysis Runs (Feign 호환) ====================
+
+
+class AuraAnalyzeRequest(BaseModel):
+    """BE 트리거 요청 (Phase2 표준)"""
+    runId: str = Field(..., description="BE가 생성한 run 식별자")
+    caseId: str | None = Field(default=None, description="케이스 ID (path와 중복 가능)")
+    evidence: dict[str, Any] | None = Field(default=None, description="evidence snapshot (문서/라인/오픈아이템/거래처 등)")
+    mode: str | None = Field(default="LIVE", description="LIVE | SIMULATION")
+    requestedBy: str | None = Field(default="HUMAN", description="HUMAN | SYSTEM")
+    options: dict[str, Any] | None = Field(default=None, description="model, policyVersion 등")
+
+
+async def _run_analysis_background(
+    case_id: str,
+    run_id: str,
+    tenant_id: str,
+    auth_token: str | None,
+    body_evidence: dict[str, Any] | None = None,
+):
+    """백그라운드 분석 실행 + 큐에 이벤트 적재 + 완료 시 콜백. body_evidence: C(폴백)용."""
+    set_request_context(
+        tenant_id=tenant_id,
+        user_id="",
+        auth_token=auth_token,
+        trace_id=f"trace-{case_id}-{run_id[:8]}",
+        case_id=case_id,
+    )
+    event_type = "failed"
+    payload: dict[str, Any] = {}
+    try:
+        from core.analysis.phase2_pipeline import run_phase2_analysis
+
+        async for event_type, payload in run_phase2_analysis(
+            case_id, run_id=run_id, tenant_id=tenant_id, body_evidence=body_evidence,
+        ):
+            put_event(run_id, event_type, payload)
+            if event_type in ("completed", "failed"):
+                break
+
+        if event_type == "completed":
+            result = get_phase2_result(case_id)
+            if result:
+                await send_callback(run_id, case_id, "COMPLETED", final_result=result)
+            else:
+                await send_callback(run_id, case_id, "COMPLETED", final_result={
+                    "score": payload.get("score", 0),
+                    "severity": payload.get("severity", "MEDIUM"),
+                    "reasonText": payload.get("summary", ""),
+                    "confidence": {},
+                    "evidence": [],
+                    "ragRefs": [],
+                    "similar": [],
+                    "proposals": [],
+                })
+        else:
+            await send_callback(
+                run_id, case_id, "FAILED",
+                error_message=payload.get("error", "unknown"),
+            )
+    except Exception as e:
+        logger.exception(f"Analysis background failed case={case_id} run={run_id}")
+        put_event(run_id, "failed", {"error": str(e), "stage": "background"})
+        await send_callback(run_id, case_id, "FAILED", error_message=str(e))
+    finally:
+        remove_queue(run_id)
+
+
+@router.post("/{case_id}/analysis-runs")
+async def case_analysis_runs(
+    case_id: str,
+    request: Request,
+    body: AuraAnalyzeRequest,
+    user: CurrentUser,
+    tenant_id: TenantId,
+):
+    """
+    Phase2-2 분석 트리거 (Feign 호환)
+    
+    POST /aura/cases/{caseId}/analysis-runs
+    202 + JSON 즉시 반환. 백그라운드에서 분석 실행 후 BE 콜백.
+    """
+    if os.environ.get("DEMO_OFF", "").upper() in ("1", "TRUE", "YES"):
+        return {"status": "disabled", "message": "Analysis disabled (DEMO_OFF)"}
+
+    run_id = body.runId
+    tenant_id_val = tenant_id or "1"
+    auth_token = request.headers.get("Authorization")
+
+    get_or_create_queue(run_id)
+    asyncio.create_task(_run_analysis_background(
+        case_id, run_id, tenant_id_val, auth_token,
+        body_evidence=body.evidence,
+    ))
+
+    stream_url = f"/aura/analysis-runs/{run_id}/stream"
+    return JSONResponse(
+        status_code=202,
+        content={
+            "status": "ACCEPTED",
+            "runId": run_id,
+            "caseId": case_id,
+            "streamUrl": stream_url,
+        },
+    )
+
+
+@router.get("/{case_id}/analysis/stream")
+async def case_analysis_stream(
+    case_id: str,
+    runId: str,
+    user: CurrentUser,
+    tenant_id: TenantId,
+):
+    """
+    Phase2-2 분석 스트림 (SSE)
+    
+    GET /aura/cases/{caseId}/analysis/stream?runId={runId}
+    started → step → evidence → confidence → proposal → completed | failed
+    """
+    run_id = runId
+    if not queue_exists(run_id):
+        return {"error": "runId not found or already completed", "runId": run_id}
+
+    async def event_generator():
+        while True:
+            ev = await get_event(run_id, timeout=300.0)
+            if ev is None:
+                break
+            event_type, payload = ev
+            yield f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            await asyncio.sleep(STREAM_EVENT_DELAY)
+            if event_type in ("completed", "failed"):
+                break
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ==================== Phase2: Analysis Trigger (SSE, legacy) ====================
+
+
+@router.post("/{case_id}/analysis/trigger")
+async def case_analysis_trigger(
+    case_id: str,
+    request: Request,
+    user: CurrentUser,
+    tenant_id: TenantId,
+):
+    """
+    Phase2 분석 트리거 (SSE 스트림)
+    
+    POST /api/aura/cases/{caseId}/analysis/trigger
+    started → step → evidence → confidence → proposal → completed (또는 failed) 이벤트를 SSE로 스트리밍.
+    DEMO_OFF 환경변수 시 no-op 결과 반환.
+    """
+    if os.environ.get("DEMO_OFF", "").upper() in ("1", "TRUE", "YES"):
+        return {"status": "disabled", "message": "Analysis disabled (DEMO_OFF)"}
+
+    set_request_context(
+        tenant_id=tenant_id or "1",
+        user_id=user.user_id,
+        auth_token=request.headers.get("Authorization"),
+        trace_id=f"trace-{case_id}-analysis",
+        case_id=case_id,
+    )
+
+    async def event_generator():
+        from core.analysis.phase2_pipeline import run_phase2_analysis
+
+        try:
+            async for event_type, payload in run_phase2_analysis(
+                case_id, tenant_id=tenant_id or "1",
+            ):
+                yield f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                await asyncio.sleep(STREAM_EVENT_DELAY)
+        except Exception as e:
+            logger.exception(f"Phase2 analysis trigger failed: {e}")
+            yield f"event: failed\ndata: {json.dumps({'error': str(e), 'stage': 'trigger'}, ensure_ascii=False)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ==================== P1: RAG Evidence ====================
@@ -312,7 +517,7 @@ async def case_confidence(
     }
 
 
-# ==================== P2: Analysis Summary ====================
+# ==================== P2: Analysis Summary (Phase2) ====================
 
 
 @router.get("/{case_id}/analysis")
@@ -323,10 +528,11 @@ async def case_analysis(
     tenant_id: TenantId,
 ):
     """
-    Analysis Summary (P2, template+facts)
+    Analysis Summary (P2, Phase2)
     
     GET /api/aura/cases/{caseId}/analysis
-    read-only, HITL 연계 없음.
+    Phase2 분석 완료 시: reasonText, proposals, confidenceBreakdown, ragRefs, similarCases 반환.
+    미실행 시: 템플릿 기반 fallback.
     """
     set_request_context(
         tenant_id=tenant_id or "1",
@@ -335,6 +541,22 @@ async def case_analysis(
         trace_id=f"trace-{case_id}-analysis",
         case_id=case_id,
     )
+
+    # Phase2 저장 결과 우선
+    phase2_result = get_phase2_result(case_id)
+    if phase2_result:
+        return {
+            "caseId": case_id,
+            "reasonText": phase2_result.get("reasonText", ""),
+            "proposals": phase2_result.get("proposals", []),
+            "confidenceBreakdown": phase2_result.get("confidenceBreakdown", {}),
+            "ragRefs": phase2_result.get("ragRefs", []),
+            "similarCases": phase2_result.get("similarCases", []),
+            "score": phase2_result.get("score", 0),
+            "severity": phase2_result.get("severity", "MEDIUM"),
+        }
+
+    # Fallback: get_case 기반 templates
     try:
         result = await get_case.ainvoke({"caseId": case_id})
         case_data = json.loads(result) if isinstance(result, str) else result
@@ -353,6 +575,9 @@ async def case_analysis(
     return {
         "caseId": case_id,
         "summary": summary,
+        "reasonText": summary,
+        "proposals": [],
+        "confidenceBreakdown": {},
         "riskType": risk_type,
         "template": "standard",
     }

@@ -73,6 +73,7 @@ setup_middlewares(app)
 from api.routes.agents import router as agents_router
 from api.routes.agents_enhanced import router as agents_enhanced_router
 from api.routes.aura_backend import router as aura_backend_router
+from api.routes.aura_analysis_runs import router as aura_analysis_runs_router
 from api.routes.aura_cases import router as aura_cases_router
 from api.routes.finance_agent import router as finance_agent_router
 from api.routes.triggers import router as triggers_router
@@ -80,6 +81,7 @@ from api.routes.triggers import router as triggers_router
 app.include_router(agents_router)
 app.include_router(agents_enhanced_router)  # 프론트엔드 명세 v1.0
 app.include_router(aura_backend_router)  # dwp-backend 연동
+app.include_router(aura_analysis_runs_router)  # Phase2 runId 기반 스트림
 app.include_router(aura_cases_router)  # Prompt C: Case Detail 탭 (Stream/RAG/Similar/Confidence/Analysis)
 app.include_router(finance_agent_router)  # Finance 도메인
 app.include_router(triggers_router)  # Phase B: case-updated 웹훅

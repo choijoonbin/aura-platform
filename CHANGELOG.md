@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Phase2 body.evidence C(폴백) 구현** (2026-02-06)
+  - BE가 전달하는 `body.evidence`를 fetch 실패 시 폴백으로 사용
+  - `{ evidence, ragRefs }` 구조(BE 스펙)를 evidence_items로 정규화
+  - `_run_analysis_background` → `run_phase2_analysis`에 body_evidence 전달
+- **Phase2 콜백 보강** (2026-02-06)
+  - proposals에 `requiresApproval` 필드 추가 (FE 승인 플로우 지원)
+  - `PHASE2_TRIGGER_STANDARD.md` 콜백 스펙을 실제 flat 구조(score, severity, reasonText, confidence, evidence, ragRefs, similar, proposals)로 수정
+
 ### Added
 - **Case Detail 탭 실데이터 연결 (Prompt C P0-P2)** (2026-02-06)
   - P0: `GET /api/aura/cases/{caseId}/stream` — SSE Agent Stream, Last-Event-ID replay, in-memory ring buffer
