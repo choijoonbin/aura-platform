@@ -12,7 +12,7 @@ from typing import Any
 
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from api.dependencies import CurrentUser, TenantId
 from api.routes.aura_backend import format_sse_event
@@ -32,13 +32,27 @@ STREAMING_EVENT_DELAY = 0.05
 
 class FinanceStreamRequest(BaseModel):
     """Finance 스트리밍 요청"""
-    prompt: str = Field(..., min_length=1, description="사용자 프롬프트 (목표)")
-    goal: str | None = Field(default=None, description="목표 (예: 중복송장 의심 케이스 조사 후 조치 제안)")
+    prompt: str | None = Field(default=None, description="사용자 프롬프트 (목표)")
+    message: str | None = Field(default=None, description="message (prompt 별칭, agents/v2와 필드명 호환)")
+    goal: str | None = Field(default=None, description="목표")
     context: dict[str, Any] = Field(
         default_factory=dict,
         description="caseId, documentIds, entityIds, openItemIds",
     )
     thread_id: str | None = Field(default=None, description="스레드 ID")
+
+    @model_validator(mode="after")
+    def require_prompt_or_message(self) -> "FinanceStreamRequest":
+        """prompt 또는 message 중 하나 필수 (최소 1자)"""
+        p = (self.prompt or "").strip()
+        m = (self.message or "").strip()
+        if not p and not m:
+            raise ValueError("prompt 또는 message 중 하나는 필수입니다")
+        if m and not p:
+            self.prompt = m
+        elif p:
+            self.prompt = p
+        return self
 
 
 def _enrich_event_data(
@@ -60,18 +74,17 @@ def _enrich_event_data(
 @router.post("/stream")
 async def finance_stream(
     request: FinanceStreamRequest,
+    req: Request,
     user: CurrentUser,
     tenant_id: TenantId,
-    req: Request,
     last_event_id: str | None = Header(None, alias="Last-Event-ID"),
     x_user_id: str | None = Header(None, alias="X-User-ID"),
 ):
     """
     Finance 에이전트 SSE 스트리밍
     
-    이벤트 타입 및 순서: start → thought → plan_step → tool_execution → hitl(필요시) → content → end → done
-    에러 시: ... → error → done. Last-Event-ID 지원(재연결, 중복 방지).
-    각 이벤트 data에 trace_id, case_id, tenant_id 포함.
+    요청: {"prompt": "..."} 또는 {"message": "..."}, context 선택
+    이벤트: start → thought → plan_step → tool_execution → hitl(필요시) → content → end → done
     """
     trace_id = str(uuid.uuid4())
     ctx = request.context or {}
@@ -146,13 +159,14 @@ async def finance_stream(
             stream_done = False
             hitl_manager = await get_hitl_manager()
             
+            prompt_val = (request.prompt or request.message or "").strip()
             while not stream_done:
                 async for graph_event in agent.stream(
-                    user_input=request.prompt,
+                    user_input=prompt_val,
                     user_id=user.user_id,
                     tenant_id=tenant_id_val,
-                    goal=request.goal or request.prompt,
-                    context=request.context,
+                    goal=request.goal or prompt_val,
+                    context=request.context or {},
                     thread_id=thread_id,
                     resume_value=resume_value,
                 ):

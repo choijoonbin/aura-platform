@@ -230,8 +230,8 @@ class Settings(BaseSettings):
     
     # ==================== Synapse Backend (Finance Tool API) ====================
     synapse_base_url: str = Field(
-        default="http://localhost:8081",
-        description="Synapse 백엔드 Tool API Base URL (Finance 도메인용)",
+        default="http://localhost:8080/api/synapse/agent-tools",
+        description="Synapse Agent Tool API Base URL (Gateway 8080 경유, Finance 도메인용)",
     )
     synapse_timeout: float = Field(
         default=30.0,
@@ -270,7 +270,7 @@ class Settings(BaseSettings):
     )
     agent_stream_push_url: str | None = Field(
         default=None,
-        description="Agent Stream push URL (미지정 시 synapse_base_url + /api/synapse/agent/events)",
+        description="Agent Stream push URL (미지정 시 http://localhost:8080/api/synapse/agent/events)",
     )
 
     # ==================== Trigger (Phase B) ====================

@@ -45,7 +45,16 @@ openssl rand -base64 32
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-**⚠️ 중요**: dwp_backend와 **동일한 시크릿 키**를 사용해야 합니다!
+**⚠️ 중요**: JWT를 발급하는 **dwp-auth-server**와 **동일한 시크릿 키**를 사용해야 합니다!
+
+### dwp-auth-server 연동
+
+| 서비스 | 설정 | 환경 변수 |
+|--------|------|----------|
+| Auth Server | dwp-auth-server/application.yml | JWT_SECRET |
+| Aura-Platform | .env | JWT_SECRET |
+
+Gateway(8080)는 `Authorization: Bearer <token>` 헤더를 Aura까지 그대로 전달합니다.
 
 ---
 

@@ -127,7 +127,7 @@ class FinanceSSEHook:
                 ThoughtEvent(
                     thoughtType=ThoughtType.REFLECTION,
                     content="조사 결과를 검토합니다.",
-                    sources=state.get("evidence", []),
+                    sources=[e.get("source", "") for e in state.get("evidence", [])],
                 ).model_dump()
             )
     

@@ -71,11 +71,14 @@ def _audit_event_to_agent_event(audit_event: Any) -> AgentEvent:
 
 
 def _get_push_url() -> str:
-    """Agent Stream push URL"""
+    """Agent Stream push URL (Gateway 8080 경유)"""
     url = getattr(settings, "agent_stream_push_url", None)
     if url:
         return url.rstrip("/")
+    # synapse_base_url이 agent-tools 경로면 agent/events는 별도 URL
     base = settings.synapse_base_url.rstrip("/")
+    if "agent-tools" in base:
+        return "http://localhost:8080/api/synapse/agent/events"
     return f"{base}/api/synapse/agent/events"
 
 

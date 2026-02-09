@@ -27,7 +27,11 @@ from core.context import get_request_context, get_synapse_headers
 
 logger = logging.getLogger(__name__)
 
+# Synapse Agent Tool API
+# 신규(Gateway 8080): http://localhost:8080/api/synapse/agent-tools → /cases, /documents 등
+# 구(8081): http://localhost:8081 → /tools/finance/cases 등
 BASE_URL = settings.synapse_base_url.rstrip("/")
+_USE_AGENT_TOOLS = "agent-tools" in BASE_URL
 
 
 def _emit_audit_event(event: Any) -> None:
@@ -50,6 +54,11 @@ def _get_headers(idempotency_key: str | None = None) -> dict[str, str]:
         if idempotency_key:
             base["X-Idempotency-Key"] = idempotency_key
         return base
+
+
+def _path(p: str) -> str:
+    """경로 (agent-tools 미사용 시 /tools/finance prefix)"""
+    return p if _USE_AGENT_TOOLS else f"/tools/finance{p}"
 
 
 async def _synapse_request_with_retry(
@@ -140,7 +149,7 @@ async def get_case(caseId: str = Field(..., description="케이스 ID")) -> str:
     Synapse 백엔드 Tool API를 통해 중복송장 의심 케이스 등의 상세를 가져옵니다.
     """
     try:
-        result = await _synapse_get(f"/tools/finance/cases/{caseId}")
+        result = await _synapse_get(_path(f"/cases/{caseId}"))
         try:
             parsed = json.loads(result)
             if parsed.get("riskTypeKey") or parsed.get("risk_type") or parsed.get("score") is not None:
@@ -169,21 +178,49 @@ async def get_case(caseId: str = Field(..., description="케이스 ID")) -> str:
         return json.dumps({"error": str(e)})
 
 
+def _is_invalid_param_value(v: str | None) -> bool:
+    """LLM이 Field 메타데이터를 값으로 넘긴 경우 감지"""
+    if not v or not isinstance(v, str):
+        return True
+    s = v.strip().lower()
+    return "annotation" in s or "nonetype" in s or "required=" in s or "default=" in s
+
+
 @tool
 async def search_documents(
     filters: dict[str, Any] = Field(
         default_factory=dict,
-        description="검색 필터 (caseId, documentIds, dateRange 등)",
+        description="검색 필터 (caseId, bukrs, gjahr, page, size 등)",
     )
 ) -> str:
     """
     문서를 검색합니다.
     
-    filters에 caseId, documentIds, dateRange 등을 지정할 수 있습니다.
+    Synapse: GET /documents (query: bukrs, gjahr, page, size 등).
+    caseId만 있으면 get_case로 case 조회 후 bukrs/gjahr 추출하여 documents 호출.
     """
     start = time.perf_counter()
     try:
-        result = await _synapse_post("/tools/finance/documents/search", filters)
+        case_id = filters.get("caseId") or filters.get("case_id")
+        top_k = filters.get("topK") or filters.get("top_k") or filters.get("size") or 10
+        page = filters.get("page", 0)
+        size = int(top_k) if isinstance(top_k, (int, float)) else 10
+
+        if case_id and not (filters.get("bukrs") or filters.get("gjahr")):
+            case_resp = await _synapse_get(_path(f"/cases/{case_id}"))
+            case_data = json.loads(case_resp) if isinstance(case_resp, str) else case_resp
+            if isinstance(case_data, dict) and "error" not in case_data:
+                bukrs = case_data.get("bukrs") or case_data.get("companyCode")
+                gjahr = case_data.get("gjahr") or case_data.get("fiscalYear")
+                if bukrs or gjahr:
+                    filters = {**filters, "bukrs": bukrs, "gjahr": gjahr, "page": page, "size": size}
+            else:
+                filters = {"page": page, "size": size}
+
+        params = {k: v for k, v in filters.items() if v is not None and k not in ("caseId", "case_id", "topK", "top_k", "documentIds")}
+        params.setdefault("page", page)
+        params.setdefault("size", size)
+        result = await _synapse_get(_path("/documents"), params)
         latency_ms = int((time.perf_counter() - start) * 1000)
         doc_ids = filters.get("documentIds") or []
         if isinstance(doc_ids, str):
@@ -221,7 +258,7 @@ async def get_document(
     단일 문서를 조회합니다.
     """
     try:
-        return await _synapse_get(f"/tools/finance/documents/{bukrs}/{belnr}/{gjahr}")
+        return await _synapse_get(_path(f"/documents/{bukrs}/{belnr}/{gjahr}"))
     except httpx.HTTPStatusError as e:
         logger.error(f"get_document failed: {e}")
         return json.dumps({"error": str(e), "status_code": e.response.status_code})
@@ -239,18 +276,18 @@ async def get_lineage(
 ) -> str:
     """
     전표/문서의 라인리지(Lineage)를 조회합니다.
-    belnr/gjahr가 있으면 직접 조회, caseId만 있으면 케이스의 문서 lineage 조회.
+    caseId 우선, 없으면 belnr+gjahr(+bukrs) 사용. Field 메타데이터 문자열은 거부.
     """
     try:
-        if belnr and gjahr:
-            params = {"belnr": belnr, "gjahr": gjahr}
-            if bukrs:
+        if belnr and gjahr and not _is_invalid_param_value(belnr) and not _is_invalid_param_value(gjahr):
+            params: dict[str, Any] = {"belnr": belnr, "gjahr": gjahr}
+            if bukrs and not _is_invalid_param_value(bukrs):
                 params["bukrs"] = bukrs
-            result = await _synapse_get("/tools/finance/lineage", params)
+            result = await _synapse_get(_path("/lineage"), params)
         elif caseId:
-            result = await _synapse_get(f"/tools/finance/lineage", {"caseId": caseId})
+            result = await _synapse_get(_path("/lineage"), {"caseId": caseId})
         else:
-            return json.dumps({"error": "caseId or (belnr, gjahr) required"})
+            return json.dumps({"error": "caseId or (belnr, gjahr) required. Field 메타데이터 문자열을 전달하지 마세요."})
         return result
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
@@ -268,7 +305,7 @@ async def get_entity(entityId: str = Field(..., description="엔티티 ID")) -> 
     엔티티 정보를 조회합니다.
     """
     try:
-        return await _synapse_get(f"/tools/finance/entities/{entityId}")
+        return await _synapse_get(_path(f"/entities/{entityId}"))
     except httpx.HTTPStatusError as e:
         logger.error(f"get_entity failed: {e}")
         return json.dumps({"error": str(e), "status_code": e.response.status_code})
@@ -281,14 +318,19 @@ async def get_entity(entityId: str = Field(..., description="엔티티 ID")) -> 
 async def get_open_items(
     filters: dict[str, Any] = Field(
         default_factory=dict,
-        description="필터 (openItemIds, entityId, caseId 등)",
+        description="필터 (type: AR|AP, overdueBucket, page, size 등)",
     )
 ) -> str:
     """
     미결 항목(Open Items)을 조회합니다.
+    Synapse: GET /open-items (query: type, overdueBucket, page, size).
+    caseId 필터는 Synapse 미지원.
     """
     try:
-        return await _synapse_post("/tools/finance/open-items/search", filters)
+        params = {k: v for k, v in (filters or {}).items() if v is not None}
+        params.setdefault("page", 0)
+        params.setdefault("size", 20)
+        return await _synapse_get(_path("/open-items"), params)
     except httpx.HTTPStatusError as e:
         logger.error(f"get_open_items failed: {e}")
         return json.dumps({"error": str(e), "status_code": e.response.status_code})
@@ -318,7 +360,7 @@ async def simulate_action(
     action_id = f"sim_{caseId}_{actionType}_{key[:8]}"
     try:
         result = await _synapse_post(
-            "/tools/finance/actions/simulate",
+            _path("/actions/simulate"),
             {"caseId": caseId, "actionType": actionType, "payload": payload},
             idempotency_key=key,
         )
@@ -367,7 +409,7 @@ async def propose_action(
     action_id = f"prop_{caseId}_{actionType}_{uuid.uuid4().hex[:8]}"
     try:
         result = await _synapse_post(
-            "/tools/finance/actions/propose",
+            _path("/actions/propose"),
             {"caseId": caseId, "actionType": actionType, "payload": payload},
         )
         try:
@@ -417,7 +459,7 @@ async def execute_action(
     key = idempotency_key or actionId
     try:
         result = await _synapse_post(
-            "/tools/finance/actions/execute",
+            _path("/actions/execute"),
             {"actionId": actionId},
             idempotency_key=key,
         )
