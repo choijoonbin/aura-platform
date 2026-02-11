@@ -2,18 +2,11 @@
 RAG 유틸 (Phase3 및 공통, Phase 6 Vector Pipeline)
 
 - artifacts 청킹, topK retrieve, ragRefs 스키마 생성.
-- Vector Ingestion: process_and_vectorize (PDF/Text → Chunk → Embed → Store).
-  - vector_store_type=pgvector 시 dwp_aura.rag_chunk Upsert.
-  - Chunking: SemanticChunker (langchain_experimental, percentile breakpoint).
-  - PDF: PyMuPDF (fitz) + 표(Table) → Markdown 보존.
-  - chunk metadata: page_number, file_path (출처 보기/Citation).
+- Vectorization: process_and_vectorize (PDF/Text → Chunk → Embed) 연산만 수행.
+  DB INSERT 없음. 연산 결과(청크·임베딩·메타데이터 리스트)를 반환하며 저장은 백엔드.
+  Chunking: SemanticChunker (langchain_experimental). PDF: PyMuPDF + 표 → Markdown.
 - Hybrid Search: hybrid_retrieve (벡터 + 메타데이터, Article/Clause 보존).
-
-Hardening (Robustness):
-- [Abstraction] pgvector 접근은 PgVectorRagStore 추상화를 통해서만 수행.
-  향후 langchain-postgres / langchain_community PGVector 연동 시 이 레이어만 교체.
-- [Standardization] PostgreSQL 고유 문법 `::type` 금지. 모든 타입 캐스팅은
-  표준 SQL `CAST(:param AS type)` 로만 수행하여 SQLAlchemy/psycopg2 바인딩 간섭 방지.
+  pgvector 검색 시에만 DB 읽기 사용. INSERT/DDL은 백엔드 담당.
 - [Validation] 벡터화 전 preprocess_document_text() 로 UTF-8·특수문자 검증 및 정규화.
 """
 
@@ -30,9 +23,8 @@ from core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-# SQL 표준화: PostgreSQL ::type 사용 금지. CAST(:param AS type) 만 사용.
+# 검색 쿼리용만 (INSERT 없음). PostgreSQL ::type 금지, CAST만 사용.
 _SQL_CAST_VECTOR = "CAST(:embedding AS vector)"
-_SQL_CAST_JSONB = "CAST(:metadata_json AS jsonb)"
 _SQL_CAST_JSONB_FILTER = "CAST(:filter_json AS jsonb)"
 
 # 청크 본문 내 페이지 마커 (PDF 로드 시 삽입 → 청크별 page_number 추출용)
@@ -272,52 +264,8 @@ def preprocess_document_text(content: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# pgvector 저장소 추상화 (CAST-only SQL. Raw `::type` 사용 금지.)
+# pgvector 검색 전용 (READ only. INSERT/ALTER 은 백엔드 담당.)
 # ---------------------------------------------------------------------------
-
-
-def _pgvector_delete_by_doc_id(session: Any, full_table: str, doc_id: str) -> None:
-    """문서별 기존 청크 삭제. 바인딩만 사용."""
-    from sqlalchemy import text
-    session.execute(text(f"DELETE FROM {full_table} WHERE doc_id = :doc_id"), {"doc_id": doc_id})
-
-
-def _pgvector_insert_chunk(
-    session: Any,
-    full_table: str,
-    *,
-    doc_id: str,
-    chunk_index: int,
-    content: str,
-    embedding: str,
-    regulation_article: str | None,
-    regulation_clause: str | None,
-    location: str | None,
-    title: str | None,
-    doc_type: str,
-    metadata_json: str,
-) -> None:
-    """단일 청크 삽입. vector/jsonb 는 CAST(:param AS type) 만 사용."""
-    from sqlalchemy import text
-    session.execute(
-        text(f"""
-            INSERT INTO {full_table}
-            (doc_id, chunk_index, content, embedding, regulation_article, regulation_clause, location, title, doc_type, metadata_json)
-            VALUES (:doc_id, :chunk_index, :content, {_SQL_CAST_VECTOR}, :regulation_article, :regulation_clause, :location, :title, :doc_type, {_SQL_CAST_JSONB})
-        """),
-        {
-            "doc_id": doc_id,
-            "chunk_index": chunk_index,
-            "content": content,
-            "embedding": embedding,
-            "regulation_article": regulation_article,
-            "regulation_clause": regulation_clause,
-            "location": location,
-            "title": title,
-            "doc_type": doc_type,
-            "metadata_json": metadata_json,
-        },
-    )
 
 
 def _pgvector_search(
@@ -357,7 +305,7 @@ def _pgvector_search(
     return list(session.execute(text(sql), params).fetchall())
 
 
-def process_and_vectorize_pgvector(
+def _compute_vectorization_result(
     file_path: str | Path,
     rag_document_id: str,
     metadata: dict[str, Any] | None = None,
@@ -367,8 +315,12 @@ def process_and_vectorize_pgvector(
     doc_type: str = "REGULATION",
 ) -> dict[str, Any]:
     """
-    PDF/Text → SemanticChunker(percentile) → OpenAI text-embedding-3-small (1536) → dwp_aura.rag_chunk Upsert.
-    chunk_metadata에 page_number, file_path 포함 (출처 보기/Citation).
+    PDF/Text → Chunking → Embedding 까지만 수행. DB 접속·INSERT 없음.
+    Returns:
+        {"ok": True, "rag_document_id": str, "chunks": [{"chunk_index", "content", "embedding", "metadata"}, ...]}
+        또는 {"ok": False, "error": str}.
+    - embedding: list[float] (1536차원, PostgreSQL 문법 없음).
+    - metadata: 백엔드 rag_chunk 행 매핑용 (doc_id, regulation_article 등 포함).
     """
     path = Path(file_path)
     emb = _get_embedding_client()
@@ -401,7 +353,7 @@ def process_and_vectorize_pgvector(
         except ImportError:
             return {"ok": False, "error": "pip install langchain-text-splitters (fallback)"}
     if not chunks_text:
-        return {"ok": True, "rag_document_id": rag_document_id, "chunks_added": 0}
+        return {"ok": True, "rag_document_id": rag_document_id, "chunks": []}
     meta = dict(metadata or {})
     regulation_article = meta.get("regulation_article") or meta.get("regulationArticle")
     regulation_clause = meta.get("regulation_clause") or meta.get("regulationClause")
@@ -413,59 +365,34 @@ def process_and_vectorize_pgvector(
     file_path_str = str(path.resolve())
     is_pdf = path.suffix.lower() == ".pdf"
 
-    from database.engine import get_engine, get_session
-    from database.models.rag_chunk import FULL_TABLE, create_rag_chunk_table_if_not_exists
-
-    engine = get_engine()
-    create_rag_chunk_table_if_not_exists(engine)
-
     embeddings = emb.embed_documents(chunks_text)
     if len(embeddings) != len(chunks_text):
         return {"ok": False, "error": "Embedding count mismatch"}
     if embeddings and len(embeddings[0]) != EMBEDDING_DIM:
         return {"ok": False, "error": f"Embedding dim must be {EMBEDDING_DIM}"}
 
-    with get_session() as session:
-        _pgvector_delete_by_doc_id(session, FULL_TABLE, rag_document_id)
-        for i, (content, vec) in enumerate(zip(chunks_text, embeddings)):
-            page_number = _extract_page_from_chunk(content) if is_pdf else 1
-            chunk_meta = {
-                **meta,
-                "page_number": page_number,
-                "file_path": file_path_str,
-            }
-            vec_str = _embedding_to_pgvector(vec)
-            _pgvector_insert_chunk(
-                session,
-                FULL_TABLE,
-                doc_id=rag_document_id,
-                chunk_index=i,
-                content=content,
-                embedding=vec_str,
-                regulation_article=regulation_article,
-                regulation_clause=regulation_clause,
-                location=location,
-                title=title,
-                doc_type=doc_type,
-                metadata_json=json.dumps(chunk_meta, ensure_ascii=False),
-            )
-    _notify_backend_rag_completed(rag_document_id)
-    # Redis: workbench:rag:status 채널로 학습 완료 알림 (통일 포맷)
-    try:
-        from core.notifications import (
-            publish_workbench_notification_sync,
-            NOTIFICATION_CATEGORY_RAG_STATUS,
-            REDIS_CHANNEL_WORKBENCH_RAG_STATUS,
-        )
-        settings = get_settings()
-        channel = getattr(settings, "workbench_rag_status_channel", REDIS_CHANNEL_WORKBENCH_RAG_STATUS)
-        publish_workbench_notification_sync(
-            channel, NOTIFICATION_CATEGORY_RAG_STATUS, "학습 완료",
-            rag_document_id=rag_document_id, chunks_added=len(chunks_text),
-        )
-    except Exception as e:
-        logger.debug("RAG status notification publish skipped: %s", e)
-    return {"ok": True, "rag_document_id": rag_document_id, "chunks_added": len(chunks_text)}
+    chunks_out: list[dict[str, Any]] = []
+    for i, (content, vec) in enumerate(zip(chunks_text, embeddings)):
+        page_number = _extract_page_from_chunk(content) if is_pdf else 1
+        chunk_meta: dict[str, Any] = {
+            **meta,
+            "doc_id": rag_document_id,
+            "chunk_index": i,
+            "page_number": page_number,
+            "file_path": file_path_str,
+            "regulation_article": regulation_article,
+            "regulation_clause": regulation_clause,
+            "location": location,
+            "title": title,
+            "doc_type": doc_type,
+        }
+        chunks_out.append({
+            "chunk_index": i,
+            "content": content,
+            "embedding": [float(x) for x in vec],
+            "metadata": chunk_meta,
+        })
+    return {"ok": True, "rag_document_id": rag_document_id, "chunks": chunks_out}
 
 
 def retrieve_rag_pgvector(
@@ -490,11 +417,9 @@ def retrieve_rag_pgvector(
     emb = _get_embedding_client()
     if emb is None:
         return []
-    from database.engine import get_engine, get_session
-    from database.models.rag_chunk import FULL_TABLE, create_rag_chunk_table_if_not_exists
+    from database.engine import get_session
+    from database.models.rag_chunk import FULL_TABLE
 
-    engine = get_engine()
-    create_rag_chunk_table_if_not_exists(engine)
     query_embedding = emb.embed_query(query)
     if len(query_embedding) != EMBEDDING_DIM:
         return []
@@ -566,72 +491,17 @@ def process_and_vectorize(
     chunk_overlap: int = 120,
 ) -> dict[str, Any]:
     """
-    PDF/Text 파일 수신 → Chunking → Embedding → Vector Store 저장.
-    vector_store_type=pgvector 시 SemanticChunker(percentile) + dwp_aura.rag_chunk Upsert (page_number, file_path 포함).
-    그 외 chroma 시 SemanticChunker 또는 CharacterTextSplitter + Chroma.
+    PDF/Text → Chunking → Embedding 연산만 수행. DB INSERT 없음.
+    연산 결과(청크 + 임베딩 벡터 + 메타데이터)를 반환하며, 저장은 백엔드에서 수행.
 
     Returns:
-        {"ok": True, "rag_document_id": str, "chunks_added": int} 또는 {"ok": False, "error": str}.
+        {"ok": True, "rag_document_id": str, "chunks": [{"chunk_index", "content", "embedding", "metadata"}, ...]}
+        또는 {"ok": False, "error": str}.
     """
-    settings = get_settings()
-    vs_type = (getattr(settings, "vector_store_type", "none") or "").strip().lower()
-    if vs_type == "pgvector":
-        return process_and_vectorize_pgvector(
-            file_path, rag_document_id, metadata,
-            chunk_size=chunk_size, chunk_overlap=chunk_overlap,
-        )
-    store = get_vector_store()
-    if store is None:
-        return {"ok": False, "error": "Vector store not configured (vector_store_type=chroma or pgvector, deps installed)"}
-    emb = _get_embedding_client()
-    if emb is None:
-        return {"ok": False, "error": "Embedding client not available"}
-    path = Path(file_path)
-    try:
-        text = _load_text_from_file(path)
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-    try:
-        from langchain_experimental.text_splitter import SemanticChunker
-        splitter = SemanticChunker(embeddings=emb, breakpoint_threshold_type="percentile")
-        chunks_text = splitter.split_text(text)
-    except Exception as e:
-        logger.debug("SemanticChunker for chroma failed, using CharacterTextSplitter: %s", e)
-        try:
-            from langchain_text_splitters import CharacterTextSplitter
-            splitter = CharacterTextSplitter(
-                separator="\n\n",
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-                length_function=len,
-            )
-            chunks_text = splitter.split_text(text)
-        except ImportError:
-            return {"ok": False, "error": "pip install langchain-text-splitters"}
-    file_path_str = str(path.resolve())
-    is_pdf = path.suffix.lower() == ".pdf"
-    meta_base = dict(metadata or {})
-    meta_base["rag_document_id"] = rag_document_id
-    meta_base["file_path"] = file_path_str
-    from langchain_core.documents import Document
-    documents = []
-    for i, t in enumerate(chunks_text):
-        page_number = _extract_page_from_chunk(t) if is_pdf else 1
-        documents.append(
-            Document(
-                page_content=t,
-                metadata={**meta_base, "chunk_index": i, "page_number": page_number},
-            )
-        )
-    if not documents:
-        return {"ok": True, "rag_document_id": rag_document_id, "chunks_added": 0}
-    try:
-        ids = [f"{rag_document_id}#{i}" for i in range(len(documents))]
-        store.add_documents(documents, ids=ids)
-    except Exception as e:
-        logger.exception("Vector store add_documents failed")
-        return {"ok": False, "error": str(e)}
-    return {"ok": True, "rag_document_id": rag_document_id, "chunks_added": len(documents)}
+    return _compute_vectorization_result(
+        file_path, rag_document_id, metadata,
+        chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+    )
 
 
 # 회계 규정 분석 시 사용할 doc_type. 일반 매뉴얼(GENERAL)이 혼입되지 않도록 격리.

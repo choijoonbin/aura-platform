@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-pgvector 확장 및 dwp_aura.rag_chunk 스키마/테이블 초기화.
-DATABASE_URL로 접속한 DB에 CREATE EXTENSION vector; CREATE SCHEMA dwp_aura; CREATE TABLE dwp_aura.rag_chunk; 수행.
+pgvector 사용 시 DB 연결 확인용.
+dwp_aura.rag_chunk 테이블 생성·마이그레이션은 백엔드에서 수행합니다. Aura는 INSERT/DDL 하지 않음.
 실행: python3 scripts/init_rag_pgvector.py (프로젝트 루트에서, .env에 DATABASE_URL 설정 후)
 """
 
@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 def main():
     from core.config import get_settings
     from database.engine import get_engine
-    from database.models.rag_chunk import create_rag_chunk_table_if_not_exists, FULL_TABLE
+    from database.models.rag_chunk import FULL_TABLE
 
     settings = get_settings()
     url = getattr(settings, "database_url", "") or ""
@@ -23,10 +23,12 @@ def main():
         sys.exit(1)
     print("PostgreSQL 연결 중...")
     engine = get_engine()
-    print("pgvector 확장 및 dwp_aura.rag_chunk 테이블 생성 중...")
-    create_rag_chunk_table_if_not_exists(engine)
-    print(f"완료: {FULL_TABLE} 테이블이 존재합니다.")
-    print("다음으로 python3 scripts/check_rag_vector.py 로 연결·데이터를 확인하세요.")
+    with engine.connect() as conn:
+        from sqlalchemy import text
+        conn.execute(text("SELECT 1"))
+    print("연결 성공.")
+    print(f"rag_chunk 테이블({FULL_TABLE}) 생성·마이그레이션은 백엔드에서 수행하세요.")
+    print("데이터 확인: python3 scripts/check_rag_vector.py")
 
 
 if __name__ == "__main__":

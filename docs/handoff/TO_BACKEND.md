@@ -88,6 +88,7 @@ Aura가 발행하는 채널명은 아래와 같습니다. **문자열 그대로*
 | **REDIS_PUBLISH_MESSAGE_SPEC_FINAL.md** | Redis 한 문서 통합: 채널·스키마·JSON 샘플·Backend 구독(workbench:* PSUBSCRIBE)·NotificationRedisSubscriber 매핑·정합성 요약 |
 | **BACKEND_AURA_CONTRACT_AFTER_ROLE_SEPARATION.md** | 역할 분리 후 API/Redis 계약·체크리스트·요약 전달문 |
 | **OTHER_SYSTEMS_ACTION_INTEGRITY_AND_REFETCH.md** | 조치 완료 후 Refetch·Redis 구독 연동 상세 |
+| **RAG_VECTORIZE_RESPONSE_SPEC.md** | RAG 벡터화 API 응답 JSON (청크·임베딩 리스트). Aura는 INSERT 없이 연산 결과만 반환, 저장은 백엔드. |
 
 문의나 규격 이슈는 위 문서를 기준으로 협의해 주시면 됩니다.
 

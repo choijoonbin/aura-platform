@@ -99,6 +99,18 @@ class Settings(BaseSettings):
         le=1.0,
         description="pgvector 유사도 하한. 이 값 미만 결과는 제외 (기본 0.75)",
     )
+    # RAG 벡터화 응답: 청크 배치 크기 (20~50). 대용량 시 메모리·전송 부담 완화.
+    rag_chunk_batch_size: int = Field(
+        default=30,
+        ge=20,
+        le=50,
+        description="청크를 끊어서 전달할 단위 개수 (20~50). 응답 batches 또는 백엔드 저장 API 호출 단위.",
+    )
+    # 백엔드 청크 저장 API (설정 시 Aura가 배치 단위로 POST. 미설정 시 응답 body에 batches 반환)
+    backend_rag_chunks_save_url: str | None = Field(
+        default=None,
+        description="청크 배치 저장 URL. {doc_id} 플레이스홀더 사용 가능. 예: https://backend/api/rag/documents/{doc_id}/chunks",
+    )
     chroma_persist_dir: str = Field(
         default="./data/chroma",
         description="Chroma persistence directory (vector_store_type=chroma)",

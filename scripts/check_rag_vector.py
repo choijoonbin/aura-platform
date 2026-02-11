@@ -12,15 +12,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def check_pgvector():
-    """dwp_aura.rag_chunk 테이블 레코드 수 및 doc_id 목록."""
-    from core.config import get_settings
+    """dwp_aura.rag_chunk 테이블 레코드 수 및 doc_id 목록 (테이블은 백엔드에서 생성)."""
     from database.engine import get_engine, get_session
-    from database.models.rag_chunk import FULL_TABLE, create_rag_chunk_table_if_not_exists
+    from database.models.rag_chunk import FULL_TABLE
     from sqlalchemy import text
 
-    settings = get_settings()
     engine = get_engine()
-    create_rag_chunk_table_if_not_exists(engine)
     with get_session() as session:
         r = session.execute(text(f"SELECT COUNT(*) FROM {FULL_TABLE}")).scalar()
         count = r or 0

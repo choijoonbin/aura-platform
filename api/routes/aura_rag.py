@@ -1,7 +1,8 @@
 """
 RAG Vector Pipeline API (Phase 6)
 
-파일 업로드 또는 백엔드 로컬 경로(document_path) → 백그라운드 벡터화 → dwp_aura.rag_document ID 매핑.
+Aura는 DB에 INSERT하지 않음. 문서 벡터화 연산(Chunk + Embedding) 결과만 JSON으로 반환.
+저장은 백엔드에서 수행. 대용량 방지를 위해 청크를 20~50개 단위 배치로 분할 전송.
 """
 
 import json
@@ -11,7 +12,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, UploadFile
+import httpx
+from fastapi import APIRouter, File, Form, UploadFile, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -20,7 +22,7 @@ from core.config import get_settings
 
 
 class IngestFromPathRequest(BaseModel):
-    """백엔드 로컬 경로 기반 RAG 수집 요청."""
+    """백엔드 로컬 경로 기반 벡터화 요청."""
 
     document_path: str = Field(..., description="로컬 절대 경로 (실제 존재·읽기 가능해야 함)")
     rag_document_id: str = Field(default="", description="dwp_aura.rag_document 문서 ID (매핑용)")
@@ -37,118 +39,110 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/aura/rag", tags=["aura-rag"])
 
-# 업로드 임시 디렉터리 (벡터화 후 삭제)
 UPLOAD_TMP_DIR = Path(os.environ.get("AURA_RAG_UPLOAD_TMP", "./data/rag_upload_tmp"))
-
 _ALLOWED_EXTENSIONS = (".pdf", ".txt", ".md")
 
+# 배치 크기 허용 범위 (메모리·전송 부담 완화)
+_BATCH_SIZE_MIN, _BATCH_SIZE_MAX = 20, 50
 
-def _run_vectorize_and_cleanup(file_path: str, rag_document_id: str, metadata_str: str | None) -> None:
-    """백그라운드: 벡터화 실행 후 임시 파일 삭제."""
-    path = Path(file_path)
-    metadata: dict[str, Any] = {}
-    if metadata_str and metadata_str.strip():
-        try:
-            metadata = json.loads(metadata_str)
-        except json.JSONDecodeError:
-            pass
+
+def _parse_metadata(metadata_str: str | None) -> dict[str, Any]:
+    if not metadata_str or not metadata_str.strip():
+        return {}
     try:
-        result = process_and_vectorize(path, rag_document_id, metadata or None)
-        if result.get("ok"):
-            logger.info("RAG vectorize ok: rag_document_id=%s chunks=%s", rag_document_id, result.get("chunks_added"))
-        else:
-            logger.warning("RAG vectorize failed: %s", result.get("error"))
-    finally:
+        return json.loads(metadata_str)
+    except json.JSONDecodeError:
+        return {}
+
+
+def _batch_chunks(chunks: list[dict[str, Any]], batch_size: int) -> list[list[dict[str, Any]]]:
+    """청크 리스트를 batch_size 단위로 분할. batch_size는 20~50으로 클램프."""
+    size = max(_BATCH_SIZE_MIN, min(_BATCH_SIZE_MAX, batch_size))
+    return [chunks[i : i + size] for i in range(0, len(chunks), size)] if chunks else []
+
+
+def _send_batches_to_backend(
+    rag_document_id: str,
+    batches: list[list[dict[str, Any]]],
+    save_url_template: str,
+    timeout: float = 60.0,
+) -> tuple[int, int]:
+    """
+    백엔드 저장 API에 배치 단위로 POST. URL 내 {doc_id}는 rag_document_id로 치환.
+    Returns:
+        (batches_sent, total_chunks)
+    """
+    url = save_url_template.replace("{doc_id}", rag_document_id)
+    total = 0
+    for batch_index, batch in enumerate(batches):
+        body = {
+            "rag_document_id": rag_document_id,
+            "chunks": batch,
+            "batch_index": batch_index,
+            "total_batches": len(batches),
+        }
         try:
-            if path.exists():
-                path.unlink()
-        except OSError as e:
-            logger.warning("Failed to remove temp file %s: %s", file_path, e)
+            with httpx.Client(timeout=timeout) as client:
+                r = client.post(url, json=body)
+                if r.status_code >= 400:
+                    logger.warning("Backend chunks save failed: %s %s", r.status_code, r.text)
+                    raise RuntimeError(f"Backend save returned {r.status_code}")
+        except Exception as e:
+            logger.warning("Backend chunks save request failed: %s", e)
+            raise
+        total += len(batch)
+    return len(batches), total
 
 
-def _run_vectorize_from_path(file_path: str, rag_document_id: str, metadata_str: str | None) -> None:
-    """백그라운드: 로컬 공유 경로 파일 벡터화. 파일은 삭제하지 않음(백엔드 소유)."""
-    path = Path(file_path)
-    metadata: dict[str, Any] = {}
-    if metadata_str and metadata_str.strip():
-        try:
-            metadata = json.loads(metadata_str)
-        except json.JSONDecodeError:
-            pass
-    result = process_and_vectorize(path, rag_document_id, metadata or None)
-    if result.get("ok"):
-        logger.info("RAG vectorize from path ok: rag_document_id=%s chunks=%s", rag_document_id, result.get("chunks_added"))
-    else:
-        logger.warning("RAG vectorize from path failed: %s", result.get("error"))
-
-
-@router.post(
-    "/ingest",
-    summary="RAG 문서 벡터화 수집",
-    description="PDF/Text 파일 업로드 후 백그라운드에서 Chunk → Embed → Vector Store 저장. dwp_aura.rag_document ID와 매핑.",
-)
-async def rag_ingest(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(..., description="PDF 또는 텍스트 파일"),
-    rag_document_id: str = Form(default="", description="dwp_aura.rag_document 테이블 문서 ID (매핑용)"),
-    metadata: str = Form(
-        default="",
-        description='JSON 문자열. 규정 인용용 메타데이터 (예: {"regulation_article":"제5조","location":"규정 제5조 2항"})',
-    ),
+def _build_vectorize_response(
+    rag_document_id: str,
+    chunks: list[dict[str, Any]],
+    batch_size: int,
+    save_url: str | None,
 ) -> JSONResponse:
     """
-    파일 업로드 → 202 Accepted + job_id.
-    벡터화는 BackgroundTasks로 비동기 수행.
+    배치 단위로 응답 구성 또는 백엔드 저장 API 반복 호출.
+    - save_url 설정 시: 배치마다 POST 후 요약만 반환 (전송 경량화).
+    - 미설정 시: 응답 body에 batch_size와 batches(배치 배열) 반환. 순수 JSON(숫자 배열·텍스트만).
     """
-    if not file.filename:
-        return JSONResponse(status_code=400, content={"error": "filename required"})
-    suffix = Path(file.filename).suffix.lower()
-    if suffix not in (".pdf", ".txt", ".md"):
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Only .pdf, .txt, .md are supported"},
-        )
-    doc_id = (rag_document_id or "").strip() or f"rag-{uuid.uuid4().hex[:12]}"
-    UPLOAD_TMP_DIR.mkdir(parents=True, exist_ok=True)
-    safe_name = f"{doc_id}{suffix}"
-    tmp_path = UPLOAD_TMP_DIR / safe_name
-    try:
-        content = await file.read()
-        tmp_path.write_bytes(content)
-    except Exception as e:
-        logger.warning("rag_ingest write temp failed: %s", e)
-        return JSONResponse(status_code=500, content={"error": str(e)})
-    job_id = f"job-{uuid.uuid4().hex[:16]}"
-    background_tasks.add_task(
-        _run_vectorize_and_cleanup,
-        str(tmp_path),
-        doc_id,
-        metadata.strip() or None,
-    )
+    batches = _batch_chunks(chunks, batch_size)
+    if save_url:
+        try:
+            sent, total = _send_batches_to_backend(rag_document_id, batches, save_url)
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "rag_document_id": rag_document_id,
+                    "total_chunks": total,
+                    "batches_sent": sent,
+                    "batch_size": batch_size,
+                },
+            )
+        except Exception as e:
+            return JSONResponse(
+                status_code=502,
+                content={"error": f"Backend chunks save failed: {e}"},
+            )
     return JSONResponse(
-        status_code=202,
+        status_code=200,
         content={
-            "job_id": job_id,
-            "rag_document_id": doc_id,
-            "message": "Vectorization started in background",
+            "rag_document_id": rag_document_id,
+            "batch_size": batch_size,
+            "batches": batches,
         },
     )
 
 
 @router.post(
     "/documents/{doc_id}/vectorize",
-    summary="RAG 문서 벡터화 (백엔드 호출용)",
-    description="백엔드가 저장한 로컬 경로(document_path)로 해당 doc_id 문서를 벡터화. Path param doc_id = rag_document_id.",
+    summary="RAG 문서 벡터화 (배치 단위 반환 또는 백엔드 저장 API 호출)",
+    description="Chunk → Embedding 연산 후, 20~50개 단위 배치로 분할해 응답하거나 백엔드 저장 API에 반복 POST. 순수 JSON(float[]·텍스트)만 전달.",
 )
 async def rag_documents_vectorize(
     doc_id: str,
-    background_tasks: BackgroundTasks,
     body: VectorizeByPathBody,
+    batch_size: int = Query(default=30, ge=20, le=50, description="배치당 청크 수 (20~50)"),
 ) -> JSONResponse:
-    """
-    POST /aura/rag/documents/{docId}/vectorize — 백엔드가 document_path를 body에 넣어 호출.
-    doc_id(path) = rag_document_id, body.document_path = 로컬 절대 경로.
-    """
     document_path = (body.document_path or "").strip()
     if not document_path:
         return JSONResponse(status_code=400, content={"error": "document_path required"})
@@ -172,37 +166,24 @@ async def rag_documents_vectorize(
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
     rag_document_id = (doc_id or "").strip() or f"rag-{uuid.uuid4().hex[:12]}"
-    job_id = f"job-{uuid.uuid4().hex[:16]}"
-    background_tasks.add_task(
-        _run_vectorize_from_path,
-        str(valid_path),
-        rag_document_id,
-        body.metadata.strip() or None,
-    )
-    return JSONResponse(
-        status_code=202,
-        content={
-            "job_id": job_id,
-            "rag_document_id": rag_document_id,
-            "document_path": str(valid_path),
-            "message": "Vectorization started in background",
-        },
-    )
+    metadata = _parse_metadata(body.metadata.strip() or None)
+    result = process_and_vectorize(valid_path, rag_document_id, metadata or None)
+    if not result.get("ok"):
+        return JSONResponse(
+            status_code=422,
+            content={"error": result.get("error", "Vectorization failed")},
+        )
+    chunks = result["chunks"]
+    save_url = getattr(settings, "backend_rag_chunks_save_url", None) or None
+    return _build_vectorize_response(rag_document_id, chunks, batch_size, save_url)
 
 
 @router.post(
     "/ingest-from-path",
-    summary="RAG 문서 벡터화 수집 (로컬 경로)",
-    description="백엔드가 저장한 로컬 절대 경로(document_path)의 파일을 읽어 Chunk → Embed → Vector Store 저장. 경로 존재·읽기 권한 검사 후 기존 청킹·벡터화 프로세스 수행.",
+    summary="RAG 문서 벡터화 (로컬 경로, 배치 단위 반환 또는 백엔드 저장 API 호출)",
+    description="로컬 경로 파일 Chunk → Embedding 후 20~50개 단위 배치로 응답하거나 백엔드 저장 API에 반복 POST.",
 )
-async def rag_ingest_from_path(
-    background_tasks: BackgroundTasks,
-    body: IngestFromPathRequest,
-) -> JSONResponse:
-    """
-    Request body (JSON): document_path(필수), rag_document_id, metadata(JSON 문자열).
-    document_path: 로컬 절대 경로. rag_allowed_document_base_path 설정 시 해당 하위 경로만 허용.
-    """
+async def rag_ingest_from_path(body: IngestFromPathRequest) -> JSONResponse:
     document_path = (body.document_path or "").strip()
     if not document_path:
         return JSONResponse(status_code=400, content={"error": "document_path required"})
@@ -226,19 +207,63 @@ async def rag_ingest_from_path(
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
     doc_id = (body.rag_document_id or "").strip() or f"rag-{uuid.uuid4().hex[:12]}"
-    job_id = f"job-{uuid.uuid4().hex[:16]}"
-    background_tasks.add_task(
-        _run_vectorize_from_path,
-        str(valid_path),
-        doc_id,
-        body.metadata.strip() or None,
-    )
-    return JSONResponse(
-        status_code=202,
-        content={
-            "job_id": job_id,
-            "rag_document_id": doc_id,
-            "document_path": str(valid_path),
-            "message": "Vectorization from local path started in background",
-        },
-    )
+    metadata = _parse_metadata(body.metadata.strip() or None)
+    result = process_and_vectorize(valid_path, doc_id, metadata or None)
+    if not result.get("ok"):
+        return JSONResponse(
+            status_code=422,
+            content={"error": result.get("error", "Vectorization failed")},
+        )
+    batch_size = getattr(settings, "rag_chunk_batch_size", 30)
+    save_url = getattr(settings, "backend_rag_chunks_save_url", None) or None
+    return _build_vectorize_response(result["rag_document_id"], result["chunks"], batch_size, save_url)
+
+
+@router.post(
+    "/ingest",
+    summary="RAG 문서 벡터화 (파일 업로드, 배치 단위 반환 또는 백엔드 저장 API 호출)",
+    description="PDF/Text 업로드 → Chunk → Embedding 후 20~50개 단위 배치로 응답하거나 백엔드 저장 API에 반복 POST.",
+)
+async def rag_ingest(
+    file: UploadFile = File(..., description="PDF 또는 텍스트 파일"),
+    rag_document_id: str = Form(default="", description="dwp_aura.rag_document 문서 ID (매핑용)"),
+    metadata: str = Form(
+        default="",
+        description='JSON 문자열. 규정 인용용 메타데이터 (예: {"regulation_article":"제5조"})',
+    ),
+) -> JSONResponse:
+    if not file.filename:
+        return JSONResponse(status_code=400, content={"error": "filename required"})
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in (".pdf", ".txt", ".md"):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Only .pdf, .txt, .md are supported"},
+        )
+    doc_id = (rag_document_id or "").strip() or f"rag-{uuid.uuid4().hex[:12]}"
+    UPLOAD_TMP_DIR.mkdir(parents=True, exist_ok=True)
+    tmp_path = UPLOAD_TMP_DIR / f"{doc_id}{suffix}"
+    try:
+        content = await file.read()
+        tmp_path.write_bytes(content)
+    except Exception as e:
+        logger.warning("rag_ingest write temp failed: %s", e)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    try:
+        meta = _parse_metadata(metadata.strip() or None)
+        result = process_and_vectorize(tmp_path, doc_id, meta or None)
+        if not result.get("ok"):
+            return JSONResponse(
+                status_code=422,
+                content={"error": result.get("error", "Vectorization failed")},
+            )
+        settings = get_settings()
+        batch_size = getattr(settings, "rag_chunk_batch_size", 30)
+        save_url = getattr(settings, "backend_rag_chunks_save_url", None) or None
+        return _build_vectorize_response(result["rag_document_id"], result["chunks"], batch_size, save_url)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError as e:
+            logger.warning("Failed to remove temp file %s: %s", tmp_path, e)
