@@ -17,6 +17,7 @@ from core.analysis.phase3_events import (
     Phase3FailedEvent,
 )
 from core.analysis.rag import chunk_artifacts, retrieve_rag
+from core.analysis.reasoning_citations import build_regulation_citations
 from core.analysis.proposal_utils import score_from_evidence, proposal_fingerprint
 from core.llm import get_llm_client
 
@@ -96,15 +97,28 @@ async def run_phase3_analysis(
         severity = "HIGH" if score >= 0.8 else "MEDIUM" if score >= 0.6 else "LOW"
 
         yield ("step", Phase3StepEvent(label="Scoring + reasonText", detail="", percent=70).model_dump())
+        doc_list = (artifacts.get("documents") or []) if isinstance(artifacts.get("documents"), list) else []
+        regulation_citations = build_regulation_citations(doc_list)
         reason_text = f"케이스 {case_id}: 증거 {len(evidence)}건, RAG 참조 {len(rag_refs)}건. "
         if test_fail == "llm":
             raise RuntimeError("Simulated LLM failure (X-Aura-Test-Fail: llm)")
         try:
             llm = get_llm_client()
-            prompt = (
-                f"케이스 {case_id} 분석. 스코어 {score:.2f}, 심각도 {severity}. "
-                "한국어로 2~3문장 reasonText 작성."
+            prompt_parts = [
+                f"케이스 {case_id} 분석. 스코어 {score:.2f}, 심각도 {severity}. ",
+            ]
+            if regulation_citations:
+                prompt_parts.append(
+                    regulation_citations + "\n\n"
+                    "위 참조 규정이 있으면 반드시 규정 조문(예: 규정 제5조, 제5조 2항)을 명시하여 인용하고, "
+                    "구체적 사안(발생 시각·금액·경비 유형·업무 연관성 등)을 한 문장에 포함하여 작성. "
+                    "예시: '규정 제5조 2항에 의거, 토요일 오후 11시에 발생한 식대는 업무 연관성이 낮아 위험군으로 분류함.' "
+                )
+            prompt_parts.append(
+                "한국어로 2~3문장 reasonText 작성. "
+                "고객이 이해할 수 있도록, 참고한 증거와 그에 따른 판단을 설명 가능한 문장으로 작성."
             )
+            prompt = "".join(prompt_parts)
             resp = await llm.ainvoke(prompt)
             if resp:
                 reason_text = resp.strip()

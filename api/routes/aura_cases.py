@@ -149,13 +149,15 @@ async def _run_analysis_background(
     auth_token: str | None,
     body_evidence: dict[str, Any] | None = None,
 ):
-    """백그라운드 분석 실행 + 큐에 이벤트 적재 + 완료 시 콜백. body_evidence: C(폴백)용."""
+    """백그라운드 분석 실행 + 큐에 이벤트 적재 + 완료 시 콜백. body_evidence: C(폴백)용. Phase 4: 정책 참조 로그용 context."""
     set_request_context(
         tenant_id=tenant_id,
         user_id="",
         auth_token=auth_token,
         trace_id=f"trace-{case_id}-{run_id[:8]}",
         case_id=case_id,
+        policy_config_source="dwp_aura.sys_monitoring_configs",
+        policy_profile="default",
     )
     event_type = "failed"
     payload: dict[str, Any] = {}

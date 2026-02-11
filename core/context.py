@@ -23,13 +23,21 @@ def set_request_context(
     gateway_request_id: str | None = None,
     case_id: str | None = None,
     case_key: str | None = None,
+    bukrs: str | None = None,
+    belnr: str | None = None,
+    gjahr: str | None = None,
+    policy_config_source: str | None = None,
+    policy_profile: str | None = None,
+    **extra: Any,
 ) -> None:
     """요청 컨텍스트 설정 (스트림 핸들러 시작 시 호출)
-    
+
     C-2: correlation 키(traceId, gatewayRequestId, caseId, caseKey, actionId)를
     Audit evidence_json에 보강하기 위해 case_id, case_key를 저장합니다.
+    Phase 3: SAP 원천 전표 계보 연결을 위해 bukrs, belnr, gjahr를 저장합니다.
+    Phase 4: 정책 참조 로그를 위해 policy_config_source, policy_profile를 저장합니다.
     """
-    _request_context.set({
+    ctx: dict[str, Any] = {
         "tenant_id": tenant_id,
         "user_id": user_id,
         "auth_token": auth_token,
@@ -37,7 +45,19 @@ def set_request_context(
         "gateway_request_id": gateway_request_id,
         "case_id": case_id,
         "case_key": case_key,
-    })
+    }
+    if bukrs is not None:
+        ctx["bukrs"] = bukrs
+    if belnr is not None:
+        ctx["belnr"] = belnr
+    if gjahr is not None:
+        ctx["gjahr"] = gjahr
+    if policy_config_source is not None:
+        ctx["policy_config_source"] = policy_config_source
+    if policy_profile is not None:
+        ctx["policy_profile"] = policy_profile
+    ctx.update(extra)
+    _request_context.set(ctx)
 
 
 def get_request_context() -> dict[str, Any]:

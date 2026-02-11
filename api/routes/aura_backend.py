@@ -32,6 +32,7 @@ from api.schemas.events import (
     FailedEvent,
 )
 from api.schemas.hitl_events import HITLEvent
+from core.action_integrity import record_case_action
 from core.memory.hitl_manager import get_hitl_manager
 from domains.dev.agents.enhanced_agent import get_enhanced_agent
 from domains.dev.agents.hooks import create_sse_hook
@@ -43,6 +44,36 @@ router = APIRouter(prefix="/aura", tags=["aura-backend"])
 
 # 스트리밍 이벤트 간 최소 지연시간 (초) - 프론트엔드 UI 안정성을 위해
 STREAMING_EVENT_DELAY = 0.05  # 50ms
+
+
+async def _record_action_integrity(
+    hitl_manager: Any,
+    request_id: str,
+    approval: dict[str, Any],
+    approved: bool,
+    comment: str | None = None,
+) -> None:
+    """승인/거절 시 case_action_history 기록 및 fi_doc_header 동기화, Redis 조치 완료 발행."""
+    try:
+        request_data = await hitl_manager.get_approval_request(request_id)
+        if not request_data:
+            return
+        ctx = request_data.get("context") or approval.get("toolArgs") or {}
+        case_id = ctx.get("caseId") or ctx.get("case_id")
+        executor_id = request_data.get("userId") or request_data.get("user_id") or "unknown"
+        if not case_id:
+            return
+        await record_case_action(
+            case_id=str(case_id),
+            request_id=request_id,
+            executor_id=str(executor_id),
+            action_type="APPROVE" if approved else "REJECT",
+            approved=approved,
+            comment=comment,
+            doc_key=ctx.get("docKey") or ctx.get("doc_key"),
+        )
+    except Exception as e:
+        logger.warning("Action integrity record failed (stream): %s", e)
 
 
 class BackendStreamRequest(BaseModel):
@@ -286,9 +317,12 @@ async def backend_stream(
                             )
                             
                             if signal is None:
-                                # 타임아웃 처리: failed 이벤트 전송 및 상태 업데이트
+                                # 타임아웃(보류) 처리: Redis 알림 발행 + failed 이벤트 전송
                                 logger.warning(f"HITL timeout after 300 seconds (session: {session_id}, request: {request_id})")
-                                
+                                _record_action_integrity(
+                                    hitl_manager, request_id, approval, approved=False,
+                                    comment="HITL timeout",
+                                )
                                 # failed 이벤트 전송 (프론트엔드에 작업 취소 알림)
                                 failed_data = {
                                     "type": "failed",
@@ -327,7 +361,11 @@ async def backend_stream(
                                 return
                             
                             if signal.get("type") == "rejection":
-                                # 거절 처리
+                                # 거절 처리 + Action Integrity (DB 기록 + Redis 알림)
+                                _record_action_integrity(
+                                    hitl_manager, request_id, approval, approved=False,
+                                    comment=signal.get("reason"),
+                                )
                                 error_data = {
                                     "type": "error",
                                     "error": signal.get("reason", "Request rejected"),
@@ -339,7 +377,8 @@ async def backend_stream(
                                 yield "data: [DONE]\n\n"
                                 return
                             
-                            # 승인됨 - 실행 계속
+                            # 승인됨 - Action Integrity (DB 기록 + Redis 알림) 후 실행 계속
+                            _record_action_integrity(hitl_manager, request_id, approval, approved=True)
                             logger.info(f"HITL: Request approved (request: {request_id})")
                 
                 # 큐에 쌓인 이벤트 발행 (백엔드 요구 형식으로 변환)
@@ -447,6 +486,57 @@ async def get_hitl_signal(
         "status": "SUCCESS",
         "message": "Signal retrieved",
         "data": json.dumps(signal_data, ensure_ascii=False),
+        "success": True,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+# --- Action Integrity: 조치 확정 신호 → HITL 피드백 로그 + Redis 알림 (DB 쓰기 없음) ---
+
+class RecordActionRequest(BaseModel):
+    """조치 확정 신호 (HITL 피드백 로그 + Redis 알림용, DB는 백엔드 관리)."""
+    case_id: str = Field(..., min_length=1, description="케이스 ID")
+    request_id: str = Field(..., min_length=1, description="HITL 요청 ID")
+    executor_id: str = Field(..., min_length=1, description="실행자(승인/거절한 사용자) ID")
+    approved: bool = Field(..., description="True=승인, False=거절")
+    comment: str | None = Field(default=None, description="사용자 코멘트")
+    doc_key: str | None = Field(default=None, description="연동 전표 doc_key (선택)")
+
+
+@router.post("/action/record")
+async def record_action(
+    body: RecordActionRequest,
+    user: CurrentUser,
+    tenant_id: TenantId,
+):
+    """
+    조치 확정 신호 수신 (Callback Listener).
+    
+    - DB 직접 쓰기 없음: case_action_history / fi_doc_header는 백엔드가 관리합니다.
+    - HITL 피드백으로 로그 기록 → 향후 분석 정확도·가중치 업데이트용.
+    - Redis workbench:case:action 채널로 조치 완료 알림 발행 → 워크벤치 Refetch 등.
+    
+    Gateway: POST /api/aura/action/record
+    """
+    action_type = "APPROVE" if body.approved else "REJECT"
+    result = await record_case_action(
+        case_id=body.case_id,
+        request_id=body.request_id,
+        executor_id=body.executor_id,
+        action_type=action_type,
+        approved=body.approved,
+        comment=body.comment,
+        doc_key=body.doc_key,
+    )
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=result.get("error", "Failed to record action"),
+        )
+    return {
+        "status": "SUCCESS",
+        "message": "Action recorded",
+        "data": result,
         "success": True,
         "timestamp": datetime.utcnow().isoformat(),
     }

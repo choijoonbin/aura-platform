@@ -158,9 +158,16 @@ class AgentAuditEvent:
         latency_ms: int,
         actor_agent_id: str = "finance_agent",
         trace_id: str | None = None,
+        caseId: str | None = None,
+        caseKey: str | None = None,
         **evidence: Any,
     ) -> AuditEvent:
         message = evidence.pop("message", None) or f"RAG queried: {len(doc_ids)} docs, topK={top_k}, {latency_ms}ms"
+        ev: dict[str, Any] = {"docIds": doc_ids, "topK": top_k, "latencyMs": latency_ms, "message": message, **evidence}
+        if caseId:
+            ev["caseId"] = caseId
+        if caseKey:
+            ev["caseKey"] = caseKey
         return AuditEvent(
             tenant_id=tenant_id,
             actor_type="AGENT",
@@ -169,8 +176,10 @@ class AgentAuditEvent:
             event_type=AuditEventType.RAG_QUERIED.value,
             outcome="SUCCESS",
             severity="INFO",
-            evidence_json={"docIds": doc_ids, "topK": top_k, "latencyMs": latency_ms, "message": message, **evidence},
+            evidence_json=ev,
             trace_id=trace_id,
+            resource_type="CASE" if caseId else None,
+            resource_id=caseId,
         )
 
     @staticmethod
@@ -236,11 +245,14 @@ class AgentAuditEvent:
         requires_approval: bool = True,
         actor_agent_id: str = "finance_agent",
         trace_id: str | None = None,
+        caseId: str | None = None,
         caseKey: str | None = None,
         **evidence: Any,
     ) -> AuditEvent:
         message = evidence.pop("message", None) or f"Action proposed: {action_id} (requiresApproval={requires_approval})"
-        ev = {"actionId": action_id, "requiresApproval": requires_approval, "message": message, **evidence}
+        ev: dict[str, Any] = {"actionId": action_id, "requiresApproval": requires_approval, "message": message, **evidence}
+        if caseId:
+            ev["caseId"] = caseId
         if caseKey:
             ev["caseKey"] = caseKey
         return AuditEvent(
@@ -252,6 +264,37 @@ class AgentAuditEvent:
             resource_type="AGENT_ACTION",
             resource_id=action_id,
             outcome="PENDING",
+            severity="INFO",
+            evidence_json=ev,
+            trace_id=trace_id,
+        )
+
+    @staticmethod
+    def action_approved(
+        tenant_id: str,
+        action_id: str,
+        actor_agent_id: str = "finance_agent",
+        trace_id: str | None = None,
+        caseId: str | None = None,
+        caseKey: str | None = None,
+        **evidence: Any,
+    ) -> AuditEvent:
+        """HITL 승인 시 (case_id 연동: 통합 워크벤치 타임라인용)"""
+        message = evidence.pop("message", None) or f"Action approved: {action_id}"
+        ev: dict[str, Any] = {"actionId": action_id, "message": message, **evidence}
+        if caseId:
+            ev["caseId"] = caseId
+        if caseKey:
+            ev["caseKey"] = caseKey
+        return AuditEvent(
+            tenant_id=tenant_id,
+            actor_type="AGENT",
+            actor_agent_id=actor_agent_id,
+            event_category="ACTION",
+            event_type=AuditEventType.ACTION_APPROVED.value,
+            resource_type="AGENT_ACTION",
+            resource_id=action_id,
+            outcome="SUCCESS",
             severity="INFO",
             evidence_json=ev,
             trace_id=trace_id,
@@ -287,30 +330,6 @@ class AgentAuditEvent:
             outcome=outcome,
             severity=severity,
             evidence_json=ev,
-            trace_id=trace_id,
-        )
-
-    @staticmethod
-    def action_approved(
-        tenant_id: str,
-        action_id: str,
-        actor_agent_id: str = "finance_agent",
-        trace_id: str | None = None,
-        **evidence: Any,
-    ) -> AuditEvent:
-        """HITL 승인 시"""
-        message = evidence.pop("message", None) or f"Action approved: {action_id}"
-        return AuditEvent(
-            tenant_id=tenant_id,
-            actor_type="AGENT",
-            actor_agent_id=actor_agent_id,
-            event_category="ACTION",
-            event_type=AuditEventType.ACTION_APPROVED.value,
-            resource_type="AGENT_ACTION",
-            resource_id=action_id,
-            outcome="SUCCESS",
-            severity="INFO",
-            evidence_json={"actionId": action_id, "message": message, **evidence},
             trace_id=trace_id,
         )
 
@@ -371,9 +390,16 @@ class AgentAuditEvent:
         resource_id: str | None = None,
         actor_agent_id: str = "finance_agent",
         trace_id: str | None = None,
+        caseId: str | None = None,
+        caseKey: str | None = None,
         **evidence: Any,
     ) -> AuditEvent:
         message = evidence.pop("message", None) or f"SAP write success: {sap_ref}"
+        ev: dict[str, Any] = {"sapRef": sap_ref, "message": message, **evidence}
+        if caseId:
+            ev["caseId"] = caseId
+        if caseKey:
+            ev["caseKey"] = caseKey
         return AuditEvent(
             tenant_id=tenant_id,
             actor_type="AGENT",
@@ -384,7 +410,7 @@ class AgentAuditEvent:
             resource_id=resource_id or sap_ref,
             outcome="SUCCESS",
             severity="INFO",
-            evidence_json={"sapRef": sap_ref, "message": message, **evidence},
+            evidence_json=ev,
             trace_id=trace_id,
         )
 
@@ -396,9 +422,16 @@ class AgentAuditEvent:
         resource_id: str | None = None,
         actor_agent_id: str = "finance_agent",
         trace_id: str | None = None,
+        caseId: str | None = None,
+        caseKey: str | None = None,
         **evidence: Any,
     ) -> AuditEvent:
         message = evidence.pop("message", None) or f"SAP write failed: {error}"
+        ev: dict[str, Any] = {"sapRef": sap_ref, "error": error, "message": message, **evidence}
+        if caseId:
+            ev["caseId"] = caseId
+        if caseKey:
+            ev["caseKey"] = caseKey
         return AuditEvent(
             tenant_id=tenant_id,
             actor_type="AGENT",
@@ -409,7 +442,7 @@ class AgentAuditEvent:
             resource_id=resource_id or sap_ref,
             outcome="FAIL",
             severity="ERROR",
-            evidence_json={"sapRef": sap_ref, "error": error, "message": message, **evidence},
+            evidence_json=ev,
             trace_id=trace_id,
         )
 

@@ -68,7 +68,55 @@ class Settings(BaseSettings):
         default="2024-02-15-preview",
         description="Azure OpenAI API version",
     )
-    
+    # Embedding (Phase 6 RAG vector pipeline)
+    openai_embedding_model: str = Field(
+        default="text-embedding-3-small",
+        description="OpenAI embedding model (OpenAI 직접 연결 시)",
+    )
+    azure_openai_embedding_deployment: str | None = Field(
+        default=None,
+        description="Azure OpenAI embedding deployment (설정 시 Azure 사용)",
+    )
+    # Vector store (Phase 6): "pgvector" | "chroma" | "pinecone" | "none"
+    vector_store_type: str = Field(
+        default="none",
+        description="Vector store: pgvector (dwp_aura.rag_chunk), chroma, pinecone, none",
+    )
+    # Backend relay: 벡터화 완료 후 RagController에 processing_status 갱신 요청
+    backend_rag_callback_url: str | None = Field(
+        default=None,
+        description="Backend RagController URL (예: POST {url}/rag/documents/{doc_id}/processing-status). 벡터화 완료 시 COMPLETED 전달",
+    )
+    # 로컬 공유 경로: 백엔드가 저장한 파일 경로로 수집 시, 이 경로 하위만 허용 (None이면 검사 생략)
+    rag_allowed_document_base_path: str | None = Field(
+        default=None,
+        description="백엔드 document_path 수집 시 허용 기준 경로 (절대 경로). 설정 시 document_path는 이 경로 하위여야 함.",
+    )
+    # RAG 검색: 무관한 규정 인용 방지 (pgvector)
+    rag_similarity_threshold: float = Field(
+        default=0.75,
+        ge=0.0,
+        le=1.0,
+        description="pgvector 유사도 하한. 이 값 미만 결과는 제외 (기본 0.75)",
+    )
+    chroma_persist_dir: str = Field(
+        default="./data/chroma",
+        description="Chroma persistence directory (vector_store_type=chroma)",
+    )
+    chroma_collection_name: str = Field(
+        default="aura_rag",
+        description="Chroma collection name",
+    )
+    pinecone_api_key: str | None = Field(default=None, description="Pinecone API key")
+    pinecone_index_name: str = Field(
+        default="aura-rag",
+        description="Pinecone index name",
+    )
+    pinecone_namespace: str = Field(
+        default="default",
+        description="Pinecone namespace",
+    )
+
     # ==================== Application Configuration ====================
     app_env: str = Field(
         default="development",
@@ -259,6 +307,22 @@ class Settings(BaseSettings):
     audit_redis_channel: str = Field(
         default="audit:events:ingest",
         description="Redis Pub/Sub 채널 (audit_delivery_mode=redis 시 사용)",
+    )
+    case_action_redis_channel: str = Field(
+        default="workbench:case:action",
+        description="승인/거절 조치 완료 시 Redis Pub/Sub 채널 (워크벤치/에이전트 Refetch 알림)",
+    )
+    workbench_rag_status_channel: str = Field(
+        default="workbench:rag:status",
+        description="RAG 벡터화 완료 시 Redis Pub/Sub 채널 (학습 완료 알림)",
+    )
+    workbench_alert_channel: str = Field(
+        default="workbench:alert",
+        description="신규 고위험 케이스 탐지 시 Redis Pub/Sub 채널 (AI_DETECT 알림)",
+    )
+    hitl_feedback_log_path: str | None = Field(
+        default=None,
+        description="HITL 피드백 JSONL 파일 경로 (설정 시 가중치 업데이트용 로그 적재, 예: data/hitl_feedback.jsonl)",
     )
     audit_ingest_url: str | None = Field(
         default=None,

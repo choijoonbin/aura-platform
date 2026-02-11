@@ -9,6 +9,18 @@ import asyncio
 import logging
 from typing import Any
 
+from core.agent_stream.constants import (
+    METADATA_STATUS_ERROR,
+    METADATA_STATUS_SUCCESS,
+    METADATA_STATUS_WARNING,
+    STAGE_ANALYZE,
+    STAGE_DETECT,
+    STAGE_EXECUTE,
+    STAGE_MATCH,
+    STAGE_SCAN,
+    STAGE_SIMULATE,
+)
+from core.agent_stream.metadata import format_metadata
 from core.agent_stream.schemas import AgentEvent
 from core.config import settings
 from core.context import get_synapse_headers
@@ -16,36 +28,77 @@ from core.http_client import post_json
 
 logger = logging.getLogger(__name__)
 
-# AuditEvent event_type → AgentStream stage 매핑
+# AuditEvent event_type → AgentStream stage (STAGE_* 상수 사용, 프론트 필터링 가능)
 _AUDIT_TO_STAGE: dict[str, str] = {
-    "AGENT/SCAN_STARTED": "SCAN",
-    "AGENT/SCAN_COMPLETED": "SCAN",
-    "AGENT/DETECTION_FOUND": "DETECT",
-    "AGENT/RAG_QUERIED": "ANALYZE",
-    "AGENT/REASONING_COMPOSED": "ANALYZE",
-    "ACTION/SIMULATION_RUN": "SIMULATE",
-    "ACTION/ACTION_PROPOSED": "EXECUTE",
-    "ACTION/ACTION_APPROVED": "EXECUTE",
-    "ACTION/ACTION_EXECUTED": "EXECUTE",
-    "ACTION/ACTION_FAILED": "EXECUTE",
-    "ACTION/ACTION_ROLLED_BACK": "EXECUTE",
-    "INTEGRATION/SAP_WRITE_SUCCESS": "EXECUTE",
-    "INTEGRATION/SAP_WRITE_FAILED": "EXECUTE",
-    "CASE/CASE_CREATED": "EXECUTE",
-    "CASE/CASE_STATUS_CHANGED": "EXECUTE",
-    "CASE/CASE_ASSIGNED": "EXECUTE",
+    "AGENT/SCAN_STARTED": STAGE_SCAN,
+    "AGENT/SCAN_COMPLETED": STAGE_SCAN,
+    "AGENT/DETECTION_FOUND": STAGE_DETECT,
+    "AGENT/RAG_QUERIED": STAGE_ANALYZE,
+    "AGENT/REASONING_COMPOSED": STAGE_ANALYZE,
+    "ACTION/SIMULATION_RUN": STAGE_SIMULATE,
+    "ACTION/ACTION_PROPOSED": STAGE_EXECUTE,
+    "ACTION/ACTION_APPROVED": STAGE_EXECUTE,
+    "ACTION/ACTION_EXECUTED": STAGE_EXECUTE,
+    "ACTION/ACTION_FAILED": STAGE_EXECUTE,
+    "ACTION/ACTION_ROLLED_BACK": STAGE_EXECUTE,
+    "INTEGRATION/SAP_WRITE_SUCCESS": STAGE_EXECUTE,
+    "INTEGRATION/SAP_WRITE_FAILED": STAGE_EXECUTE,
+    "CASE/CASE_CREATED": STAGE_EXECUTE,
+    "CASE/CASE_STATUS_CHANGED": STAGE_EXECUTE,
+    "CASE/CASE_ASSIGNED": STAGE_EXECUTE,
 }
 
 
+def _outcome_to_status(outcome: str) -> str:
+    """audit outcome → metadata_json.status (SUCCESS|WARNING|ERROR)."""
+    if not outcome:
+        return METADATA_STATUS_SUCCESS
+    o = outcome.upper()
+    if o in ("SUCCESS", "PASS", "PENDING", "NOOP"):
+        return METADATA_STATUS_SUCCESS
+    if o in ("FAIL", "FAILED", "ERROR", "DENIED"):
+        return METADATA_STATUS_ERROR
+    return METADATA_STATUS_SUCCESS
+
+
+def _severity_to_metadata_status(severity: str, outcome: str) -> str:
+    """severity + outcome → metadata_json.status (SUCCESS|WARNING|ERROR)."""
+    status_from_outcome = _outcome_to_status(outcome)
+    if status_from_outcome == METADATA_STATUS_ERROR:
+        return METADATA_STATUS_ERROR
+    sev = (severity or "").upper()
+    if sev == "WARN":
+        return METADATA_STATUS_WARNING
+    if sev == "ERROR":
+        return METADATA_STATUS_ERROR
+    return METADATA_STATUS_SUCCESS
+
+
+def _stage_to_title(stage: str, event_type: str) -> str:
+    """stage/event_type → 타임라인용 한 줄 title (STAGE_* 상수와 매핑)"""
+    titles: dict[str, str] = {
+        STAGE_SCAN: "스캔",
+        STAGE_DETECT: "위험 탐지",
+        STAGE_ANALYZE: "추론·분석",
+        STAGE_SIMULATE: "시뮬레이션",
+        STAGE_EXECUTE: "조치 실행",
+        STAGE_MATCH: "유사 케이스 매칭",
+    }
+    return titles.get(stage, stage or "이벤트")
+
+
 def _audit_event_to_agent_event(audit_event: Any) -> AgentEvent:
-    """AuditEvent → AgentEvent 변환"""
+    """AuditEvent → AgentEvent 변환. case_id 보강, payload에 title/description/status 포함 (통합 워크벤치 타임라인용)."""
     from datetime import datetime
 
     data = audit_event.model_dump(mode="json") if hasattr(audit_event, "model_dump") else dict(audit_event)
     ev: dict = data.get("evidence_json") or {}
 
     event_type = data.get("event_type", "")
-    stage = _AUDIT_TO_STAGE.get(event_type, "EXECUTE" if "ACTION" in event_type or "CASE" in event_type else "ANALYZE")
+    stage = _AUDIT_TO_STAGE.get(
+        event_type,
+        STAGE_EXECUTE if "ACTION" in event_type or "CASE" in event_type else STAGE_ANALYZE,
+    )
 
     message = ev.get("message") or event_type or "Event"
     if isinstance(message, dict):
@@ -53,7 +106,25 @@ def _audit_event_to_agent_event(audit_event: Any) -> AgentEvent:
 
     rt, rid = data.get("resource_type"), data.get("resource_id")
     case_id = ev.get("caseId") or (rid if rt == "CASE" else None)
+    if case_id is None:
+        try:
+            from core.context import get_request_context
+            case_id = get_request_context().get("case_id")
+        except LookupError:
+            pass
     action_id = ev.get("actionId") or (rid if rt == "AGENT_ACTION" else None)
+
+    # metadata_json 규격 강제: format_metadata 사용
+    outcome = data.get("outcome", "")
+    severity = data.get("severity", "INFO")
+    status = _severity_to_metadata_status(severity, outcome)
+    evidence = {k: v for k, v in ev.items() if k not in ("message", "caseKey", "caseId", "traceId", "actionId")}
+    metadata_json = format_metadata(
+        title=_stage_to_title(stage, event_type),
+        reasoning=str(message),
+        evidence=evidence,
+        status=status,
+    )
 
     return AgentEvent(
         tenantId=data.get("tenant_id", "1"),
@@ -65,7 +136,7 @@ def _audit_event_to_agent_event(audit_event: Any) -> AgentEvent:
         severity=data.get("severity", "INFO"),
         traceId=ev.get("traceId") or data.get("trace_id"),
         actionId=action_id,
-        payload={k: v for k, v in ev.items() if k not in ("message", "caseKey", "caseId", "traceId", "actionId")},
+        payload=metadata_json,
     )
 
 

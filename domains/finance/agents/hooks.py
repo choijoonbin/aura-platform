@@ -23,11 +23,22 @@ logger = logging.getLogger(__name__)
 
 
 def _case_context(state: dict[str, Any]) -> tuple[str | None, str | None]:
-    """state에서 caseId, caseKey 추출 (audit traceability용)"""
+    """state에서 caseId, caseKey 추출 (audit traceability용). agent_activity_log case 매핑 필수."""
     ctx = state.get("context") or {}
     case_id = ctx.get("caseId") or ctx.get("case_id")
     case_key = ctx.get("caseKey") or ctx.get("case_key")
     return case_id, case_key
+
+
+def _apply_case_resource(event: Any, state: dict[str, Any]) -> None:
+    """
+    context에 case_id가 있으면 모든 agent_activity_log 생성 시 resource_type='CASE', resource_id=case_id 자동 설정.
+    AuditEvent 인스턴스를 받아 in-place로 수정함.
+    """
+    case_id, _ = _case_context(state)
+    if case_id:
+        event.resource_type = "CASE"
+        event.resource_id = case_id
 
 
 class FinanceSSEHook:
@@ -67,9 +78,7 @@ class FinanceSSEHook:
                     trace_id=trace_id,
                     **ev,
                 )
-                if case_id:
-                    event.resource_type = "CASE"
-                    event.resource_id = case_id
+                _apply_case_resource(event, state)
                 self._emit_audit(event)
             except Exception:
                 pass
@@ -179,9 +188,7 @@ class FinanceSSEHook:
                     trace_id=trace_id,
                     **ev,
                 )
-                if case_id:
-                    event.resource_type = "CASE"
-                    event.resource_id = case_id
+                _apply_case_resource(event, state)
                 self._emit_audit(event)
                 self._scan_completed_emitted = True
             except Exception:
@@ -215,9 +222,7 @@ class FinanceSSEHook:
                         trace_id=trace_id,
                         **ev,
                     )
-                    if case_id:
-                        event.resource_type = "CASE"
-                        event.resource_id = case_id
+                    _apply_case_resource(event, state)
                     self._emit_audit(event)
                     self._scan_completed_emitted = True
                 except Exception:
@@ -226,15 +231,28 @@ class FinanceSSEHook:
                 from core.audit import AgentAuditEvent
                 from core.context import get_request_context
                 tenant_id = state.get("tenant_id") or "default"
-                trace_id = get_request_context().get("trace_id") or state.get("trace_id")
+                ctx = get_request_context()
+                trace_id = ctx.get("trace_id") or state.get("trace_id")
                 context = state.get("context") or {}
                 case_id = context.get("caseId") or context.get("case_id") or ""
                 if case_id:
+                    # Phase 4: 정책 참조를 reasoning 및 evidence에 명시
+                    policy_config = ctx.get("policy_config_source") or "dwp_aura.sys_monitoring_configs"
+                    policy_profile = ctx.get("policy_profile") or "policy_profile"
+                    reason_suffix = f" {policy_config} 임계치 및 {policy_profile} 가이드 참조."
+                    message = f"Reasoning composed for case: {case_id}.{reason_suffix}"
+                    policy_ref: dict[str, Any] = {
+                        "configSource": policy_config,
+                        "profileName": policy_profile,
+                    }
                     event = AgentAuditEvent.reasoning_composed(
                         tenant_id=tenant_id,
                         case_id=case_id,
                         trace_id=trace_id,
+                        message=message,
+                        policy_reference=policy_ref,
                     )
+                    _apply_case_resource(event, state)
                     self._emit_audit(event)
             except Exception:
                 pass

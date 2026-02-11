@@ -1,0 +1,40 @@
+"""
+Agent Stream 상수 (통합 워크벤치 타임라인용)
+
+stage 컬럼값 및 프론트엔드 단계별 그룹핑(탐지-추론-조치) 매핑.
+"""
+
+from core.agent_stream.schemas import AgentStreamStage
+
+# Stage 컬럼 허용값 (agent_activity_log.stage)
+STAGE_SCAN = AgentStreamStage.SCAN.value
+STAGE_DETECT = AgentStreamStage.DETECT.value
+STAGE_ANALYZE = AgentStreamStage.ANALYZE.value
+STAGE_SIMULATE = AgentStreamStage.SIMULATE.value
+STAGE_EXECUTE = AgentStreamStage.EXECUTE.value
+STAGE_MATCH = AgentStreamStage.MATCH.value
+
+STAGES = (STAGE_SCAN, STAGE_DETECT, STAGE_ANALYZE, STAGE_SIMULATE, STAGE_EXECUTE, STAGE_MATCH)
+
+# 프론트엔드 단계별 그룹핑 (탐지-추론-조치)
+STAGE_GROUP_DETECTION = "DETECTION"
+STAGE_GROUP_REASONING = "REASONING"
+STAGE_GROUP_ACTION = "ACTION"
+STAGE_GROUP_MATCH = "MATCH"
+
+# stage → stageGroup (타임라인 필터/그룹핑용)
+STAGE_TO_GROUP: dict[str, str] = {
+    STAGE_SCAN: STAGE_GROUP_DETECTION,
+    STAGE_DETECT: STAGE_GROUP_DETECTION,
+    STAGE_ANALYZE: STAGE_GROUP_REASONING,
+    STAGE_SIMULATE: STAGE_GROUP_REASONING,
+    STAGE_EXECUTE: STAGE_GROUP_ACTION,
+    STAGE_MATCH: STAGE_GROUP_MATCH,
+}
+
+# metadata_json.status 허용값 (워크벤치 UI)
+METADATA_STATUS_SUCCESS = "SUCCESS"
+METADATA_STATUS_WARNING = "WARNING"
+METADATA_STATUS_ERROR = "ERROR"
+
+METADATA_STATUSES = (METADATA_STATUS_SUCCESS, METADATA_STATUS_WARNING, METADATA_STATUS_ERROR)

@@ -41,6 +41,90 @@ def _emit_audit_event(event: Any) -> None:
         get_audit_writer().ingest_fire_and_forget(event)
     except Exception as e:
         logger.debug(f"Audit emit skipped: {e}")
+
+
+def _build_rag_contributions(doc_result: str | list | dict) -> list[dict[str, Any]]:
+    """
+    RAG 검색 결과에서 문서별 위치 정보를 추출해 evidence.ragContributions 형식으로 반환.
+    '규정 제3조 2항(비용 한도) 참조'와 같은 구체적 참조를 evidence에 포함.
+    """
+    contributions: list[dict[str, Any]] = []
+    try:
+        if isinstance(doc_result, str):
+            data = json.loads(doc_result) if doc_result.strip() else {}
+        elif isinstance(doc_result, (list, dict)):
+            data = doc_result
+        else:
+            return contributions
+        if isinstance(data, list):
+            doc_list = data
+        else:
+            doc_list = data.get("documents", data.get("items", data.get("results", [])))
+        if not isinstance(doc_list, list):
+            return contributions
+        for i, doc in enumerate(doc_list[:20]):
+            if not isinstance(doc, dict):
+                continue
+            ref_id = f"ref-{i+1}"
+            source_key = doc.get("docKey") or doc.get("id") or doc.get("belnr") or f"DOC-{i}"
+            title = doc.get("title") or doc.get("documentTitle") or doc.get("header", {}).get("title") if isinstance(doc.get("header"), dict) else None
+            section = doc.get("section") or doc.get("clause") or doc.get("regulationSection")
+            clause = doc.get("clause") or doc.get("regulationClause")
+            location = doc.get("location") or doc.get("regulationLocation")
+            if not location and (section or clause):
+                location = f"규정 {section or ''} {clause or ''}".strip() or None
+            excerpt = (doc.get("excerpt") or doc.get("summary") or doc.get("content") or json.dumps(doc, ensure_ascii=False))[:400]
+            if isinstance(excerpt, str):
+                excerpt = excerpt[:400]
+            else:
+                excerpt = str(excerpt)[:400]
+            art = doc.get("regulation_article") or doc.get("regulationArticle") or section
+            cl = doc.get("regulation_clause") or doc.get("regulationClause") or clause
+            article = f"{art or ''} {cl or ''}".strip() or location
+            contributions.append({
+                "refId": ref_id,
+                "sourceType": "DOCUMENT",
+                "sourceKey": str(source_key),
+                "title": title,
+                "excerpt": excerpt,
+                "article": article,
+                "location": location,
+            })
+    except (json.JSONDecodeError, TypeError, KeyError):
+        pass
+    return contributions
+
+
+def _sap_document_evidence(
+    bukrs: str | None = None,
+    belnr: str | None = None,
+    gjahr: str | None = None,
+    from_context: bool = True,
+) -> dict[str, Any]:
+    """
+    SAP 원천 전표 식별자 evidence. metadata_json.evidence에 포함해 계보 연결 및 SAP 직접 이동용.
+    from_context=True면 get_request_context()에서 bukrs/belnr/gjahr 보강.
+    """
+    ev: dict[str, Any] = {}
+    if from_context:
+        try:
+            ctx = get_request_context()
+            bukrs = bukrs or ctx.get("bukrs")
+            belnr = belnr or ctx.get("belnr")
+            gjahr = gjahr or ctx.get("gjahr")
+        except LookupError:
+            pass
+    if bukrs is not None and str(bukrs).strip():
+        ev["bukrs"] = str(bukrs)
+    if belnr is not None and str(belnr).strip():
+        ev["belnr"] = str(belnr)
+    if gjahr is not None and str(gjahr).strip():
+        ev["gjahr"] = str(gjahr)
+    if ev.get("bukrs") and ev.get("belnr") and ev.get("gjahr"):
+        ev["resource_key"] = f"{ev['bukrs']}/{ev['belnr']}/{ev['gjahr']}"
+    return ev
+
+
 TIMEOUT = settings.synapse_timeout
 MAX_RETRIES = settings.synapse_max_retries
 
@@ -158,6 +242,12 @@ async def get_case(caseId: str = Field(..., description="케이스 ID")) -> str:
                 risk_key = parsed.get("riskTypeKey") or parsed.get("risk_type") or "unknown"
                 score = float(parsed.get("score", 0)) if parsed.get("score") is not None else 0.0
                 case_key = parsed.get("caseKey") or parsed.get("case_key") or ctx.get("case_key")
+                sap_ev = _sap_document_evidence(
+                    bukrs=parsed.get("bukrs") or parsed.get("companyCode"),
+                    belnr=parsed.get("belnr") or parsed.get("documentNumber"),
+                    gjahr=parsed.get("gjahr") or parsed.get("fiscalYear"),
+                    from_context=True,
+                )
                 event = AgentAuditEvent.detection_found(
                     tenant_id=ctx.get("tenant_id") or "default",
                     case_id=caseId,
@@ -165,6 +255,7 @@ async def get_case(caseId: str = Field(..., description="케이스 ID")) -> str:
                     score=score,
                     trace_id=ctx.get("trace_id"),
                     caseKey=case_key,
+                    **sap_ev,
                 )
                 _emit_audit_event(event)
         except (json.JSONDecodeError, TypeError, KeyError):
@@ -229,12 +320,24 @@ async def search_documents(
         try:
             from core.audit import AgentAuditEvent
             ctx = get_request_context()
+            sap_ev = _sap_document_evidence(
+                bukrs=filters.get("bukrs"),
+                belnr=filters.get("belnr"),
+                gjahr=filters.get("gjahr"),
+                from_context=True,
+            )
+            rag_contributions = _build_rag_contributions(result)
+            if rag_contributions:
+                sap_ev["ragContributions"] = rag_contributions
             event = AgentAuditEvent.rag_queried(
                 tenant_id=ctx.get("tenant_id") or "default",
                 doc_ids=doc_ids[:20] if isinstance(doc_ids, list) else [],
                 top_k=int(top_k) if isinstance(top_k, (int, float)) else 10,
                 latency_ms=latency_ms,
                 trace_id=ctx.get("trace_id"),
+                caseId=ctx.get("case_id") or case_id,
+                caseKey=ctx.get("case_key"),
+                **sap_ev,
             )
             _emit_audit_event(event)
         except Exception:
@@ -257,8 +360,31 @@ async def get_document(
     """
     단일 문서를 조회합니다.
     """
+    start = time.perf_counter()
     try:
-        return await _synapse_get(_path(f"/documents/{bukrs}/{belnr}/{gjahr}"))
+        result = await _synapse_get(_path(f"/documents/{bukrs}/{belnr}/{gjahr}"))
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        try:
+            from core.audit import AgentAuditEvent
+            ctx = get_request_context()
+            doc_key = f"{bukrs}/{belnr}/{gjahr}"
+            sap_ev = _sap_document_evidence(bukrs=bukrs, belnr=belnr, gjahr=gjahr, from_context=True)
+            sap_ev["resource_key"] = doc_key
+            event = AgentAuditEvent.rag_queried(
+                tenant_id=ctx.get("tenant_id") or "default",
+                doc_ids=[doc_key],
+                top_k=1,
+                latency_ms=latency_ms,
+                trace_id=ctx.get("trace_id"),
+                caseId=ctx.get("case_id"),
+                caseKey=ctx.get("case_key"),
+                message=f"Document fetched: {doc_key}",
+                **sap_ev,
+            )
+            _emit_audit_event(event)
+        except Exception:
+            pass
+        return result
     except httpx.HTTPStatusError as e:
         logger.error(f"get_document failed: {e}")
         return json.dumps({"error": str(e), "status_code": e.response.status_code})
@@ -278,16 +404,44 @@ async def get_lineage(
     전표/문서의 라인리지(Lineage)를 조회합니다.
     caseId 우선, 없으면 belnr+gjahr(+bukrs) 사용. Field 메타데이터 문자열은 거부.
     """
+    start = time.perf_counter()
     try:
         if belnr and gjahr and not _is_invalid_param_value(belnr) and not _is_invalid_param_value(gjahr):
             params: dict[str, Any] = {"belnr": belnr, "gjahr": gjahr}
             if bukrs and not _is_invalid_param_value(bukrs):
                 params["bukrs"] = bukrs
             result = await _synapse_get(_path("/lineage"), params)
+            lineage_by_doc = True
         elif caseId:
             result = await _synapse_get(_path("/lineage"), {"caseId": caseId})
+            lineage_by_doc = False
         else:
             return json.dumps({"error": "caseId or (belnr, gjahr) required. Field 메타데이터 문자열을 전달하지 마세요."})
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        try:
+            from core.audit import AgentAuditEvent
+            ctx = get_request_context()
+            sap_ev = _sap_document_evidence(
+                bukrs=bukrs if lineage_by_doc else None,
+                belnr=belnr if lineage_by_doc else None,
+                gjahr=gjahr if lineage_by_doc else None,
+                from_context=True,
+            )
+            event = AgentAuditEvent.rag_queried(
+                tenant_id=ctx.get("tenant_id") or "default",
+                doc_ids=[],
+                top_k=0,
+                latency_ms=latency_ms,
+                trace_id=ctx.get("trace_id"),
+                caseId=ctx.get("case_id") or caseId,
+                caseKey=ctx.get("case_key"),
+                message="Lineage queried",
+                source="lineage",
+                **sap_ev,
+            )
+            _emit_audit_event(event)
+        except Exception:
+            pass
         return result
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
@@ -326,11 +480,33 @@ async def get_open_items(
     Synapse: GET /open-items (query: type, overdueBucket, page, size).
     caseId 필터는 Synapse 미지원.
     """
+    start = time.perf_counter()
     try:
         params = {k: v for k, v in (filters or {}).items() if v is not None}
         params.setdefault("page", 0)
         params.setdefault("size", 20)
-        return await _synapse_get(_path("/open-items"), params)
+        result = await _synapse_get(_path("/open-items"), params)
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        try:
+            from core.audit import AgentAuditEvent
+            ctx = get_request_context()
+            sap_ev = _sap_document_evidence(from_context=True)
+            event = AgentAuditEvent.rag_queried(
+                tenant_id=ctx.get("tenant_id") or "default",
+                doc_ids=[],
+                top_k=params.get("size", 20),
+                latency_ms=latency_ms,
+                trace_id=ctx.get("trace_id"),
+                caseId=ctx.get("case_id"),
+                caseKey=ctx.get("case_key"),
+                message="Open items queried",
+                source="open_items",
+                **sap_ev,
+            )
+            _emit_audit_event(event)
+        except Exception:
+            pass
+        return result
     except httpx.HTTPStatusError as e:
         logger.error(f"get_open_items failed: {e}")
         return json.dumps({"error": str(e), "status_code": e.response.status_code})
@@ -374,6 +550,7 @@ async def simulate_action(
         try:
             from core.audit import AgentAuditEvent
             ctx = get_request_context()
+            sap_ev = _sap_document_evidence(from_context=True)
             event = AgentAuditEvent.simulation_run(
                 tenant_id=ctx.get("tenant_id") or "default",
                 action_id=result_id,
@@ -382,6 +559,7 @@ async def simulate_action(
                 trace_id=ctx.get("trace_id"),
                 caseId=caseId,
                 caseKey=ctx.get("case_key"),
+                **sap_ev,
             )
             _emit_audit_event(event)
         except Exception:
@@ -421,6 +599,7 @@ async def propose_action(
             from core.audit import AgentAuditEvent
             ctx = get_request_context()
             case_key = ctx.get("case_key")
+            sap_ev = _sap_document_evidence(from_context=True)
             event = AgentAuditEvent.action_proposed(
                 tenant_id=ctx.get("tenant_id") or "default",
                 action_id=result_id,
@@ -429,6 +608,7 @@ async def propose_action(
                 caseId=caseId,
                 caseKey=case_key,
                 actionType=actionType,
+                **sap_ev,
             )
             _emit_audit_event(event)
         except Exception:
@@ -472,6 +652,7 @@ async def execute_action(
         try:
             from core.audit import AgentAuditEvent
             ctx = get_request_context()
+            sap_ev = _sap_document_evidence(from_context=True)
             event = AgentAuditEvent.action_executed(
                 tenant_id=ctx.get("tenant_id") or "default",
                 action_id=actionId,
@@ -480,6 +661,7 @@ async def execute_action(
                 trace_id=ctx.get("trace_id"),
                 caseId=ctx.get("case_id"),
                 caseKey=ctx.get("case_key"),
+                **sap_ev,
             )
             _emit_audit_event(event)
             if outcome == "SUCCESS" and sap_ref:
@@ -488,6 +670,9 @@ async def execute_action(
                     sap_ref=sap_ref,
                     resource_id=actionId,
                     trace_id=ctx.get("trace_id"),
+                    caseId=ctx.get("case_id"),
+                    caseKey=ctx.get("case_key"),
+                    **sap_ev,
                 )
                 _emit_audit_event(sap_event)
             elif outcome == "FAIL":
@@ -498,6 +683,9 @@ async def execute_action(
                     error=str(err_msg),
                     resource_id=actionId,
                     trace_id=ctx.get("trace_id"),
+                    caseId=ctx.get("case_id"),
+                    caseKey=ctx.get("case_key"),
+                    **sap_ev,
                 )
                 _emit_audit_event(sap_event)
         except Exception:
@@ -509,6 +697,7 @@ async def execute_action(
         try:
             from core.audit import AgentAuditEvent
             ctx = get_request_context()
+            sap_ev = _sap_document_evidence(from_context=True)
             event = AgentAuditEvent.action_executed(
                 tenant_id=ctx.get("tenant_id") or "default",
                 action_id=actionId,
@@ -517,6 +706,7 @@ async def execute_action(
                 trace_id=ctx.get("trace_id"),
                 caseId=ctx.get("case_id"),
                 caseKey=ctx.get("case_key"),
+                **sap_ev,
             )
             _emit_audit_event(event)
         except Exception:

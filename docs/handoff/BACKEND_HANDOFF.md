@@ -404,6 +404,11 @@ docker exec -it dwp-redis redis-cli ping
 
 ## 🔗 관련 문서
 
+### 최신 전달 (다른 시스템용)
+- **[AURA_RESPONSE_TO_BACKEND_REVIEW.md](AURA_RESPONSE_TO_BACKEND_REVIEW.md)** (2026-02-11) — **백엔드 검토 회신(back.txt)에 대한 Aura 확인·답변**
+- **[BACKEND_AURA_CONTRACT_AFTER_ROLE_SEPARATION.md](BACKEND_AURA_CONTRACT_AFTER_ROLE_SEPARATION.md)** (2026-02-11) — 기능 제거 후 협업 규격·확인사항 (API/Redis 규격 변경, 양쪽 체크리스트)
+- **[OTHER_SYSTEMS_ACTION_INTEGRITY_AND_REFETCH.md](OTHER_SYSTEMS_ACTION_INTEGRITY_AND_REFETCH.md)** (2026-02-11) — 승인/거절 조치 Redis 알림, 워크벤치 Refetch 연동 스펙 (Backend/Frontend)
+
 ### Aura-Platform 문서
 - [BACKEND_INTEGRATION_STATUS.md](BACKEND_INTEGRATION_STATUS.md) - 연동 상태 상세
 - [JWT_COMPATIBILITY.md](JWT_COMPATIBILITY.md) - JWT 호환성 가이드

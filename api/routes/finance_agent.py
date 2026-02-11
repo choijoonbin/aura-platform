@@ -93,7 +93,7 @@ async def finance_stream(
     tenant_id_val = tenant_id or "default"
     gateway_request_id = req.headers.get("X-Request-ID") or req.headers.get("X-Gateway-Request-ID")
     
-    # Synapse Tool API 호출 시 사용할 컨텍스트 설정 (C-2: correlation 키 포함)
+    # Synapse Tool API 호출 시 사용할 컨텍스트 설정 (C-2: correlation 키 포함, Phase 4: 정책 참조)
     auth_header = req.headers.get("Authorization")
     set_request_context(
         tenant_id=tenant_id_val,
@@ -103,6 +103,8 @@ async def finance_stream(
         gateway_request_id=gateway_request_id,
         case_id=case_id,
         case_key=case_key,
+        policy_config_source=ctx.get("policy_config_source") or "dwp_aura.sys_monitoring_configs",
+        policy_profile=ctx.get("policy_profile") or "policy_profile",
     )
     
     async def event_generator():
@@ -251,6 +253,8 @@ async def finance_stream(
                                             tenant_id=tenant_id_val,
                                             action_id=request_id,
                                             trace_id=trace_id,
+                                            caseId=case_id,
+                                            caseKey=ctx.get("case_key") if (ctx := current_state.get("context")) else None,
                                         )
                                         get_audit_writer().ingest_fire_and_forget(event)
                                     except Exception:

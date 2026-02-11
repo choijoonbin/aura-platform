@@ -234,6 +234,8 @@ cp .env.example .env
 **Option A: Poetry 사용 (권장)**
 ```bash
 poetry install
+# RAG(벡터 수집·SemanticChunker·PyMuPDF PDF) 사용 시 추가
+poetry install --with rag
 poetry shell
 ```
 
@@ -242,6 +244,8 @@ poetry shell
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
+# RAG 사용 시 추가
+pip install pymupdf langchain-experimental langchain-text-splitters chromadb langchain-chroma
 ```
 
 ### 4. 데이터베이스 마이그레이션
@@ -339,6 +343,14 @@ mypy core domains api tools
 3. `schemas.py`에 도메인 데이터 모델 정의
 4. `api/routes/domains/`에 API 라우트 추가
 5. README.md 업데이트
+
+### RAG Knowledge Base (시연용) 및 XAI Reasoning
+
+- **설치**: RAG 벡터 수집·PDF 파싱·SemanticChunker 사용하려면 `poetry install --with rag` 실행. (pypdf, pymupdf, langchain-text-splitters, langchain-experimental, chromadb, langchain-chroma)
+- **pgvector 활성화**: `.env`에 `VECTOR_STORE_TYPE=pgvector` 설정. `DATABASE_URL`을 백엔드 PostgreSQL 주소와 맞춤 (예: `postgresql://user:password@localhost:5432/dwp_db`). 스키마 생성: `python3 scripts/init_rag_pgvector.py`. 확인: `python3 scripts/check_rag_vector.py` 실행 시 `Total Chunks: 0 (정상 연결 상태)` 출력되면 정상.
+- **시연용 규정 데이터**: `data/rag_document_seed.json` — 사내 경비 지출 규정 v1.0 (제3조, 제5조, 제7조, 제9조). 백엔드 `dwp_aura.rag_document` 적재 시 `scripts/seed_rag_documents.sql` 참고.
+- **메타데이터 규격**: Case 2(정책 위반) 탐지 시 규정 인용용 필드는 `docs/guides/RAG_KNOWLEDGE_BASE_METADATA.md` 참고.
+- **인용형 reasoning**: Phase2/Phase3 분석 시 참조 규정이 있으면 "규정 제5조 2항에 의거, …" 형태로 reasonText 생성 (`core/analysis/reasoning_citations.py`).
 
 ---
 
@@ -707,6 +719,7 @@ DWP Development Team
 - **[백엔드 통합 체크리스트 응답 검토](docs/backend-integration/BACKEND_INTEGRATION_CHECKLIST_RESPONSE.md)** - 백엔드 통합 체크리스트 응답 검토 및 대응 완료 보고서
 - **[통합/협업 체크리스트](docs/backend-integration/INTEGRATION_CHECKLIST.md)** - 통합 시 확인해야 할 사항
 - **[백엔드 전달 문서](docs/handoff/BACKEND_HANDOFF.md)** - 백엔드 팀 전달 문서
+- **[백엔드 전달 사항 (To Backend)](docs/handoff/TO_BACKEND.md)** - 역할 분리·Level4 규격 반영 후 확인·구현 체크리스트 및 요약
 - **[프론트엔드 전달 문서](docs/handoff/FRONTEND_HANDOFF.md)** - 프론트엔드 팀 전달 문서
 - **[통합 가이드](docs/guides/AURA_PLATFORM_INTEGRATION_GUIDE.md)** - 상세 통합 가이드
 - **[빠른 참조](docs/guides/AURA_PLATFORM_QUICK_REFERENCE.md)** - 핵심 정보 빠른 참조

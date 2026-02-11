@@ -76,6 +76,7 @@ from api.routes.aura_cases import router as aura_cases_router, stream_only_route
 from api.routes.finance_agent import router as finance_agent_router
 from api.routes.triggers import router as triggers_router
 from api.routes.aura_internal import router as aura_internal_router
+from api.routes.aura_rag import router as aura_rag_router
 
 # BaseHTTPMiddleware 미경유 스트림 전용 앱 (스트림 취소 방지)
 # CORS 미들웨어 제거 — CORSMiddleware도 BaseHTTPMiddleware라 스트림을 취소함. BE→Aura는 서버 간 호출이라 CORS 불필요.
@@ -110,6 +111,7 @@ app.include_router(aura_cases_router)  # Prompt C: Case Detail 탭 (Stream/RAG/S
 app.include_router(finance_agent_router)  # Finance 도메인
 app.include_router(triggers_router)  # Phase B: case-updated 웹훅
 app.include_router(aura_internal_router)  # Phase3: internal trigger
+app.include_router(aura_rag_router)  # Phase 6: RAG vector ingest
 
 
 @app.get("/")

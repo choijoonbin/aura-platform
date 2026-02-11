@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **High-Performance RAG Pipeline Optimization** (2026-02-11)
+  - **Semantic Chunking**: `RecursiveCharacterTextSplitter` 대신 `langchain_experimental.text_splitter.SemanticChunker` 도입. `OpenAIEmbeddings(text-embedding-3-small)` 기반 의미적 유사도로 청킹, `breakpoint_threshold_type="percentile"`로 분할 지점 자동 결정. 실패 시 RecursiveCharacterTextSplitter fallback.
+  - **PDF Parsing**: `pypdf` 대신 **PyMuPDF (fitz)** 사용. 표(Table)는 `find_tables()` 추출 후 Markdown 스타일로 변환하여 본문에 포함. 페이지별 `[PAGE=n]` 마커로 청크 출처 페이지 추적.
+  - **Storage (pgvector)**: `metadata_json`에 **page_number**, **file_path** 필수 포함. 검색 결과(`retrieve_rag_pgvector`)에 `page_number`, `file_path` 반환하여 출처 보기(Citation) 지원.
+  - 의존성: `pyproject.toml` RAG 그룹에 `pymupdf`, `langchain-experimental` 추가.
+- **RAG 로컬 경로 수집 (document_path)** (2026-02-11)
+  - 백엔드가 저장한 로컬 절대 경로의 파일을 직접 읽어 청킹·벡터화: `POST /aura/rag/ingest-from-path` (body: `document_path`, `rag_document_id`, `metadata`).
+  - **Path Access**: `core/analysis/rag.py` — `validate_local_document_path()`: 경로 존재(`exists`), 파일 여부(`is_file`), 읽기 권한(`os.R_OK`). 선택적으로 `rag_allowed_document_base_path` 설정 시 해당 하위 경로만 허용.
+  - **File Loading**: 기존 `_load_text_from_file()`에 읽기 권한 검사 추가. PDF(pypdf)/텍스트 동일 프로세스로 청킹·벡터화 수행. 경로 수집 시 파일 삭제 없음(백엔드 소유).
+  - 설정: `RAG_ALLOWED_DOCUMENT_BASE_PATH` (`.env.example` 반영).
+- **백엔드 전달 사항 문서 (To Backend)** (2026-02-11)
+  - `docs/handoff/TO_BACKEND.md` 추가: 백엔드 팀용 한글 요약(필수 구현 사항, Backend→Aura 요청 규격, Aura→Backend Redis 수신 규격, 체크리스트, 상세 문서 링크). README·계약서 관련 문서에 링크 반영.
+- **Level 4 최종 API 규격서 (Backend 검증 최종본)** (2026-02-11)
+  - `docs/handoff/LEVEL4_FINAL_API_SPEC_BACKEND.md` 추가: Backend 검증 요청/응답 JSON (Part A: Aura — body_evidence.doc_id/item_id 명시, 샘플 POST body; Part B: FE — wrbtr number, actionAt/createdAt ISO8601, GET 케이스 상세·조치 이력 샘플).
+  - 계약서 §4.1·LEVEL4 감사 문서에 위 규격서 참조 링크 반영.
+- **백엔드 확정 규격 반영 (Handoff)** (2026-02-11)
+  - **To Aura**: POST `/aura/cases/{caseId}/analysis-runs` Req Body(evidence JsonNode, body_evidence.doc_id·item_id) 및 Res Body 요약을 `BACKEND_AURA_CONTRACT_AFTER_ROLE_SEPARATION.md` §4.1에 반영.
+  - **From Aura (Redis workbench:*)**: 백엔드 수신 처리(JSON → NotificationDto: category→type, message→content, timestamp→occurredAt → DB 저장 + `/topic/notifications`)를 §4.2 및 `REDIS_PUBLISH_MESSAGE_SPEC_FINAL.md`에 명시.
+- **Interface Cross-Check & Alignment** (2026-02-11)
+  - **Data Sync**: 백엔드가 보내는 `doc_id`/`item_id`가 String 또는 Number(int/float)인 경우를 모두 처리하도록 `_norm_id()` 도입 (`core/analysis/phase2_pipeline.py`). dict인 경우 `docKey`/`id` 추출 후 정규화.
+  - **Notification Sync**: Redis 채널명을 `core/notifications.py`에 상수로 고정 (`REDIS_CHANNEL_WORKBENCH_ALERT`, `REDIS_CHANNEL_WORKBENCH_RAG_STATUS`, `REDIS_CHANNEL_WORKBENCH_CASE_ACTION`). 발행부에서 설정 미지정 시 해당 상수를 fallback으로 사용하여 백엔드 구독 채널과 토씨 하나 틀리지 않게 일치.
+  - **Redis 발행 메시지 최종 샘플**: `docs/handoff/REDIS_PUBLISH_MESSAGE_SPEC_FINAL.md` — 채널명 대조표, 공통 스키마, AI_DETECT/RAG_STATUS/CASE_ACTION별 JSON 샘플 정리.
+- **Level 4 Specification Match (CRITICAL FIX)** (2026-02-11)
+  - **Input Mapping**: `body_evidence.doc_id` / `body_evidence.item_id` 파싱 후 RAG doc_list 정렬 시 비교값 양쪽 `strip()` 적용으로 랭킹 정확도 확정 (`core/analysis/phase2_pipeline.py`).
+  - **Output Format**: Redis 알림 `category` 필드를 백엔드 NotificationService 규격과 대소문자 일치하도록 상수화 (`NOTIFICATION_CATEGORY_AI_DETECT`, `NOTIFICATION_CATEGORY_RAG_STATUS`, `NOTIFICATION_CATEGORY_CASE_ACTION` in `core/notifications.py`); phase2_pipeline, rag.py, action_integrity에서 상수 사용.
+  - **HITL Log**: `comment` 저장 시 UTF-8 안전 문자열 정규화(bytes → decode utf-8 errors=replace) 및 `ensure_ascii=False` + `encoding="utf-8"` 유지로 한글 깨짐 없음 검증 (`core/action_integrity/service.py`).
+- **Action Integrity (승인/거절 루프)** (2026-02-11)
+  - Redis Pub/Sub: 조치 완료 시 `workbench:case:action` 채널 발행 → 워크벤치/에이전트 Refetch (`case_action_redis_channel`)
+  - `core/action_integrity/service.py`: `record_case_action()` — HITL 피드백 로그 + Redis publish (DB 직접 쓰기 없음)
+  - `POST /api/aura/action/record`: 조치 확정 신호 수신 시 피드백·알림만 수행 (Callback Listener)
+  - HITL 스트림: 승인/거절 신호 수신 시 자동으로 `record_case_action` 호출 (caseId·executor_id from request context)
+  - 가이드: `docs/guides/ACTION_INTEGRITY_APPROVAL_LOOP.md`
+- **역할 분리 (Role Separation)** (2026-02-11)
+  - Aura는 `case_action_history` / `fi_doc_header`에 직접 INSERT/UPDATE하지 않음 (백엔드가 조치 이력·전표 상태 관리)
+  - HITL 조치 확정 시: HITL 피드백 로그(가중치 업데이트용) + Redis 알림만 수행; `hitl_feedback_log_path` 설정 시 JSONL 적재
+  - Phase2: 백엔드에서 `doc_id`·`item_id`를 넘기면 해당 문서·항목 기준 규정 준수 여부 판단에 집중한 reasoning 생성
+- **Redis 알림 감사 및 확장 (Audit & Expand)** (2026-02-11)
+  - **감사**: 승인/거절/보류(타임아웃) 모두 `record_case_action` 경유로 `workbench:case:action` 발행 (타임아웃 시에도 `_record_action_integrity` 호출 추가)
+  - **통일 포맷**: 모든 알림을 `{ "type": "NOTIFICATION", "category": "CASE_ACTION"|"RAG_STATUS"|"AI_DETECT", "message": "...", "timestamp": "..." }` 구조로 통일 (`core/notifications.py`)
+  - **RAG 상태**: `process_and_vectorize_pgvector` 완료 시 `workbench:rag:status` 채널로 "학습 완료" 발행 (`workbench_rag_status_channel`)
+  - **신규 탐지**: Phase2에서 severity=HIGH 케이스 생성 시 `workbench:alert` 채널로 "신규 이상 징후 탐지" 발행 (`workbench_alert_channel`)
+
 ### Changed
 - **전반 공통화·모듈화 (API / core)** (2026-02-06)
   - API: `api/schemas/common.py` — `coerce_case_run_id` (caseId/runId str 변환) 공통화
@@ -22,6 +65,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `PHASE2_TRIGGER_STANDARD.md` 콜백 스펙을 실제 flat 구조(score, severity, reasonText, confidence, evidence, ragRefs, similar, proposals)로 수정
 
 ### Added
+- **Policy-Driven Reasoning & Control Data Validation (Phase 6 Final)** (2026-02-11)
+  - Knowledge-Base: 제5장(부정 탐지)·제6장(정상 집행 기준) 최우선 참조(prioritize_chapters), pgvector similarity_threshold 기본 0.75(rag_similarity_threshold)
+  - Contrastive: DEMO_NORM_* → "규정 제14조 1항 충족, 정상 식대", risk LOW; DEMO0000* → "규정 제11조 2항 위반" 및 위반 사유, risk HIGH
+  - RAG 검색 시 파일명 미사용, doc_type_filter='REGULATION'로 규정만 검색(hybrid_retrieve/retrieve_rag_pgvector)
+  - Backend: backend_rag_callback_url로 벡터화 완료 시 POST processing-status=COMPLETED 전송 로직 유지·문서화
+  - `docs/guides/RAG_POLICY_CONTROL_PHASE6_FINAL.md` 정리
+- **RAG pgvector Pipeline & XAI (Phase 6)** (2026-02-11)
+  - Pre-Check: `docs/guides/RAG_PGVECTOR_PHASE6_PRECHECK.md` — SQLAlchemy URI·OpenAI 임베딩·회계 규정 가중치 doc_type 확장
+  - pgvector Ingestion: `vector_store_type=pgvector` 시 RecursiveCharacterTextSplitter → text-embedding-3-small (1536) → `dwp_aura.rag_chunk` Upsert; Backend RagController `backend_rag_callback_url`로 processing_status=COMPLETED 전달
+  - Hybrid Retrieval: `retrieve_rag_pgvector` 코사인 유사도(<=>), 전표 맥락(bukrs, belnr) 반영; Phase2에서 `hybrid_retrieve(bukrs=, belnr=)` 병합
+  - XAI: `build_citation_reasoning` — "사내 경비 규정 제5조 2항(주말 식대 제한)에 의거하여, ..." 형식; evidence.ragContributions에 **article** 추가, FE WorkbenchThoughtChain { title, excerpt, article } 통일
+  - `database/engine.py`, `database/models/rag_chunk.py` (CREATE TABLE dwp_aura.rag_chunk), `core/config.py` (backend_rag_callback_url), 의존성 pgvector
 - **Case Detail 탭 실데이터 연결 (Prompt C P0-P2)** (2026-02-06)
   - P0: `GET /api/aura/cases/{caseId}/stream` — SSE Agent Stream, Last-Event-ID replay, in-memory ring buffer
   - P0: `POST /api/aura/cases/{caseId}/stream/trigger` — 수동 트리거 (admin 전용)
