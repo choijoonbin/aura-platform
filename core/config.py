@@ -206,8 +206,8 @@ class Settings(BaseSettings):
     
     # ==================== Logging Configuration ====================
     log_level: str = Field(
-        default="INFO",
-        description="로그 레벨 (DEBUG, INFO, WARNING, ERROR, CRITICAL)"
+        default="DEBUG",
+        description="로그 레벨 (DEBUG, INFO, WARNING, ERROR, CRITICAL). 환경변수 LOG_LEVEL로 오버라이드 가능.",
     )
     log_format: str = Field(
         default="json",
@@ -271,6 +271,16 @@ class Settings(BaseSettings):
     agent_stream_push_url: str | None = Field(
         default=None,
         description="Agent Stream push URL (미지정 시 http://localhost:8080/api/synapse/agent/events)",
+    )
+
+    # ==================== Phase2 BE Callback ====================
+    dwp_gateway_url: str = Field(
+        default="http://localhost:8080",
+        description="Gateway Base URL (BE 콜백용, 예: http://localhost:8080)",
+    )
+    callback_path: str = Field(
+        default="/api/synapse/internal/aura/callback",
+        description="BE 콜백 경로 (DWP_GATEWAY_URL과 결합)",
     )
 
     # ==================== Trigger (Phase B) ====================

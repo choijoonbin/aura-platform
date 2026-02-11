@@ -17,6 +17,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from api.dependencies import CurrentUser, TenantId
+from api.sse_utils import SSE_HEADERS
 from api.schemas.events import (
     SSE_EVENT_PAYLOAD_VERSION,
     ThoughtEvent,
@@ -387,11 +388,7 @@ async def backend_stream(
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=SSE_HEADERS,
     )
 
 

@@ -1,0 +1,129 @@
+[PHASE3 Follow-up Prompt / Backend] Aura 콜백 스키마 확장 정합 + 테스트 플래그 패스스루 + trace 연계
+버전: v1.0 / 작성일: 2026-02-10
+대상: dwp-backend (Spring Boot) 담당 Cursor
+목적: Aura가 확정한 Phase3 콜백/스트림 스키마(FAILED error 객체, trace, proposals.requiresApproval/checklist, 테스트 플래그)를 BE 저장/조회/연동에 정합되게 반영한다.
+전제: 운영 기본은 옵션 B(Backend SSE Proxy)이며, BE가 Aura와 통신한다.
+
+======================================================================
+0) 결론(정책 제안 — 우선 적용 권장)
+1) FAILED error 스키마: ✅ 객체 저장/반환을 표준으로 채택
+   - error는 { message: string, stage: string } 형태를 1급으로 지원한다.
+   - 레거시 string이 있다면 호환을 위해 GET에서는 errorMessage(문자열)도 함께 제공(선택).
+2) trace 저장: ✅ 저장/조회 반영(최소 auraTraceId, policyVersion)
+   - runId 기반 추적과 audit_event_log 연계를 위해 trace 필드를 유지한다.
+3) proposals.requiresApproval / checklist: ✅ 저장/조회 반영
+   - requiresApproval: UI 승인뱃지/흐름에 바로 쓰므로 포함.
+   - checklist: 비어있어도 스키마로 유지(고도화에서 채움).
+4) 테스트 플래그: ✅ 운영 비활성(권한/환경 제어) + 비운영에서만 패스스루
+   - 헤더 X-Aura-Test-Fail: rag|llm 은 dev/test 프로파일에서만 허용.
+   - prod에서는 무시하거나 403(관리자 권한)로 제한.
+
+======================================================================
+1) Aura Callback 스키마 반영(저장/조회)
+1-1. 수신 (BE)
+POST /api/synapse/internal/aura/callback
+- FAILED 시:
+  error: { "message": string, "stage": "rag"|"llm"|"callback"|"unknown" }
+  trace: { "auraTraceId": string, "policyVersion": string }
+- COMPLETED 시에도 trace/proposals 필드 존재 가능
+
+1-2. 저장 모델(권장)
+A) case_analysis_run 테이블(또는 관련 테이블)에 컬럼/JSON 추가
+- error_json JSONB (객체 저장)  [권장]
+- error_message TEXT (선택: 검색/요약용)
+- error_stage TEXT (선택: 필터링/통계)
+- aura_trace_id TEXT (선택)
+- aura_policy_version TEXT (선택)
+또는
+B) run.result_json / run.meta_json 같은 JSONB에 trace+error를 포함시키되,
+   조회 DTO에서 표준 필드로 꺼내서 내려준다.
+
+1-3. GET analysis 응답 정합(필수)
+GET /api/synapse/cases/{caseId}/analysis?runId=...
+- response.data에 아래를 포함하도록 확정
+{
+  runId: string,
+  status: "COMPLETED"|"FAILED"|...,
+  score?: number,
+  ...,
+  error?: { message: string, stage: string },   // FAILED 시 필수
+  trace?: { auraTraceId: string, policyVersion: string }
+}
+
+※ 레거시 string을 유지해야 한다면(선택)
+- errorMessage: string(=error.message) 를 병행 제공해도 됨.
+- 하지만 FE/Aura는 객체를 표준으로 사용한다.
+
+======================================================================
+2) Proposals 스키마 반영(저장/조회)
+2-1. callback proposals에 아래가 들어올 수 있음
+- requiresApproval: boolean
+- checklist: string[]   (빈 배열 가능)
+
+2-2. DB/엔티티/DTO 반영(필수)
+- case_action_proposal 테이블에:
+  - requires_approval boolean default true (권장)
+  - checklist_json jsonb default '[]'::jsonb (권장)
+또는 proposal payload_json 내부에 checklist를 포함하되,
+DTO에서 표준 필드로 노출하도록 한다(권장X: 조회/필터에 불리).
+
+2-3. GET action-proposals 응답에 포함
+{
+  proposalId, runId, type, status, rationale, payload,
+  requiresApproval: boolean,
+  checklist: string[],
+  updatedAt, fingerprint(dedup_key), ...
+}
+
+======================================================================
+3) 테스트 플래그(X-Aura-Test-Fail) 패스스루 정책
+3-1. 패스스루 방식(권장)
+- BE의 POST analysis-runs에서 Aura trigger 호출 시
+  요청 헤더에 X-Aura-Test-Fail 값을 전달 가능하게 한다.
+- 단, 허용 조건:
+  - spring.profiles.active in (local, dev, test) 이거나
+  - ROLE_ADMIN/ROLE_SRE 등 특정 권한만 허용(선택)
+
+3-2. 구현 옵션
+A) 분석 시작 API에 query param 추가(비운영 전용)
+POST /analysis-runs?testFail=rag|llm
+- BE가 Aura 호출 헤더로 변환
+B) 내부 전용 엔드포인트
+POST /internal/analysis-runs/test?fail=...
+- 외부 노출 금지
+
+3-3. DoD
+- 로컬에서 rag 실패/llm 실패 각각 1회씩 재현 가능
+- 실패 시:
+  - SSE에 failed 이벤트 또는
+  - callback status=FAILED + error 객체 저장
+  - audit_event_log에 RUN_FAILED 기록( error.message/stage 포함 )
+
+======================================================================
+4) Trace 연계(디버깅/감사)
+4-1. 저장
+- trace.auraTraceId / trace.policyVersion 저장
+4-2. 조회
+- GET analysis 및 필요 시 GET action-proposals에도 trace 노출(선택: analysis만)
+4-3. 감사로그 연계(권장)
+- RUN_COMPLETED/RUN_FAILED 이벤트의 tags/evidence_json 또는 trace_id 필드에 auraTraceId 포함
+- 추후 “한 runId의 모든 이벤트”를 audit 화면에서 쉽게 추적 가능해야 함
+
+======================================================================
+5) 검증용 curl (스모크)
+(1) 실패 유도(비운영)
+curl -X POST "http://localhost:8080/api/synapse/cases/85114/analysis-runs?testFail=rag" \
+  -H "Authorization: Bearer <token>" -H "X-Tenant-ID: 1"
+- 기대: run 생성 → RUN_FAILED 저장 → GET analysis에서 error:{message,stage} 확인
+
+(2) 정상 완료
+POST analysis-runs → completed callback →
+GET analysis: trace 포함
+GET action-proposals: requiresApproval/checklist 포함
+
+======================================================================
+6) 완료조건(DoD)
+- error 객체 저장/조회 정합(FAILED 케이스 포함)
+- trace 저장/조회 정합
+- proposals.requiresApproval/checklist 저장/조회 정합
+- testFail 플래그는 비운영에서만 동작(운영 차단/권한제어)

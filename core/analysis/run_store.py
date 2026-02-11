@@ -31,8 +31,9 @@ def put_event(run_id: str, event_type: str, payload: dict[str, Any]) -> None:
 
 
 def remove_queue(run_id: str) -> None:
-    """완료 후 큐 제거 (메모리 정리)"""
+    """완료 후 큐 제거 (메모리 정리). 스트림은 이후 get_event에서 None을 받아 종료."""
     _run_queues.pop(run_id, None)
+    logger.info("run_store: queue removed run_id=%s", run_id)
 
 
 async def get_event(run_id: str, timeout: float = 300.0) -> tuple[str, dict[str, Any]] | None:

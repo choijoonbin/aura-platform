@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **전반 공통화·모듈화 (API / core)** (2026-02-06)
+  - API: `api/schemas/common.py` — `coerce_case_run_id` (caseId/runId str 변환) 공통화
+  - API: `api/sse_utils.py` — `SSE_HEADERS`, `format_sse_line` 도입; aura_cases, aura_analysis_runs, aura_backend에서 사용
+  - core: `core/http_client.py` — `post_json` 헬퍼 추가; agent_stream writer, audit writer에서 httpx POST 로직 공통 사용
+  - agent_stream/audit writer: Synapse 호출 헤더를 `core.context.get_synapse_headers()`로 통일
 - **Phase2 body.evidence C(폴백) 구현** (2026-02-06)
   - BE가 전달하는 `body.evidence`를 fetch 실패 시 폴백으로 사용
   - `{ evidence, ragRefs }` 구조(BE 스펙)를 evidence_items로 정규화

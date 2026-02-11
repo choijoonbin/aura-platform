@@ -11,11 +11,10 @@ import json
 import logging
 from typing import Any
 
-import httpx
-
 from core.audit.schemas import AuditEvent
 from core.config import settings
-from core.context import get_request_context
+from core.context import get_request_context, get_synapse_headers
+from core.http_client import post_json
 
 logger = logging.getLogger(__name__)
 
@@ -31,25 +30,9 @@ def _get_audit_url() -> str:
 
 
 def _get_headers() -> dict[str, str]:
-    """Audit API 호출용 헤더 (HTTP 모드)"""
+    """Audit API 호출용 헤더 (context 기반)"""
     try:
-        ctx = get_request_context()
-        headers: dict[str, str] = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
-        if ctx.get("tenant_id"):
-            headers["X-Tenant-ID"] = ctx["tenant_id"]
-        if ctx.get("user_id"):
-            headers["X-User-ID"] = ctx["user_id"]
-        if ctx.get("trace_id"):
-            headers["X-Trace-ID"] = ctx["trace_id"]
-        if ctx.get("auth_token"):
-            token = ctx["auth_token"]
-            if not token.startswith("Bearer "):
-                token = f"Bearer {token}"
-            headers["Authorization"] = token
-        return headers
+        return get_synapse_headers()
     except LookupError:
         return {"Content-Type": "application/json", "Accept": "application/json"}
 
@@ -152,22 +135,19 @@ class AuditWriter:
 
     async def _ingest_via_http(self, payload: dict[str, Any]) -> bool:
         """HTTP POST로 전송 (1안)"""
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(
-                    self._http_url,
-                    json=payload,
-                    headers=_get_headers(),
-                )
-                if resp.status_code >= 400:
-                    logger.warning(
-                        f"Audit HTTP ingest failed: {resp.status_code} - {resp.text[:200]}"
-                    )
-                    return False
-                return True
-        except Exception as e:
-            logger.warning(f"Audit HTTP ingest error: {e}")
-            return False
+        ok, status_code, text = await post_json(
+            self._http_url,
+            payload,
+            headers=_get_headers(),
+            timeout=10.0,
+        )
+        if not ok:
+            logger.warning(
+                "Audit HTTP ingest failed: %s - %s",
+                status_code,
+                (text[:200] if text else ""),
+            )
+        return ok
 
     def ingest_fire_and_forget(self, event: AuditEvent) -> None:
         """

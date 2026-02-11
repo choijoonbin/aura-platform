@@ -33,7 +33,10 @@ ANALYSIS_DISABLED_ENV = "DEMO_OFF"
 
 
 def _normalize_body_evidence(body_evidence: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """BE body.evidence { evidence, ragRefs } → evidence_items 리스트 (C 폴백용)"""
+    """
+    BE body.evidence → evidence_items 리스트 (C 폴백용).
+    BE 확장 스키마: evidence, ragRefs, document(header,items,type,docKey), openItems, partyIds, lineage, policies.
+    """
     if not body_evidence or not isinstance(body_evidence, dict):
         return []
     items: list[dict[str, Any]] = []
@@ -41,7 +44,34 @@ def _normalize_body_evidence(body_evidence: dict[str, Any] | None) -> list[dict[
         items.append(e if isinstance(e, dict) else {"type": "BODY_EVIDENCE", "value": e})
     for r in body_evidence.get("ragRefs", []) or []:
         items.append(r if isinstance(r, dict) else {"type": "BODY_RAGREF", "value": r})
-    return items[:15]  # 상한
+    # BE 확장: document (header + items, DOCUMENT/OPEN_ITEM 동일 구조)
+    doc = body_evidence.get("document")
+    if isinstance(doc, dict):
+        items.append({"type": "BODY_DOCUMENT", "source": "body.evidence", "header": doc.get("header"), "docKey": doc.get("docKey")})
+        for i, it in enumerate((doc.get("items") or [])[:10]):
+            items.append({"type": "DOC_ITEM" if i else "DOC_HEADER", "source": "body.evidence.document", "index": i, "item": it if isinstance(it, dict) else {}})
+    # openItems
+    open_items = body_evidence.get("openItems") or []
+    if isinstance(open_items, list) and open_items:
+        items.append({"type": "OPEN_ITEMS", "source": "body.evidence", "count": len(open_items)})
+        for i, o in enumerate(open_items[:5]):
+            if isinstance(o, dict):
+                items.append({"type": "OPEN_ITEM", "source": "body.evidence", "index": i, "item": o})
+    # partyIds
+    party_ids = body_evidence.get("partyIds") or []
+    if isinstance(party_ids, list) and party_ids:
+        items.append({"type": "PARTY_IDS", "source": "body.evidence", "partyIds": party_ids[:20]})
+    # lineage
+    lineage = body_evidence.get("lineage")
+    if isinstance(lineage, dict) and lineage.get("lineage"):
+        items.append({"type": "LINEAGE", "source": "body.evidence", "count": len(lineage.get("lineage", []))})
+    elif isinstance(lineage, list) and lineage:
+        items.append({"type": "LINEAGE", "source": "body.evidence", "count": len(lineage)})
+    # policies
+    policies = body_evidence.get("policies") or []
+    if isinstance(policies, list) and policies:
+        items.append({"type": "POLICIES", "source": "body.evidence", "count": len(policies)})
+    return items[:30]  # BE 확장으로 상한 완화
 
 
 async def run_phase2_analysis(

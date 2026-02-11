@@ -180,7 +180,20 @@ class CaseStreamStore:
         return events
 
 
+# Phase2: case_id -> finalResult (reasonText, proposals, confidenceBreakdown)
+_phase2_results: dict[str, dict] = {}
+
 _case_stream_store: CaseStreamStore | None = None
+
+
+def set_phase2_result(case_id: str, result: dict) -> None:
+    """Phase2 분석 결과 저장 (GET /analysis에서 반환)"""
+    _phase2_results[case_id] = result
+
+
+def get_phase2_result(case_id: str) -> dict | None:
+    """Phase2 분석 결과 조회"""
+    return _phase2_results.get(case_id)
 
 
 def get_case_stream_store() -> CaseStreamStore:

@@ -4,7 +4,7 @@ API Middleware Module
 FastAPI 미들웨어를 구현합니다.
 - JWT 인증
 - X-Tenant-ID 헤더 처리
-- 로깅
+- 로깅 (raw ASGI: SSE 스트림 본문을 건드리지 않음, BE 중계 0바이트 방지)
 - 예외 처리
 """
 
@@ -16,6 +16,7 @@ from typing import Callable
 from fastapi import Request, Response, status
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from core.config import settings
 from core.security.auth import extract_bearer_token, get_user_from_token
@@ -149,78 +150,113 @@ class TenantMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-class RequestLoggingMiddleware(BaseHTTPMiddleware):
+# 분석 스트림 경로: BaseHTTPMiddleware 미경유 시 사용 (스트림 취소 방지)
+ANALYSIS_STREAM_PATH_PREFIX = "/aura/cases/"
+ANALYSIS_STREAM_PATH_SUFFIX = "/analysis/stream"
+
+
+class StreamBypassMiddleware:
     """
-    요청 로깅 미들웨어
-    
-    모든 API 요청을 로깅합니다.
+    GET /aura/cases/{id}/analysis/stream 요청을 BaseHTTPMiddleware 없이 처리하는 raw ASGI 미들웨어.
+    Starlette BaseHTTPMiddleware가 스트리밍 응답 body 태스크를 취소하는 문제를 피하기 위해
+    해당 경로만 별도 서브앱(stream_app)으로 넘겨 응답 본문이 그대로 전달되도록 함.
     """
-    
-    async def dispatch(
-        self,
-        request: Request,
-        call_next: Callable,
-    ) -> Response:
-        """미들웨어 처리"""
-        
-        # 요청 ID 생성
+
+    def __init__(self, app: ASGIApp, stream_app: ASGIApp) -> None:
+        self.app = app
+        self.stream_app = stream_app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        path = scope.get("path", "")
+        method = scope.get("method", "GET")
+        if (
+            method == "GET"
+            and path.startswith(ANALYSIS_STREAM_PATH_PREFIX)
+            and path.endswith(ANALYSIS_STREAM_PATH_SUFFIX)
+        ):
+            logger.debug("Stream bypass: delegating to stream_app path=%s", path)
+            await self.stream_app(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
+class RawRequestLoggingMiddleware:
+    """
+    로깅만 수행하는 raw ASGI 미들웨어.
+    응답 본문을 읽거나 버퍼링하지 않아 SSE 스트림이 그대로 BE/클라이언트로 전달됩니다.
+    (BaseHTTPMiddleware는 StreamingResponse와 궁합 문제로 0바이트 전달될 수 있음)
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
         request_id = str(uuid.uuid4())
-        request.state.request_id = request_id
-        
-        # 시작 시간
+        scope["request_id"] = request_id
         start_time = time.time()
-        
-        # 요청 정보 로깅
-        logger.info(
-            f"[{request_id}] {request.method} {request.url.path} "
-            f"- Client: {request.client.host if request.client else 'unknown'}"
-        )
-        
-        # 요청 처리
+        method = scope.get("method", "")
+        path = scope.get("path", "")
+        client = scope.get("client")
+        client_host = client[0] if client else "unknown"
+        logger.info(f"[{request_id}] {method} {path} - Client: {client_host}")
+        status_code: int | None = None
+
+        async def send_wrapper(message: dict) -> None:
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = message.get("status", 0)
+                headers = list(message.get("headers", []))
+                headers.append((b"x-request-id", request_id.encode("latin-1")))
+                message = {**message, "headers": headers}
+            await send(message)
+            if message["type"] == "http.response.body" and not message.get("more_body", True):
+                duration = time.time() - start_time
+                logger.info(
+                    f"[{request_id}] {method} {path} - Status: {status_code} - Duration: {duration:.3f}s"
+                )
+
         try:
-            response = await call_next(request)
+            await self.app(scope, receive, send_wrapper)
         except Exception as e:
-            # 예외 발생 시 로깅
             duration = time.time() - start_time
             logger.error(
                 f"[{request_id}] Request failed after {duration:.3f}s: {e}",
                 exc_info=True,
             )
             raise
-        
-        # 처리 시간 계산
-        duration = time.time() - start_time
-        
-        # 응답 정보 로깅
-        logger.info(
-            f"[{request_id}] {request.method} {request.url.path} "
-            f"- Status: {response.status_code} - Duration: {duration:.3f}s"
-        )
-        
-        # 응답 헤더에 request_id 추가
-        response.headers["X-Request-ID"] = request_id
-        
-        return response
+
+
+class RequestIdStateMiddleware(BaseHTTPMiddleware):
+    """scope.request_id → request.state.request_id (get_request_id 등에서 사용)."""
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        request.state.request_id = request.scope.get("request_id") or str(uuid.uuid4())
+        if not isinstance(request.state.request_id, str):
+            request.state.request_id = str(uuid.uuid4())
+        return await call_next(request)
 
 
 class ErrorHandlingMiddleware(BaseHTTPMiddleware):
     """
     에러 처리 미들웨어
-    
+
     예외를 캐치하고 일관된 형식의 에러 응답을 반환합니다.
     """
-    
+
     async def dispatch(
         self,
         request: Request,
         call_next: Callable,
     ) -> Response:
-        """미들웨어 처리"""
-        
         try:
             response = await call_next(request)
             return response
-            
         except PermissionError as e:
             logger.warning(f"Permission denied: {e}")
             return JSONResponse(
@@ -252,24 +288,17 @@ class ErrorHandlingMiddleware(BaseHTTPMiddleware):
             )
 
 
-def setup_middlewares(app) -> None:
+def setup_middlewares(app, stream_app: ASGIApp | None = None) -> None:
     """
-    FastAPI 앱에 미들웨어 추가
-    
-    Args:
-        app: FastAPI 애플리케이션 인스턴스
+    FastAPI 앱에 미들웨어 추가.
+    로깅은 raw ASGI로 해서 SSE 스트림 본문이 BE까지 전달되도록 함.
+    stream_app이 주어지면 GET .../analysis/stream 은 BaseHTTPMiddleware 없이 stream_app으로 처리.
     """
-    # 순서가 중요합니다 (역순으로 적용됨)
-    # 1. 에러 처리 (가장 바깥)
     app.add_middleware(ErrorHandlingMiddleware)
-    
-    # 2. 요청 로깅
-    app.add_middleware(RequestLoggingMiddleware)
-    
-    # 3. 테넌트 처리
+    app.add_middleware(RequestIdStateMiddleware)
     app.add_middleware(TenantMiddleware)
-    
-    # 4. 인증 (가장 안쪽)
     app.add_middleware(AuthMiddleware)
-    
+    app.add_middleware(RawRequestLoggingMiddleware)
+    if stream_app is not None:
+        app.add_middleware(StreamBypassMiddleware, stream_app=stream_app)
     logger.info("Middlewares configured")

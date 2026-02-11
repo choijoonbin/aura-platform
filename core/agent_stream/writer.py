@@ -9,11 +9,10 @@ import asyncio
 import logging
 from typing import Any
 
-import httpx
-
 from core.agent_stream.schemas import AgentEvent
 from core.config import settings
-from core.context import get_request_context
+from core.context import get_synapse_headers
+from core.http_client import post_json
 
 logger = logging.getLogger(__name__)
 
@@ -83,18 +82,9 @@ def _get_push_url() -> str:
 
 
 def _get_headers() -> dict[str, str]:
-    """Push 요청 헤더"""
+    """Push 요청 헤더 (context 기반)"""
     try:
-        ctx = get_request_context()
-        headers: dict[str, str] = {"Content-Type": "application/json", "Accept": "application/json"}
-        if ctx.get("tenant_id"):
-            headers["X-Tenant-ID"] = ctx["tenant_id"]
-        if ctx.get("auth_token"):
-            token = ctx["auth_token"]
-            if not token.startswith("Bearer "):
-                token = f"Bearer {token}"
-            headers["Authorization"] = token
-        return headers
+        return get_synapse_headers()
     except LookupError:
         return {"Content-Type": "application/json", "Accept": "application/json"}
 
@@ -133,20 +123,19 @@ class AgentStreamWriter:
 
         payload = [self._event_to_payload(e) for e in events]
         body: dict = {"events": payload}
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(
-                    self._push_url,
-                    json=body,
-                    headers=_get_headers(),
-                )
-                if resp.status_code >= 400:
-                    logger.warning(f"Agent stream push failed: {resp.status_code} - {resp.text[:200]}")
-                    return False
-                return True
-        except Exception as e:
-            logger.warning(f"Agent stream push error: {e}")
-            return False
+        ok, status_code, text = await post_json(
+            self._push_url,
+            body,
+            headers=_get_headers(),
+            timeout=10.0,
+        )
+        if not ok:
+            logger.warning(
+                "Agent stream push failed: %s - %s",
+                status_code,
+                (text[:200] if text else ""),
+            )
+        return ok
 
     async def push_one(self, event: AgentEvent) -> bool:
         """단일 이벤트 push"""

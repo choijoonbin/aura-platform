@@ -5,18 +5,14 @@ Phase2 BE Callback
 멱등성: 동일 (runId, proposal) 재전송 시 BE dedup 처리.
 """
 
-import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any
 
-import httpx
-
 from core.config import settings
+from core.analysis.callback_client import post_with_retry
 
 logger = logging.getLogger(__name__)
-
-CALLBACK_MAX_RETRIES = 3
 
 
 def _build_final_result(phase2_result: dict[str, Any]) -> dict[str, Any]:
@@ -70,20 +66,4 @@ async def send_callback(
     if error_message:
         payload["partialEvents"] = [{"stage": "callback", "errorMessage": error_message}]
 
-    last_error: Exception | None = None
-    for attempt in range(CALLBACK_MAX_RETRIES):
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(url, json=payload)
-                if resp.status_code == 200:
-                    logger.info(f"Callback ok runId={run_id} status={status}")
-                    return True
-                logger.warning(f"Callback {run_id} attempt {attempt + 1} got {resp.status_code}: {resp.text[:200]}")
-        except Exception as e:
-            last_error = e
-            delay = 2 ** attempt
-            logger.warning(f"Callback {run_id} attempt {attempt + 1} failed: {e}, retry in {delay}s")
-            await asyncio.sleep(delay)
-
-    logger.error(f"Callback failed runId={run_id} after {CALLBACK_MAX_RETRIES} retries: {last_error}")
-    return False
+    return await post_with_retry(url, payload, success_status_codes=(200,))

@@ -17,6 +17,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from api.dependencies import AdminUser, CurrentUser, TenantId
+from api.schemas.common import coerce_case_run_id
+from api.sse_utils import SSE_HEADERS, format_sse_line
 from core.context import set_request_context
 from core.analysis.callback import send_callback
 from core.analysis.run_store import get_event, get_or_create_queue, put_event, queue_exists, remove_queue
@@ -86,11 +88,7 @@ async def case_stream(
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=SSE_HEADERS,
     )
 
 
@@ -141,10 +139,7 @@ class AuraAnalyzeRequest(BaseModel):
     @field_validator("caseId", "runId", mode="before")
     @classmethod
     def _coerce_str(cls, v: Any) -> Any:
-        """BE가 caseId(Long), runId(UUID) 전송 시 JSON 숫자/UUID → str 변환"""
-        if v is None:
-            return None
-        return str(v)
+        return coerce_case_run_id(v)
 
 
 async def _run_analysis_background(
@@ -252,43 +247,68 @@ async def case_analysis_stream(
 ):
     """
     Phase2-2 분석 스트림 (SSE)
-    
+
     GET /aura/cases/{caseId}/analysis/stream?runId={runId}
     started → step → evidence → confidence → proposal → completed | failed
     """
     run_id = runId
     if not queue_exists(run_id):
+        logger.info(
+            "case_analysis_stream: runId not found or already completed run_id=%s case_id=%s",
+            run_id,
+            case_id,
+        )
         return {"error": "runId not found or already completed", "runId": run_id}
 
+    logger.info("case_analysis_stream: start consuming run_id=%s case_id=%s", run_id, case_id)
+
     async def event_generator():
+        # 연결 직후 SSE 주석 한 줄 전송 (클라이언트/프록시가 스트림 연결 인식용)
+        try:
+            yield ": connected\n\n"
+            logger.info("case_analysis_stream: first chunk sent run_id=%s", run_id)
+        except (GeneratorExit, BaseException) as e:
+            logger.warning("case_analysis_stream: connection closed before/after first chunk run_id=%s reason=%s", run_id, e)
+            raise
+
         sent_completed = False
-        case_id = ""
-        while True:
-            ev = await get_event(run_id, timeout=300.0)
-            if ev is None:
-                break
-            event_type, payload = ev
-            if event_type == "started":
-                case_id = payload.get("caseId", "")
-            yield f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-            await asyncio.sleep(STREAM_EVENT_DELAY)
-            if event_type in ("completed", "failed"):
-                sent_completed = True
-                break
-        if not sent_completed:
-            fallback = {"status": "completed", "runId": run_id, "caseId": case_id}
-            yield f"event: completed\ndata: {json.dumps(fallback, ensure_ascii=False)}\n\n"
-        yield "data: [DONE]\n\n"
+        case_id_val = case_id
+        try:
+            while True:
+                ev = await get_event(run_id, timeout=300.0)
+                if ev is None:
+                    logger.info("case_analysis_stream: get_event None (timeout or queue removed) run_id=%s", run_id)
+                    break
+                event_type, payload = ev
+                if event_type == "started":
+                    case_id_val = payload.get("caseId", "")
+                yield format_sse_line(event_type, payload)
+                await asyncio.sleep(STREAM_EVENT_DELAY)
+                if event_type in ("completed", "failed"):
+                    sent_completed = True
+                    break
+            if not sent_completed:
+                fallback = {"status": "completed", "runId": run_id, "caseId": case_id_val}
+                yield format_sse_line("completed", fallback)
+            yield "data: [DONE]\n\n"
+        except (GeneratorExit, BaseException) as e:
+            logger.warning("case_analysis_stream: stream closed run_id=%s reason=%s", run_id, e)
+            raise
 
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=SSE_HEADERS,
     )
+
+
+# 스트림 전용 라우터 (BaseHTTPMiddleware 미경유용 — 스트림 취소 방지)
+stream_only_router = APIRouter(prefix="/aura/cases", tags=["aura-cases"])
+stream_only_router.add_api_route(
+    "/{case_id}/analysis/stream",
+    case_analysis_stream,
+    methods=["GET"],
+)
 
 
 # ==================== Phase2: Analysis Trigger (SSE, legacy) ====================
@@ -326,21 +346,17 @@ async def case_analysis_trigger(
             async for event_type, payload in run_phase2_analysis(
                 case_id, tenant_id=tenant_id or "1",
             ):
-                yield f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                yield format_sse_line(event_type, payload)
                 await asyncio.sleep(STREAM_EVENT_DELAY)
         except Exception as e:
             logger.exception(f"Phase2 analysis trigger failed: {e}")
-            yield f"event: failed\ndata: {json.dumps({'error': str(e), 'stage': 'trigger'}, ensure_ascii=False)}\n\n"
+            yield format_sse_line("failed", {"error": str(e), "stage": "trigger"})
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=SSE_HEADERS,
     )
 
 
