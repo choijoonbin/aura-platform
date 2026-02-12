@@ -89,16 +89,21 @@ class FinanceSSEHook:
                     content="케이스 목표 및 컨텍스트 분석을 시작합니다.",
                     sources=[e.get("source", "") for e in state.get("evidence", [])],
                     metadata={"evidence_refs": evidence_refs} if evidence_refs else {},
+                    step="ANALYSIS",
+                    evidence=None,
                 ).model_dump()
             )
         elif node_name == "evidence_gather":
             evidence_refs = [{"type": e.get("type"), "source": e.get("source"), "ref": e.get("ref")} for e in state.get("evidence", [])]
+            ref_summary = ", ".join(e.get("source", "") for e in state.get("evidence", [])) or "없음"
             self.event_queue.append(
                 ThoughtEvent(
                     thoughtType=ThoughtType.ANALYSIS,
-                    content=f"evidence_refs {len(evidence_refs)}종 수집 완료 (case, documents, open_items, lineage)",
+                    content=f"사내 규정집 및 케이스 데이터에서 관련 조항·증거를 탐색 중입니다.",
                     sources=[e.get("source", "") for e in state.get("evidence", [])],
                     metadata={"evidence_refs": evidence_refs} if evidence_refs else {},
+                    step="INTERNAL_POLICY_LOOKUP",
+                    evidence=f"수집 소스: {ref_summary}" if ref_summary != "없음" else None,
                 ).model_dump()
             )
         elif node_name == "plan":
@@ -109,14 +114,18 @@ class FinanceSSEHook:
                     content="조사 및 조치 계획을 수립합니다.",
                     sources=[e.get("source", "") for e in state.get("evidence", [])],
                     metadata={"evidence_refs": evidence_refs} if evidence_refs else {},
+                    step="PLANNING",
+                    evidence=None,
                 ).model_dump()
             )
         elif node_name == "execute":
             self.event_queue.append(
                 ThoughtEvent(
                     thoughtType=ThoughtType.REASONING,
-                    content="Synapse 도구 선택 및 실행을 준비합니다.",
+                    content="규정과 대조하여 판단 근거를 작성합니다. (도구 선택 및 실행 준비)",
                     sources=[],
+                    step="FINAL_SYNTHESIS",
+                    evidence=None,
                 ).model_dump()
             )
         elif node_name == "tools":
@@ -132,11 +141,14 @@ class FinanceSSEHook:
                     ).model_dump()
                 )
         elif node_name == "reflect":
+            evidence_refs = [e.get("source", "") for e in state.get("evidence", [])]
             self.event_queue.append(
                 ThoughtEvent(
                     thoughtType=ThoughtType.REFLECTION,
-                    content="조사 결과를 검토합니다.",
-                    sources=[e.get("source", "") for e in state.get("evidence", [])],
+                    content="조사 결과를 검토하고 최종 판단 근거를 정리합니다.",
+                    sources=evidence_refs,
+                    step="REFLECTION",
+                    evidence=", ".join(evidence_refs) if evidence_refs else None,
                 ).model_dump()
             )
     

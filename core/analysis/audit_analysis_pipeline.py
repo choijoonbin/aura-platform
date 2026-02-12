@@ -1,5 +1,7 @@
 """
-Phase2 Analysis Pipeline (aura.txt §3)
+Case Audit Analysis Pipeline
+
+케이스 기반 자율 감사 분석: 전표·증거 수집 → 규정(RAG) 매칭 → 룰 스코어링 → LLM 판단 → 제안·콜백.
 
 Step1: 입력 정규화 (evidence json schema 통일)
 Step2: 간단 룰 스코어링 (금액, 거래처 신규, 역분개 체인 등)
@@ -14,7 +16,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator
 
-from core.analysis.phase2_events import (
+from core.analysis.audit_analysis_events import (
     AnalysisStartedEvent,
     AnalysisStepEvent,
     AnalysisEvidenceEvent,
@@ -28,7 +30,8 @@ from core.analysis.reasoning_citations import (
     build_citation_reasoning,
     get_violation_clause_evidence,
 )
-from core.analysis.rag import FINANCE_REGULATION_DOC_TYPE, hybrid_retrieve
+from core.analysis.rag import DOC_TYPE_REGULATION, hybrid_retrieve
+from core.config import get_settings
 from core.llm import get_llm_client
 from tools.synapse_finance_tool import get_case, search_documents, get_open_items, get_lineage
 
@@ -80,17 +83,18 @@ def _normalize_body_evidence(body_evidence: dict[str, Any] | None) -> list[dict[
     return items[:30]  # BE 확장으로 상한 완화
 
 
-async def run_phase2_analysis(
+async def run_audit_analysis(
     case_id: str,
     *,
     run_id: str | None = None,
     tenant_id: str = "1",
     trace_id: str | None = None,
     body_evidence: dict[str, Any] | None = None,
+    model_name: str | None = None,
 ) -> AsyncGenerator[tuple[str, dict[str, Any]], None]:
     """
-    Phase2 분석 파이프라인 실행.
-    
+    케이스 감사 분석 파이프라인 실행.
+
     Yields:
         (event_type, payload) - started, step, evidence, confidence, proposal, completed | failed
     """
@@ -115,7 +119,11 @@ async def run_phase2_analysis(
         if isinstance(case_data, dict) and "error" in case_data:
             case_data = {}
 
-        yield ("step", AnalysisStepEvent(label="EVIDENCE_GATHER", detail="증거 수집 중", percent=25).model_dump())
+        yield ("step", AnalysisStepEvent(
+            label="EVIDENCE_GATHER",
+            detail="케이스 전표 데이터 및 연관 증거 수집 중",
+            percent=25,
+        ).model_dump())
 
         # Step2: Evidence 수집
         evidence_items: list[dict[str, Any]] = []
@@ -146,7 +154,13 @@ async def run_phase2_analysis(
         except Exception as e:
             logger.debug(f"search_documents failed: {e}")
 
-        # Phase 6: 하이브리드 검색 — pgvector/Chroma 규정 검색 + 전표 맥락(bukrs, belnr) 반영
+        # 하이브리드 검색 — 사내 규정(Vector DB) 자동 로드
+        yield ("step", AnalysisStepEvent(
+            label="REGULATION_MATCH",
+            detail="전표·가맹점 맥락을 바탕으로 사내 규정(Vector DB) 매칭 중입니다.",
+            percent=35,
+        ).model_dump())
+        vector_results: list[dict[str, Any]] = []
         try:
             bukrs = str(case_data.get("bukrs") or "") if isinstance(case_data, dict) else None
             belnr = str(case_data.get("belnr") or "") if isinstance(case_data, dict) else None
@@ -156,7 +170,7 @@ async def run_phase2_analysis(
                 include_article_clause=True,
                 bukrs=bukrs or None,
                 belnr=belnr or None,
-                doc_type_filter=FINANCE_REGULATION_DOC_TYPE,
+                doc_type_filter=DOC_TYPE_REGULATION,
             )
             if vector_results:
                 existing = {str((d.get("docKey") or d.get("id") or d.get("rag_document_id") or "")) for d in doc_list if isinstance(d, dict)}
@@ -167,6 +181,37 @@ async def run_phase2_analysis(
                         existing.add(key)
         except Exception as e:
             logger.debug(f"hybrid_retrieve failed: {e}")
+
+        # RAG 우선순위: 내부 규정 유사도가 임계값(기본 0.7) 미만일 때만 외부 검색
+        external_search_text = ""
+        external_citations: list[dict[str, str]] = []
+        rag_threshold = getattr(get_settings(), "web_search_rag_threshold", 0.7)
+        max_rag_score = max((float(r.get("score", 0)) or 0 for r in vector_results) or [0])
+        need_web_search = not vector_results or max_rag_score < rag_threshold
+        if need_web_search:
+            yield ("step", AnalysisStepEvent(
+                label="WEB_SEARCH",
+                detail="사내 규정에 관련 조항이 없어 외부 회계/세무 기준을 검색합니다." if vector_results else "사내 규정 검색 결과가 없어 외부 검색을 수행합니다.",
+                percent=38,
+            ).model_dump())
+            try:
+                from tools.external_search_tool import run_web_search_for_pipeline
+                expense_type = (isinstance(case_data, dict) and (case_data.get("expenseType") or case_data.get("expense_type") or "")) or "경비"
+                web_query = f"법인카드 {expense_type} 세무처리 국세청 가이드라인 회계기준"
+                web_result = await run_web_search_for_pipeline(web_query)
+                if isinstance(web_result, dict):
+                    external_search_text = web_result.get("text", "")
+                    external_citations = web_result.get("citations", [])
+                else:
+                    external_search_text = str(web_result)
+                if external_search_text and "error" not in (external_search_text[:100] or "").lower():
+                    evidence_items.append({
+                        "type": "EXTERNAL_WEB",
+                        "source": "web_search",
+                        "excerpt": (external_search_text[:500] + "..." if len(external_search_text) > 500 else external_search_text),
+                    })
+            except Exception as e:
+                logger.debug(f"web_search in pipeline failed: {e}")
 
         try:
             oi_result = await get_open_items.ainvoke({"filters": {"caseId": case_id}})
@@ -222,7 +267,11 @@ async def run_phase2_analysis(
             doc_list.sort(key=_doc_rank_key)
 
         yield ("evidence", AnalysisEvidenceEvent(type="COLLECTED", items=evidence_items).model_dump())
-        yield ("step", AnalysisStepEvent(label="RULE_SCORING", detail="룰 스코어링 실행", percent=45).model_dump())
+        yield ("step", AnalysisStepEvent(
+            label="RULE_SCORING",
+            detail="규정 제한 업종·금액·시간 기준 위반 여부 검토 중입니다.",
+            percent=45,
+        ).model_dump())
 
         # Step3: 룰 스코어링 (정상/위반 대비: DEMO_NORM_* vs DEMO0000*)
         amount = 0.0
@@ -246,7 +295,11 @@ async def run_phase2_analysis(
             overall=round(overall, 2),
         ).model_dump())
 
-        yield ("step", AnalysisStepEvent(label="LLM_REASONING", detail="설명 생성 중", percent=65).model_dump())
+        yield ("step", AnalysisStepEvent(
+            label="LLM_REASONING",
+            detail="규정 조문과 대조하여 위반 여부 판단 및 판단 근거 작성 중입니다.",
+            percent=65,
+        ).model_dump())
 
         # Step4: LLM reasonText (XAI: 규정 인용형 문장)
         risk_type = "DUPLICATE_INVOICE"
@@ -269,7 +322,7 @@ async def run_phase2_analysis(
 
         reason_text = f"케이스 {case_id}: {risk_type} 위험 유형. "
         try:
-            llm = get_llm_client()
+            llm = get_llm_client(model_name)
             prompt_parts = [
                 f"케이스 {case_id} 분석 결과를 한 문단으로 요약. ",
                 f"위험 유형: {risk_type}. 스코어: {overall:.2f}. ",
@@ -286,7 +339,13 @@ async def run_phase2_analysis(
                     "**정상 전표**인 경우: '사내 경비 규정 v1.2의 모든 기준을 충족하는 모범적인 지출 사례'임을 칭찬 섞인 요약으로 표현. "
                     "**위반 전표**인 경우: '규정 제N조 N항을 정면으로 위반했습니다.'라고 단호하게 쓰고, "
                     "구체적 근거로 '상세 항목(Item)의 [필드명]이 규정 제X조 X항과 상충됨' 형태를 포함할 것. "
-                    "위반 사유(시간외 결제·주말 식대 등)를 한 문장에 포함하고, evidence에는 해당 조항 원문을 정확히 바인딩할 수 있도록 조문 번호를 명시."
+                    "위반 사유(시간외 결제·주말 식대 등)를 한 문장에 포함하고, evidence에는 해당 조항 원문을 정확히 바인딩할 수 있도록 조문 번호를 명시. "
+                    "URL이 포함된 경우 반드시 마크다운 형식 [설명](URL)으로 작성하여 프론트엔드에서 하이퍼링크로 렌더링되도록 할 것."
+                )
+            if external_search_text:
+                prompt_parts.append(
+                    "\n\n외부 참조 (사내 규정에 없을 때 참고):\n" + (external_search_text[:3000] if len(external_search_text) > 3000 else external_search_text)
+                    + "\n\n위 외부 출처가 있으면 '사내 규정에는 없으나, [출처명](URL)에 따르면 ...' 형태로 인용하고, URL은 [설명](URL) 마크다운으로 작성할 것."
                 )
             if case_context:
                 prompt_parts.append(f"케이스 맥락: {case_context}. ")
@@ -301,6 +360,8 @@ async def run_phase2_analysis(
         except Exception as e:
             logger.warning(f"LLM reasonText failed: {e}")
             reason_text += f"증거 {len(evidence_items)}건 수집. 스코어 {overall:.2f}."
+        # 위반 조항 추출 (Autonomous Conclusion: violation_clause 반환용)
+        violation_clause_str = ""
         # XAI 인용형: 규정이 있으면 "사내 경비 규정 제5조 2항(주말 식대 제한)에 의거하여, ..." 보강
         risk_level = "HIGH" if overall >= 0.8 else "MEDIUM" if overall >= 0.6 else "LOW"
         # Contrastive: 정상(DEMO_NORM_*) → 칭찬 요약 / 위반(DEMO0000*) → 단호한 위반 문구 + evidence에 조문 원문 바인딩
@@ -313,6 +374,7 @@ async def run_phase2_analysis(
             risk_level = "LOW"
         elif is_demo_violation:
             violation_article, violation_clause = "제11조", "2항"
+            violation_clause_str = f"{violation_article} {violation_clause}"
             clause_evidence = get_violation_clause_evidence(doc_list, violation_article, violation_clause)
             if clause_evidence:
                 evidence_items.append({
@@ -337,7 +399,11 @@ async def run_phase2_analysis(
             if "에 의거하여" in citation_sentence:
                 reason_text = citation_sentence + " " + reason_text
 
-        yield ("step", AnalysisStepEvent(label="PROPOSALS", detail="권고 조치 생성", percent=85).model_dump())
+        yield ("step", AnalysisStepEvent(
+            label="PROPOSALS",
+            detail="권고 조치(결제 보류·추가 확인 등) 생성 중입니다.",
+            percent=85,
+        ).model_dump())
 
         # Step5: Proposals
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -382,11 +448,30 @@ async def run_phase2_analysis(
                     "amount": amt * (0.9 + i * 0.1),
                 })
 
-        # finalResult 저장 (콜백 전에 반드시 실행 — break 시 get_phase2_result 사용)
+        # 권고 조치 요약 (Autonomous Conclusion: recommended_action)
+        recommended_action = ""
+        if proposals:
+            recommended_action = "; ".join(p.get("rationale", "") for p in proposals if p.get("rationale"))
+
+        # citations: 내부 규정(RAG) + 외부 검색 URL — case_analysis_result / 답변 하단 노출용
+        internal_citations: list[dict[str, str]] = []
+        for d in doc_list:
+            if not isinstance(d, dict):
+                continue
+            title = (d.get("title") or d.get("file_name") or d.get("location") or "").strip() or "내부 규정"
+            url = (d.get("s3_url") or d.get("url") or "").strip()
+            internal_citations.append({"title": title, "url": url, "source": "rag"})
+        for c in external_citations:
+            internal_citations.append({**c, "source": "web_search"})
+        citations = internal_citations
+
+        # finalResult 저장 (콜백 전에 반드시 실행 — break 시 get_audit_analysis_result 사용)
+        # 백엔드 case_analysis_result 테이블 규격: violation_clause, risk_score, reasoning_summary, recommended_action, citations[] 필수
         severity = "HIGH" if overall >= 0.8 else "MEDIUM" if overall >= 0.6 else "LOW"
-        from core.streaming.case_stream_store import set_phase2_result
-        set_phase2_result(case_id, {
+        from core.streaming.case_stream_store import set_audit_analysis_result
+        set_audit_analysis_result(case_id, {
             "reasonText": reason_text,
+            "reasoning_summary": reason_text,
             "proposals": proposals,
             "confidenceBreakdown": {
                 "anomalyScore": anomaly_score,
@@ -394,11 +479,15 @@ async def run_phase2_analysis(
                 "ruleCompliance": rule_compliance,
                 "overall": overall,
             },
-            "evidence": evidence_items[:10],  # BE 저장용 (없으면 null)
+            "evidence": evidence_items[:10],
             "ragRefs": evidence_items[:5],
             "similarCases": similar_cases,
             "score": overall,
+            "risk_score": round(overall * 100),
             "severity": severity,
+            "violation_clause": violation_clause_str,
+            "recommended_action": recommended_action,
+            "citations": citations,
         })
 
         # 신규 고위험 케이스 탐지 시 Redis 알림 (workbench:alert, category=AI_DETECT — 백엔드 NotificationService 규격)
@@ -428,5 +517,5 @@ async def run_phase2_analysis(
         yield ("completed", completed_payload)
 
     except Exception as e:
-        logger.exception(f"Phase2 analysis failed for {case_id}")
+        logger.exception(f"Audit analysis failed for {case_id}")
         yield ("failed", AnalysisFailedEvent(error=str(e), stage="pipeline").model_dump())

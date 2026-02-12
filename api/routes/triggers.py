@@ -67,7 +67,9 @@ async def _run_finance_agent_background(
 ) -> None:
     """Finance Agent를 백그라운드에서 실행 (SCAN_STARTED/COMPLETED audit 발행)"""
     try:
-        from domains.finance.agents.finance_agent import get_finance_agent
+        from core.analysis.agent_factory import fetch_agent_config
+        from core.memory.checkpointer_factory import get_finance_checkpointer
+        from domains.finance.agents.finance_agent import FinanceAgent
         from domains.finance.agents.hooks import create_finance_sse_hook
 
         set_request_context(
@@ -78,7 +80,8 @@ async def _run_finance_agent_background(
             case_id=case_id,
             case_key=case_key,
         )
-        agent = get_finance_agent()
+        config = await fetch_agent_config(agent_id="audit", tenant_id=tenant_id)
+        agent = FinanceAgent(checkpointer=get_finance_checkpointer(), agent_config=config)
         hook = create_finance_sse_hook([])
         context = {"caseId": case_id, "caseKey": case_key}
         thread_id = f"trigger_{case_id}_{int(datetime.utcnow().timestamp())}"

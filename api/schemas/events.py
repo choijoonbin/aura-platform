@@ -48,13 +48,16 @@ class ToolExecutionStatus(str, Enum):
 
 
 class ThoughtEvent(SSEEventPayloadBase):
-    """사고 과정 이벤트"""
+    """사고 과정 이벤트 (ThoughtChainUI: step/thought/evidence 규격)"""
     type: str = Field(default="thought", description="이벤트 타입")
     thoughtType: ThoughtType = Field(..., description="사고 타입")
-    content: str = Field(..., description="사고 내용")
+    content: str = Field(..., description="사고 내용 (thought)")
     timestamp: datetime = Field(default_factory=datetime.utcnow, description="타임스탬프")
     sources: list[str] = Field(default_factory=list, description="참고 소스 (파일 경로, 대화 ID 등)")
     metadata: dict[str, Any] = Field(default_factory=dict, description="추가 메타데이터")
+    # 감사 단계별 세분화 (ThoughtChainUI)
+    step: str | None = Field(default=None, description="단계 식별자: INTERNAL_POLICY_LOOKUP, WEB_SEARCH, REGULATION_MATCH, FINAL_SYNTHESIS 등")
+    evidence: str | None = Field(default=None, description="해당 단계에서 발견한 근거 요약 (예: 규정 제12조 발견)")
 
 
 class PlanStepEvent(SSEEventPayloadBase):

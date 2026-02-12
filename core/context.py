@@ -28,6 +28,7 @@ def set_request_context(
     gjahr: str | None = None,
     policy_config_source: str | None = None,
     policy_profile: str | None = None,
+    x_sandbox: str | None = None,
     **extra: Any,
 ) -> None:
     """요청 컨텍스트 설정 (스트림 핸들러 시작 시 호출)
@@ -56,6 +57,8 @@ def set_request_context(
         ctx["policy_config_source"] = policy_config_source
     if policy_profile is not None:
         ctx["policy_profile"] = policy_profile
+    if x_sandbox is not None:
+        ctx["x_sandbox"] = x_sandbox
     ctx.update(extra)
     _request_context.set(ctx)
 
@@ -63,6 +66,14 @@ def set_request_context(
 def get_request_context() -> dict[str, Any]:
     """요청 컨텍스트 조회 (Synapse Tool 호출 시 사용)"""
     return _request_context.get().copy()
+
+
+def get_guardrails() -> dict[str, Any] | None:
+    """
+    run 스코프 가드레일 (mutable). web_search 호출 횟수 등.
+    set_request_context(..., _guardrails={"web_search_calls": 0, "web_search_max_calls": N}) 로 초기화.
+    """
+    return _request_context.get().get("_guardrails")
 
 
 def get_synapse_headers(idempotency_key: str | None = None) -> dict[str, str]:

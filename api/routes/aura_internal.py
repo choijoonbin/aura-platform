@@ -63,6 +63,7 @@ async def _run_phase3_background(
     callbacks: Phase3CallbacksModel,
     options: Phase3OptionsModel | None,
     test_fail: str | None = None,
+    x_sandbox: str | None = None,
 ):
     """Phase3 파이프라인 실행, 이벤트 큐 적재, 완료 시 resultCallbackUrl로 콜백. test_fail=rag|llm 시 해당 단계에서 의도적 실패."""
     set_request_context(
@@ -71,6 +72,7 @@ async def _run_phase3_background(
         auth_token=None,
         trace_id=f"trace-p3-{case_id}-{run_id[:8]}",
         case_id=case_id,
+        x_sandbox=x_sandbox,
     )
     callback_url = callbacks.resultCallbackUrl
     auth = callbacks.auth
@@ -160,6 +162,7 @@ async def phase3_analysis_runs(
         body.callbacks,
         body.options,
         test_fail=test_fail,
+        x_sandbox=request.headers.get("X-Sandbox"),
     ))
 
     stream_path = f"/aura/cases/{case_id_str}/analysis/stream?runId={run_id}"

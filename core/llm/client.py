@@ -14,14 +14,15 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AI
 from core.config import settings
 
 
-def _create_chat_model(**kwargs: Any) -> BaseChatModel:
-    """설정에 따라 ChatOpenAI 또는 AzureChatOpenAI 반환"""
+def _create_chat_model(model: str | None = None, **kwargs: Any) -> BaseChatModel:
+    """설정에 따라 ChatOpenAI 또는 AzureChatOpenAI 반환. model이 있으면 해당 엔진(배포명) 사용."""
+    deployment_or_model = model or settings.azure_openai_deployment or settings.openai_model
     if settings.use_azure_openai:
         from langchain_openai import AzureChatOpenAI
         return AzureChatOpenAI(
             azure_endpoint=settings.azure_openai_endpoint,
             api_key=settings.azure_openai_api_key,
-            azure_deployment=settings.azure_openai_deployment or settings.openai_model,
+            azure_deployment=deployment_or_model,
             api_version=settings.azure_openai_api_version,
             temperature=kwargs.get("temperature", settings.openai_temperature),
             max_tokens=kwargs.get("max_tokens", settings.openai_max_tokens),
@@ -29,7 +30,7 @@ def _create_chat_model(**kwargs: Any) -> BaseChatModel:
     from langchain_openai import ChatOpenAI
     return ChatOpenAI(
         api_key=settings.openai_api_key,
-        model=settings.openai_model,
+        model=deployment_or_model,
         temperature=kwargs.get("temperature", settings.openai_temperature),
         max_tokens=kwargs.get("max_tokens", settings.openai_max_tokens),
     )
@@ -80,6 +81,7 @@ class LLMClient:
         """
         if self._client is None:
             self._client = _create_chat_model(
+                model=self.model,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
                 **self.extra_kwargs,
@@ -211,14 +213,19 @@ class LLMClient:
         )
 
 
-@lru_cache()
-def get_llm_client() -> LLMClient:
-    """
-    전역 LLMClient 인스턴스를 반환합니다.
-    
-    이 함수는 캐시되어 애플리케이션 전체에서 단일 인스턴스를 공유합니다.
-    
-    Returns:
-        LLMClient 인스턴스
-    """
+def _get_llm_client_cached(model_key: str | None) -> LLMClient:
+    """캐시용 내부 함수. model_key is None → 기본 설정, 아니면 해당 엔진."""
+    if model_key:
+        from core.synapse_schema import resolve_model_name
+        resolved = resolve_model_name(model_key)
+        return LLMClient(model=resolved or model_key)
     return LLMClient()
+
+
+@lru_cache(maxsize=8)
+def get_llm_client(model_name: str | None = None) -> LLMClient:
+    """
+    LLMClient 반환. model_name(DB 코드값)이 있으면 해당 엔진 사용.
+    Synapse model_name → resolve_model_name()으로 배포명 매핑.
+    """
+    return _get_llm_client_cached(model_name)

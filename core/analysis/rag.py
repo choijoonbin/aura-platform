@@ -20,6 +20,12 @@ from pathlib import Path
 from typing import Any
 
 from core.config import get_settings
+from core.synapse_schema import (
+    DOC_TYPE_REGULATION,
+    DOC_TYPE_HIERARCHICAL,
+    DOC_TYPE_GENERAL,
+    is_hierarchical,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +43,15 @@ _CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 PGVECTOR_SCHEMA = "dwp_aura"
 PGVECTOR_TABLE = "rag_chunk"
 EMBEDDING_DIM = 1536
+
+# Synapse DOC_TYPE과 동일 (core.synapse_schema 참조). 하위 호환 별칭.
+FINANCE_REGULATION_DOC_TYPE = DOC_TYPE_REGULATION
+HIERARCHICAL_DOC_TYPE = DOC_TYPE_HIERARCHICAL
+# [장-조-항-호] 구조 파싱용 Regex (규정/법률)
+_RE_CHAPTER = re.compile(r"^(제\d+장)\s*(.*)$", re.MULTILINE)   # 제1장 총칙
+_RE_ARTICLE = re.compile(r"^(제\d+조)\s*(.*)$", re.MULTILINE)   # 제12조 식대
+_RE_CLAUSE = re.compile(r"^(\d+항)\s*(.*)$", re.MULTILINE)       # 1항
+_RE_SUB = re.compile(r"^[\(（]?\d+[\)）]?호\s*(.*)$", re.MULTILINE)  # (1)호 or 1호
 
 # ---------------------------------------------------------------------------
 # Phase 6: Embedding & Vector Store (optional deps: pypdf, langchain-text-splitters, chromadb, langchain-chroma)
@@ -281,8 +296,10 @@ def _pgvector_search(
 ) -> list[Any]:
     """코사인 거리 기반 검색. CAST(:embedding AS vector), CAST(:filter_json AS jsonb) 만 사용."""
     from sqlalchemy import text
+    # Backend-owned table: id 없음, 본문 컬럼은 chunk_text (RAG_BACKEND_CHUNK_CHECKLIST)
     sql = f"""
-            SELECT id, doc_id, chunk_index, content, regulation_article, regulation_clause, location, title,
+            SELECT doc_id, chunk_index, chunk_text AS content,
+                   regulation_article, regulation_clause, location, title,
                    metadata_json,
                    1 - (embedding <=> {_SQL_CAST_VECTOR}) AS score
             FROM {full_table}
@@ -305,6 +322,127 @@ def _pgvector_search(
     return list(session.execute(text(sql), params).fetchall())
 
 
+def _hierarchical_chunk_text(
+    text: str,
+    doc_title: str = "규정문서",
+    *,
+    max_chunk_chars: int = 800,
+) -> list[tuple[str, dict[str, Any]]]:
+    """
+    doc_type == HIERARCHICAL: [장-조-항-호] 구조를 Regex로 분석하여,
+    각 청크 앞에 상위 계층 제목을 강제 주입하고, violation_clause 추출용 메타데이터를 붙인다.
+    FE 계층형 업로드 시 조/항 번호 인식 여부 교차 검증용 로그 포함.
+
+    Returns:
+        [(content_with_prefix, metadata), ...]
+        content_with_prefix 예: "[운영규정 > 제3장 지출 > 제12조 식대] 본문 내용..."
+    """
+    if not text or not text.strip():
+        return []
+    logger.info("hierarchical_chunk: doc_title=%s, text_len=%d (조/항 인식 검증)", doc_title, len(text))
+    lines = text.split("\n")
+    chunks_out: list[tuple[str, dict[str, Any]]] = []
+    chapter_part: str = ""
+    current_path: list[str] = []
+    current_article: str | None = None
+    current_clause: str | None = None
+    violation_clause_str = ""
+    buffer: list[str] = []
+
+    def flush_buffer() -> None:
+        nonlocal buffer, current_path, current_article, current_clause, violation_clause_str
+        if not buffer:
+            return
+        content = "\n".join(buffer).strip()
+        if not content:
+            buffer = []
+            return
+        path_str = " > ".join([doc_title] + current_path) if current_path else doc_title
+        prefix = f"[{path_str}] "
+        full_content = prefix + content
+        if len(full_content) > max_chunk_chars:
+            for i in range(0, len(full_content), max_chunk_chars):
+                part = full_content[i : i + max_chunk_chars]
+                meta = {
+                    "regulation_article": current_article,
+                    "regulation_clause": current_clause,
+                    "violation_clause": violation_clause_str or (f"{current_article or ''} {current_clause or ''}".strip()),
+                    "location": path_str,
+                }
+                chunks_out.append((part, meta))
+        else:
+            meta = {
+                "regulation_article": current_article,
+                "regulation_clause": current_clause,
+                "violation_clause": violation_clause_str or (f"{current_article or ''} {current_clause or ''}".strip()),
+                "location": path_str,
+            }
+            chunks_out.append((full_content, meta))
+        buffer = []
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            if buffer:
+                buffer.append(line)
+            continue
+        m_ch = _RE_CHAPTER.match(stripped)
+        m_ar = _RE_ARTICLE.match(stripped)
+        m_cl = _RE_CLAUSE.match(stripped)
+        m_sub = _RE_SUB.match(stripped)
+        if not (m_ch or m_ar or m_cl or m_sub) and ("제" in stripped and ("조" in stripped or "항" in stripped)):
+            sample = (stripped[:200] + ("..." if len(stripped) > 200 else ""))
+            logger.warning(
+                "hierarchical_chunk: regulation_article 추출 실패 — Regex 미매칭 라인 샘플 (doc_title=%s): %s",
+                doc_title,
+                sample,
+            )
+        if m_ch:
+            flush_buffer()
+            chapter_part = f"{m_ch.group(1)} {(m_ch.group(2) or '').strip() or m_ch.group(1)}"
+            current_path = [chapter_part]
+            current_article = None
+            current_clause = None
+            violation_clause_str = ""
+            buffer = [line]
+            logger.debug("hierarchical_chunk: 장 인식 chapter=%s", chapter_part)
+        elif m_ar:
+            flush_buffer()
+            art_label = m_ar.group(1)
+            art_title = (m_ar.group(2) or "").strip() or art_label
+            current_article = art_label
+            current_clause = None
+            violation_clause_str = art_label
+            current_path = [chapter_part, f"{art_label} {art_title}"] if chapter_part else [f"{art_label} {art_title}"]
+            buffer = [line]
+            logger.info("hierarchical_chunk: 조 인식 article=%s title=%s", art_label, art_title[:30] if art_title else "")
+        elif m_cl:
+            flush_buffer()
+            cl_label = m_cl.group(1)
+            current_clause = cl_label
+            violation_clause_str = f"{current_article or ''} {cl_label}".strip()
+            current_path = current_path + [cl_label] if current_path else [cl_label]
+            buffer = [line]
+            logger.info("hierarchical_chunk: 항 인식 clause=%s violation_clause=%s", cl_label, violation_clause_str)
+        elif m_sub:
+            flush_buffer()
+            buffer = [line]
+        else:
+            buffer.append(line)
+    flush_buffer()
+    # 교차 검증: 청크 수 및 조/항 메타데이터 1건 이상 로그
+    if chunks_out:
+        sample = chunks_out[0][1]
+        logger.info(
+            "hierarchical_chunk: 완료 chunks=%d sample regulation_article=%s regulation_clause=%s violation_clause=%s",
+            len(chunks_out),
+            sample.get("regulation_article"),
+            sample.get("regulation_clause"),
+            sample.get("violation_clause"),
+        )
+    return chunks_out
+
+
 def _compute_vectorization_result(
     file_path: str | Path,
     rag_document_id: str,
@@ -312,15 +450,16 @@ def _compute_vectorization_result(
     *,
     chunk_size: int = 800,
     chunk_overlap: int = 120,
-    doc_type: str = "REGULATION",
+    doc_type: str = DOC_TYPE_REGULATION,
 ) -> dict[str, Any]:
     """
     PDF/Text → Chunking → Embedding 까지만 수행. DB 접속·INSERT 없음.
+    doc_type == HIERARCHICAL 이면 [장-조-항-호] 구조 분석 후 Contextual Injection 적용.
     Returns:
         {"ok": True, "rag_document_id": str, "chunks": [{"chunk_index", "content", "embedding", "metadata"}, ...]}
         또는 {"ok": False, "error": str}.
     - embedding: list[float] (1536차원, PostgreSQL 문법 없음).
-    - metadata: 백엔드 rag_chunk 행 매핑용 (doc_id, regulation_article 등 포함).
+    - metadata: 백엔드 rag_chunk 행 매핑용 (doc_id, regulation_article, violation_clause 등 포함).
     """
     path = Path(file_path)
     emb = _get_embedding_client()
@@ -330,31 +469,42 @@ def _compute_vectorization_result(
         text_content = _load_text_from_file(path)
     except Exception as e:
         return {"ok": False, "error": str(e)}
-    try:
-        from langchain_experimental.text_splitter import SemanticChunker
-    except ImportError:
-        return {"ok": False, "error": "pip install langchain-experimental"}
-    splitter = SemanticChunker(
-        embeddings=emb,
-        breakpoint_threshold_type="percentile",
-    )
-    try:
-        chunks_text = splitter.split_text(text_content)
-    except Exception as e:
-        logger.warning("SemanticChunker failed, fallback to RecursiveCharacterTextSplitter: %s", e)
+    meta = dict(metadata or {})
+    doc_title = meta.get("title") or meta.get("file_name") or path.stem or "규정문서"
+
+    if is_hierarchical(doc_type):
+        logger.info("vectorization: doc_type=HIERARCHICAL rag_document_id=%s (계층형 청킹 조/항 인식)", rag_document_id)
+        hierarchical_chunks = _hierarchical_chunk_text(text_content, doc_title=doc_title, max_chunk_chars=chunk_size)
+        if not hierarchical_chunks:
+            return {"ok": True, "rag_document_id": rag_document_id, "chunks": []}
+        chunks_text = [c[0] for c in hierarchical_chunks]
+        hierarchical_meta = [c[1] for c in hierarchical_chunks]
+    else:
+        hierarchical_meta = []
         try:
-            from langchain_text_splitters import RecursiveCharacterTextSplitter
-            fallback = RecursiveCharacterTextSplitter(
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-                length_function=len,
-            )
-            chunks_text = fallback.split_text(text_content)
+            from langchain_experimental.text_splitter import SemanticChunker
         except ImportError:
-            return {"ok": False, "error": "pip install langchain-text-splitters (fallback)"}
+            return {"ok": False, "error": "pip install langchain-experimental"}
+        splitter = SemanticChunker(
+            embeddings=emb,
+            breakpoint_threshold_type="percentile",
+        )
+        try:
+            chunks_text = splitter.split_text(text_content)
+        except Exception as e:
+            logger.warning("SemanticChunker failed, fallback to RecursiveCharacterTextSplitter: %s", e)
+            try:
+                from langchain_text_splitters import RecursiveCharacterTextSplitter
+                fallback = RecursiveCharacterTextSplitter(
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                    length_function=len,
+                )
+                chunks_text = fallback.split_text(text_content)
+            except ImportError:
+                return {"ok": False, "error": "pip install langchain-text-splitters (fallback)"}
     if not chunks_text:
         return {"ok": True, "rag_document_id": rag_document_id, "chunks": []}
-    meta = dict(metadata or {})
     regulation_article = meta.get("regulation_article") or meta.get("regulationArticle")
     regulation_clause = meta.get("regulation_clause") or meta.get("regulationClause")
     location = meta.get("location") or meta.get("regulationLocation")
@@ -374,18 +524,34 @@ def _compute_vectorization_result(
     chunks_out: list[dict[str, Any]] = []
     for i, (content, vec) in enumerate(zip(chunks_text, embeddings)):
         page_number = _extract_page_from_chunk(content) if is_pdf else 1
-        chunk_meta: dict[str, Any] = {
-            **meta,
-            "doc_id": rag_document_id,
-            "chunk_index": i,
-            "page_number": page_number,
-            "file_path": file_path_str,
-            "regulation_article": regulation_article,
-            "regulation_clause": regulation_clause,
-            "location": location,
-            "title": title,
-            "doc_type": doc_type,
-        }
+        if is_hierarchical(doc_type) and i < len(hierarchical_meta):
+            hm = hierarchical_meta[i]
+            chunk_meta = {
+                **meta,
+                "doc_id": rag_document_id,
+                "chunk_index": i,
+                "page_number": page_number,
+                "file_path": file_path_str,
+                "regulation_article": hm.get("regulation_article") or regulation_article,
+                "regulation_clause": hm.get("regulation_clause") or regulation_clause,
+                "location": hm.get("location") or location,
+                "title": title,
+                "doc_type": doc_type,
+                "violation_clause": hm.get("violation_clause"),
+            }
+        else:
+            chunk_meta = {
+                **meta,
+                "doc_id": rag_document_id,
+                "chunk_index": i,
+                "page_number": page_number,
+                "file_path": file_path_str,
+                "regulation_article": regulation_article,
+                "regulation_clause": regulation_clause,
+                "location": location,
+                "title": title,
+                "doc_type": doc_type,
+            }
         chunks_out.append({
             "chunk_index": i,
             "content": content,
@@ -404,7 +570,7 @@ def retrieve_rag_pgvector(
     metadata_filter: dict[str, Any] | None = None,
     include_article_clause: bool = True,
     similarity_threshold: float = 0.75,
-    doc_type_filter: str | None = "REGULATION",
+    doc_type_filter: str | None = DOC_TYPE_REGULATION,
     prioritize_chapters: tuple[str, ...] = ("제5장", "제6장"),
 ) -> list[dict[str, Any]]:
     """
@@ -442,28 +608,35 @@ def retrieve_rag_pgvector(
     except Exception as e:
         logger.warning("retrieve_rag_pgvector query failed: %s", e)
         return []
+    # SELECT 순서: doc_id(0), chunk_index(1), content(2), regulation_article(3), regulation_clause(4), location(5), title(6), metadata_json(7), score(8)
     out: list[dict[str, Any]] = []
     for i, row in enumerate(rows):
-        content = row[3] if len(row) > 3 else ""
-        regulation_article = row[4] if len(row) > 4 else None
-        regulation_clause = row[5] if len(row) > 5 else None
-        location = row[6] if len(row) > 6 else None
-        title = row[7] if len(row) > 7 else None
-        metadata_json = row[8] if len(row) > 8 else None
-        score = float(row[9]) if len(row) > 9 else (0.9 - i * 0.05)
+        content = row[2] if len(row) > 2 else ""
+        regulation_article = row[3] if len(row) > 3 else None
+        regulation_clause = row[4] if len(row) > 4 else None
+        location = row[5] if len(row) > 5 else None
+        title = row[6] if len(row) > 6 else None
+        metadata_json = row[7] if len(row) > 7 else None
+        score = float(row[8]) if len(row) > 8 else (0.9 - i * 0.05)
         item = {
             "content": content,
             "excerpt": (content[:400] if len(content) > 400 else content),
             "score": round(score, 2),
-            "rag_document_id": row[1] if len(row) > 1 else None,
+            "rag_document_id": row[0] if len(row) > 0 else None,
             "sourceType": "DOCUMENT",
-            "sourceKey": row[1] if len(row) > 1 else f"vec-{i}",
+            "sourceKey": row[0] if len(row) > 0 else f"vec-{i}",
         }
         if isinstance(metadata_json, dict):
             if metadata_json.get("page_number") is not None:
                 item["page_number"] = metadata_json["page_number"]
             if metadata_json.get("file_path"):
                 item["file_path"] = metadata_json["file_path"]
+            if metadata_json.get("file_name"):
+                item["file_name"] = metadata_json["file_name"]
+            elif metadata_json.get("file_path"):
+                item["file_name"] = Path(metadata_json["file_path"]).name
+            if metadata_json.get("s3_url"):
+                item["s3_url"] = metadata_json["s3_url"]
         elif isinstance(metadata_json, str):
             try:
                 meta = json.loads(metadata_json)
@@ -471,6 +644,12 @@ def retrieve_rag_pgvector(
                     item["page_number"] = meta["page_number"]
                 if meta.get("file_path"):
                     item["file_path"] = meta["file_path"]
+                if meta.get("file_name"):
+                    item["file_name"] = meta["file_name"]
+                elif meta.get("file_path"):
+                    item["file_name"] = Path(meta["file_path"]).name
+                if meta.get("s3_url"):
+                    item["s3_url"] = meta["s3_url"]
             except (json.JSONDecodeError, TypeError):
                 pass
         if include_article_clause:
@@ -489,9 +668,11 @@ def process_and_vectorize(
     *,
     chunk_size: int = 800,
     chunk_overlap: int = 120,
+    doc_type: str = FINANCE_REGULATION_DOC_TYPE,
 ) -> dict[str, Any]:
     """
     PDF/Text → Chunking → Embedding 연산만 수행. DB INSERT 없음.
+    doc_type == HIERARCHICAL 이면 [장-조-항-호] 구조 분석 및 Contextual Injection 적용.
     연산 결과(청크 + 임베딩 벡터 + 메타데이터)를 반환하며, 저장은 백엔드에서 수행.
 
     Returns:
@@ -501,11 +682,8 @@ def process_and_vectorize(
     return _compute_vectorization_result(
         file_path, rag_document_id, metadata,
         chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+        doc_type=doc_type,
     )
-
-
-# 회계 규정 분석 시 사용할 doc_type. 일반 매뉴얼(GENERAL)이 혼입되지 않도록 격리.
-FINANCE_REGULATION_DOC_TYPE = "REGULATION"
 
 
 def hybrid_retrieve(
@@ -516,7 +694,7 @@ def hybrid_retrieve(
     include_article_clause: bool = True,
     bukrs: str | None = None,
     belnr: str | None = None,
-    doc_type_filter: str | None = FINANCE_REGULATION_DOC_TYPE,
+    doc_type_filter: str | None = DOC_TYPE_REGULATION,
 ) -> list[dict[str, Any]]:
     """
     하이브리드 검색. vector_store_type=pgvector 시 코사인 유사도(<=>) + 전표 맥락(bukrs, belnr) 반영.
@@ -575,6 +753,17 @@ def hybrid_retrieve(
             "sourceType": "DOCUMENT",
             "sourceKey": meta.get("rag_document_id") or meta.get("docKey") or f"vec-{i}",
         }
+        # 출처(Citations): file_name, page_number, s3_url — [내부규정: 파일명 p.N] 형식 지원
+        if meta.get("page_number") is not None:
+            item["page_number"] = meta["page_number"]
+        if meta.get("file_path"):
+            item["file_path"] = meta["file_path"]
+        if meta.get("file_name"):
+            item["file_name"] = meta["file_name"]
+        elif meta.get("file_path"):
+            item["file_name"] = Path(meta["file_path"]).name
+        if meta.get("s3_url"):
+            item["s3_url"] = meta["s3_url"]
         if include_article_clause:
             item["regulation_article"] = meta.get("regulation_article")
             item["regulation_clause"] = meta.get("regulation_clause")

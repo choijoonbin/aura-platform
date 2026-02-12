@@ -349,7 +349,7 @@ class Settings(BaseSettings):
         description="Agent Stream push URL (미지정 시 http://localhost:8080/api/synapse/agent/events)",
     )
 
-    # ==================== Phase2 BE Callback ====================
+    # ==================== Audit Analysis BE Callback ====================
     dwp_gateway_url: str = Field(
         default="http://localhost:8080",
         description="Gateway Base URL (BE 콜백용, 예: http://localhost:8080)",
@@ -357,6 +357,22 @@ class Settings(BaseSettings):
     callback_path: str = Field(
         default="/api/synapse/internal/aura/callback",
         description="BE 콜백 경로 (DWP_GATEWAY_URL과 결합)",
+    )
+    agent_config_path: str | None = Field(
+        default=None,
+        description="에이전트 설정 조회 경로 (기본: api/v1/agents/config). Query: agent_key, Header: X-Tenant-ID 필수.",
+    )
+    web_search_max_calls_per_run: int = Field(
+        default=5,
+        ge=0,
+        description="run당 web_search 호출 상한 (백엔드 가드레일과 동기화 권장). 0=제한 없음",
+    )
+    # RAG 우선순위: 내부 규정 유사도가 이 값 미만일 때만 외부 검색 수행 (임시 0.7)
+    web_search_rag_threshold: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description="내부 RAG 유사도가 이 값 미만일 때만 web_search 실행. 0.7 = 내부 규정 불충분 시에만 외부 검색",
     )
 
     # ==================== Trigger (Phase B) ====================

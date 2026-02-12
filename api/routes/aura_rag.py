@@ -85,8 +85,11 @@ def _send_batches_to_backend(
             with httpx.Client(timeout=timeout) as client:
                 r = client.post(url, json=body)
                 if r.status_code >= 400:
-                    logger.warning("Backend chunks save failed: %s %s", r.status_code, r.text)
-                    raise RuntimeError(f"Backend save returned {r.status_code}")
+                    logger.warning(
+                        "Backend chunks save failed: status=%s body=%s (백엔드에서 400 원인 확인 후 수정)",
+                        r.status_code, (r.text or "")[:500],
+                    )
+                    raise RuntimeError(f"Backend save returned {r.status_code}: {r.text[:200] if r.text else ''}")
         except Exception as e:
             logger.warning("Backend chunks save request failed: %s", e)
             raise
@@ -109,28 +112,33 @@ def _build_vectorize_response(
     if save_url:
         try:
             sent, total = _send_batches_to_backend(rag_document_id, batches, save_url)
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "rag_document_id": rag_document_id,
-                    "total_chunks": total,
-                    "batches_sent": sent,
-                    "batch_size": batch_size,
-                },
+            payload = {
+                "rag_document_id": rag_document_id,
+                "total_chunks": total,
+                "batches_sent": sent,
+                "batch_size": batch_size,
+            }
+            logger.info(
+                "RAG vectorize response (save_url used): rag_document_id=%s total_chunks=%s batches_sent=%s batch_size=%s keys=%s",
+                rag_document_id, total, sent, batch_size, list(payload.keys()),
             )
+            return JSONResponse(status_code=200, content=payload)
         except Exception as e:
             return JSONResponse(
                 status_code=502,
                 content={"error": f"Backend chunks save failed: {e}"},
             )
-    return JSONResponse(
-        status_code=200,
-        content={
-            "rag_document_id": rag_document_id,
-            "batch_size": batch_size,
-            "batches": batches,
-        },
+    payload = {
+        "rag_document_id": rag_document_id,
+        "batch_size": batch_size,
+        "batches": batches,
+    }
+    first_chunk_keys = list(batches[0][0].keys()) if batches and batches[0] else []
+    logger.info(
+        "RAG vectorize response (body): rag_document_id=%s batch_size=%s num_batches=%s first_chunk_keys=%s response_top_keys=%s",
+        rag_document_id, batch_size, len(batches), first_chunk_keys, list(payload.keys()),
     )
+    return JSONResponse(status_code=200, content=payload)
 
 
 @router.post(
@@ -167,14 +175,23 @@ async def rag_documents_vectorize(
         return JSONResponse(status_code=400, content={"error": str(e)})
     rag_document_id = (doc_id or "").strip() or f"rag-{uuid.uuid4().hex[:12]}"
     metadata = _parse_metadata(body.metadata.strip() or None)
+    logger.info(
+        "RAG vectorize start: doc_id=%s rag_document_id=%s document_path=%s batch_size=%s",
+        doc_id, rag_document_id, document_path, batch_size,
+    )
     result = process_and_vectorize(valid_path, rag_document_id, metadata or None)
     if not result.get("ok"):
+        logger.warning("RAG vectorize failed: doc_id=%s error=%s", doc_id, result.get("error"))
         return JSONResponse(
             status_code=422,
             content={"error": result.get("error", "Vectorization failed")},
         )
     chunks = result["chunks"]
     save_url = getattr(settings, "backend_rag_chunks_save_url", None) or None
+    logger.info(
+        "RAG vectorize chunks ready: doc_id=%s num_chunks=%s save_url_set=%s (BE expects response keys: rag_document_id, total_chunks|batches, batches_sent, batch_size)",
+        doc_id, len(chunks), bool(save_url),
+    )
     return _build_vectorize_response(rag_document_id, chunks, batch_size, save_url)
 
 

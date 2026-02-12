@@ -1,8 +1,8 @@
 """
-Aura Cases Routes (Prompt C P0-P2, Phase2)
+Aura Cases Routes (Prompt C P0-P2, Audit Analysis)
 
 Case Detail 탭: Agent Stream, RAG Evidence, Similar, Confidence, Analysis
-Phase2-2: Trigger 202 JSON, Stream 별도, BE Callback
+감사 분석: Trigger 202 JSON, Stream 별도, BE Callback
 """
 
 import asyncio
@@ -25,7 +25,7 @@ from core.analysis.run_store import get_event, get_or_create_queue, put_event, q
 from core.streaming.case_stream_store import (
     CaseStreamEvent,
     get_case_stream_store,
-    get_phase2_result,
+    get_audit_analysis_result,
 )
 from tools.synapse_finance_tool import get_case, search_documents
 
@@ -124,11 +124,11 @@ async def case_stream_trigger(
     }
 
 
-# ==================== Phase2-2: Analysis Runs (Feign 호환) ====================
+# ==================== Audit Analysis: Analysis Runs (Feign 호환) ====================
 
 
 class AuraAnalyzeRequest(BaseModel):
-    """BE 트리거 요청 (Phase2 표준)"""
+    """BE 트리거 요청 (감사 분석 표준)"""
     runId: str = Field(..., description="BE가 생성한 run 식별자")
     caseId: str | None = Field(default=None, description="케이스 ID (path와 중복 가능, BE는 Long으로 전송)")
     evidence: dict[str, Any] | None = Field(default=None, description="evidence snapshot (문서/라인/오픈아이템/거래처 등)")
@@ -148,8 +148,11 @@ async def _run_analysis_background(
     tenant_id: str,
     auth_token: str | None,
     body_evidence: dict[str, Any] | None = None,
+    x_sandbox: str | None = None,
 ):
-    """백그라운드 분석 실행 + 큐에 이벤트 적재 + 완료 시 콜백. body_evidence: C(폴백)용. Phase 4: 정책 참조 로그용 context."""
+    """백그라운드 분석 실행 + 큐에 이벤트 적재 + 완료 시 콜백. body_evidence: C(폴백)용. 정책 참조 로그용 context."""
+    from core.config import get_settings
+    max_web = get_settings().web_search_max_calls_per_run
     set_request_context(
         tenant_id=tenant_id,
         user_id="",
@@ -158,23 +161,32 @@ async def _run_analysis_background(
         case_id=case_id,
         policy_config_source="dwp_aura.sys_monitoring_configs",
         policy_profile="default",
+        x_sandbox=x_sandbox,
+        _guardrails={"web_search_calls": 0, "web_search_max_calls": max_web},
     )
     event_type = "failed"
     payload: dict[str, Any] = {}
+    config = None
     try:
-        from core.analysis.phase2_pipeline import run_phase2_analysis
+        from core.analysis.agent_factory import fetch_agent_config
+        from core.analysis.audit_analysis_pipeline import run_audit_analysis
 
-        async for event_type, payload in run_phase2_analysis(
-            case_id, run_id=run_id, tenant_id=tenant_id, body_evidence=body_evidence,
+        config = await fetch_agent_config(agent_id="audit", tenant_id=tenant_id)
+        async for event_type, payload in run_audit_analysis(
+            case_id,
+            run_id=run_id,
+            tenant_id=tenant_id,
+            body_evidence=body_evidence,
+            model_name=config.model_name,
         ):
             put_event(run_id, event_type, payload)
             if event_type in ("completed", "failed"):
                 break
 
         if event_type == "completed":
-            result = get_phase2_result(case_id)
+            result = get_audit_analysis_result(case_id)
             if result:
-                await send_callback(run_id, case_id, "COMPLETED", final_result=result)
+                await send_callback(run_id, case_id, "COMPLETED", final_result=result, agent_id=config.agent_id, version=config.version)
             else:
                 await send_callback(run_id, case_id, "COMPLETED", final_result={
                     "score": payload.get("score", 0),
@@ -185,16 +197,23 @@ async def _run_analysis_background(
                     "ragRefs": [],
                     "similar": [],
                     "proposals": [],
-                })
+                }, agent_id=config.agent_id, version=config.version)
         else:
             await send_callback(
                 run_id, case_id, "FAILED",
                 error_message=payload.get("error", "unknown"),
+                agent_id=config.agent_id,
+                version=config.version,
             )
     except Exception as e:
         logger.exception(f"Analysis background failed case={case_id} run={run_id}")
         put_event(run_id, "failed", {"error": str(e), "stage": "background"})
-        await send_callback(run_id, case_id, "FAILED", error_message=str(e))
+        await send_callback(
+            run_id, case_id, "FAILED",
+            error_message=str(e),
+            agent_id=config.agent_id if config else "audit",
+            version=config.version if config else "1.0",
+        )
     finally:
         # 스트림이 proposal·completed 수신할 시간 확보 (레이스 컨디션 방지)
         await asyncio.sleep(2.0)
@@ -210,7 +229,7 @@ async def case_analysis_runs(
     tenant_id: TenantId,
 ):
     """
-    Phase2-2 분석 트리거 (Feign 호환)
+    감사 분석 트리거 (Feign 호환)
     
     POST /aura/cases/{caseId}/analysis-runs
     202 + JSON 즉시 반환. 백그라운드에서 분석 실행 후 BE 콜백.
@@ -223,9 +242,11 @@ async def case_analysis_runs(
     auth_token = request.headers.get("Authorization")
 
     get_or_create_queue(run_id)
+    x_sandbox = request.headers.get("X-Sandbox")
     asyncio.create_task(_run_analysis_background(
         case_id, run_id, tenant_id_val, auth_token,
         body_evidence=body.evidence,
+        x_sandbox=x_sandbox,
     ))
 
     stream_url = f"/aura/analysis-runs/{run_id}/stream"
@@ -248,7 +269,7 @@ async def case_analysis_stream(
     tenant_id: TenantId,
 ):
     """
-    Phase2-2 분석 스트림 (SSE)
+    감사 분석 스트림 (SSE)
 
     GET /aura/cases/{caseId}/analysis/stream?runId={runId}
     started → step → evidence → confidence → proposal → completed | failed
@@ -313,7 +334,7 @@ stream_only_router.add_api_route(
 )
 
 
-# ==================== Phase2: Analysis Trigger (SSE, legacy) ====================
+# ==================== Audit Analysis: Analysis Trigger (SSE, legacy) ====================
 
 
 @router.post("/{case_id}/analysis/trigger")
@@ -324,7 +345,7 @@ async def case_analysis_trigger(
     tenant_id: TenantId,
 ):
     """
-    Phase2 분석 트리거 (SSE 스트림)
+    감사 분석 트리거 (SSE 스트림)
     
     POST /api/aura/cases/{caseId}/analysis/trigger
     started → step → evidence → confidence → proposal → completed (또는 failed) 이벤트를 SSE로 스트리밍.
@@ -333,25 +354,33 @@ async def case_analysis_trigger(
     if os.environ.get("DEMO_OFF", "").upper() in ("1", "TRUE", "YES"):
         return {"status": "disabled", "message": "Analysis disabled (DEMO_OFF)"}
 
+    from core.config import get_settings
+    _max_web = get_settings().web_search_max_calls_per_run
     set_request_context(
         tenant_id=tenant_id or "1",
         user_id=user.user_id,
         auth_token=request.headers.get("Authorization"),
         trace_id=f"trace-{case_id}-analysis",
         case_id=case_id,
+        x_sandbox=request.headers.get("X-Sandbox"),
+        _guardrails={"web_search_calls": 0, "web_search_max_calls": _max_web},
     )
 
     async def event_generator():
-        from core.analysis.phase2_pipeline import run_phase2_analysis
+        from core.analysis.agent_factory import fetch_agent_config
+        from core.analysis.audit_analysis_pipeline import run_audit_analysis
 
         try:
-            async for event_type, payload in run_phase2_analysis(
-                case_id, tenant_id=tenant_id or "1",
+            config = await fetch_agent_config(agent_id="audit", tenant_id=tenant_id or "1")
+            async for event_type, payload in run_audit_analysis(
+                case_id,
+                tenant_id=tenant_id or "1",
+                model_name=config.model_name,
             ):
                 yield format_sse_line(event_type, payload)
                 await asyncio.sleep(STREAM_EVENT_DELAY)
         except Exception as e:
-            logger.exception(f"Phase2 analysis trigger failed: {e}")
+            logger.exception(f"Audit analysis trigger failed: {e}")
             yield format_sse_line("failed", {"error": str(e), "stage": "trigger"})
         yield "data: [DONE]\n\n"
 
@@ -553,7 +582,7 @@ async def case_confidence(
     }
 
 
-# ==================== P2: Analysis Summary (Phase2) ====================
+# ==================== P2: Analysis Summary (Audit Analysis) ====================
 
 
 @router.get("/{case_id}/analysis")
@@ -564,10 +593,10 @@ async def case_analysis(
     tenant_id: TenantId,
 ):
     """
-    Analysis Summary (P2, Phase2)
+    Analysis Summary (P2, 감사 분석)
     
     GET /api/aura/cases/{caseId}/analysis
-    Phase2 분석 완료 시: reasonText, proposals, confidenceBreakdown, ragRefs, similarCases 반환.
+    감사 분석 완료 시: reasonText, proposals, confidenceBreakdown, ragRefs, similarCases 반환.
     미실행 시: 템플릿 기반 fallback.
     """
     set_request_context(
@@ -578,19 +607,31 @@ async def case_analysis(
         case_id=case_id,
     )
 
-    # Phase2 저장 결과 우선
-    phase2_result = get_phase2_result(case_id)
-    if phase2_result:
-        return {
+    # 감사 분석 저장 결과 우선 (Autonomous Conclusion 필드 포함)
+    audit_result = get_audit_analysis_result(case_id)
+    if audit_result:
+        out = {
             "caseId": case_id,
-            "reasonText": phase2_result.get("reasonText", ""),
-            "proposals": phase2_result.get("proposals", []),
-            "confidenceBreakdown": phase2_result.get("confidenceBreakdown", {}),
-            "ragRefs": phase2_result.get("ragRefs", []),
-            "similarCases": phase2_result.get("similarCases", []),
-            "score": phase2_result.get("score", 0),
-            "severity": phase2_result.get("severity", "MEDIUM"),
+            "reasonText": audit_result.get("reasonText", ""),
+            "proposals": audit_result.get("proposals", []),
+            "confidenceBreakdown": audit_result.get("confidenceBreakdown", {}),
+            "ragRefs": audit_result.get("ragRefs", []),
+            "similarCases": audit_result.get("similarCases", []),
+            "score": audit_result.get("score", 0),
+            "severity": audit_result.get("severity", "MEDIUM"),
         }
+        # Autonomous Conclusion (BE/FE Aura AI Workspace 연동)
+        if audit_result.get("risk_score") is not None:
+            out["risk_score"] = audit_result["risk_score"]
+        if audit_result.get("violation_clause") is not None:
+            out["violation_clause"] = audit_result["violation_clause"]
+        if audit_result.get("reasoning_summary") is not None:
+            out["reasoning_summary"] = audit_result["reasoning_summary"]
+        if audit_result.get("recommended_action") is not None:
+            out["recommended_action"] = audit_result["recommended_action"]
+        if audit_result.get("citations") is not None:
+            out["citations"] = audit_result["citations"]
+        return out
 
     # Fallback: get_case 기반 templates
     try:

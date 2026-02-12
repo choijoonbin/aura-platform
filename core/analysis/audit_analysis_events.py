@@ -1,7 +1,7 @@
 """
-Phase2 Analysis Stream Events (aura.txt §2)
+Case Audit Analysis — Stream Events
 
-started, step, evidence, confidence, proposal, completed, failed
+SSE 이벤트: started, step, evidence, confidence, proposal, completed, failed
 """
 
 from datetime import datetime

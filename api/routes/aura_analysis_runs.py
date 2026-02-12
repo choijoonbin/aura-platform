@@ -1,5 +1,5 @@
 """
-Phase2 Analysis Runs (runId 기반)
+Audit Analysis Runs (runId 기반)
 
 GET /aura/analysis-runs/{runId}/stream - runId 기반 SSE 스트림
 """
@@ -27,7 +27,7 @@ async def analysis_run_stream(
     tenant_id: TenantId,
 ):
     """
-    Phase2 분석 스트림 (runId 기반)
+    감사 분석 스트림 (runId 기반)
 
     GET /aura/analysis-runs/{runId}/stream
     started → step → evidence → confidence → proposal → completed | failed

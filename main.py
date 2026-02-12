@@ -106,7 +106,7 @@ async def validation_exception_handler(request, exc: RequestValidationError):
 app.include_router(agents_router)
 app.include_router(agents_enhanced_router)  # 프론트엔드 명세 v1.0
 app.include_router(aura_backend_router)  # dwp-backend 연동
-app.include_router(aura_analysis_runs_router)  # Phase2 runId 기반 스트림
+app.include_router(aura_analysis_runs_router)  # Audit Analysis runId 기반 스트림
 app.include_router(aura_cases_router)  # Prompt C: Case Detail 탭 (Stream/RAG/Similar/Confidence/Analysis)
 app.include_router(finance_agent_router)  # Finance 도메인
 app.include_router(triggers_router)  # Phase B: case-updated 웹훅

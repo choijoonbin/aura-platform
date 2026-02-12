@@ -1,5 +1,5 @@
 """
-Phase2 Analysis Run Store
+Audit Analysis Run Store
 
 runId별 이벤트 큐. Trigger가 백그라운드 작업을 시작하고, Stream이 큐에서 이벤트를 읽어 SSE로 전송.
 """

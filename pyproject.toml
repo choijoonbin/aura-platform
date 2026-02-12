@@ -36,6 +36,12 @@ langchain-chroma = "^0.1.0"
 # 검증된 VectorStore 추상화; 향후 PGVector 전환 시 사용 (현재는 CAST-only 자체 구현)
 langchain-community = "^0.3.0"
 
+[tool.poetry.group.external_search.dependencies]
+# Tavily Search API (web_search 도구). TAVILY_API_KEY 설정 시 사용
+tavily-python = "^0.5.0"
+# DuckDuckGo 폴백 (TAVILY 미설정 시)
+duckduckgo-search = "^6.0.0"
+
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.0"
 pytest-asyncio = "^0.24.0"

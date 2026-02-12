@@ -395,38 +395,25 @@ async def get_document(
 
 @tool
 async def get_lineage(
-    caseId: str | None = Field(default=None, description="케이스 ID (문서 조회용)"),
-    belnr: str | None = Field(default=None, description="전표 번호"),
-    gjahr: str | None = Field(default=None, description="회계 연도"),
-    bukrs: str | None = Field(default=None, description="회사 코드"),
+    caseId: str | None = Field(default=None, description="케이스 ID (필수). caseId 없으면 get_case로 먼저 조회"),
+    belnr: str | None = Field(default=None, description="전표 번호 (미지원, caseId만 사용)"),
+    gjahr: str | None = Field(default=None, description="회계 연도 (미지원, caseId만 사용)"),
+    bukrs: str | None = Field(default=None, description="회사 코드 (미지원, caseId만 사용)"),
 ) -> str:
     """
     전표/문서의 라인리지(Lineage)를 조회합니다.
-    caseId 우선, 없으면 belnr+gjahr(+bukrs) 사용. Field 메타데이터 문자열은 거부.
+    백엔드 agent-tools API는 caseId 쿼리만 지원합니다. belnr/gjahr/bukrs 직접 전달은 미지원.
     """
     start = time.perf_counter()
     try:
-        if belnr and gjahr and not _is_invalid_param_value(belnr) and not _is_invalid_param_value(gjahr):
-            params: dict[str, Any] = {"belnr": belnr, "gjahr": gjahr}
-            if bukrs and not _is_invalid_param_value(bukrs):
-                params["bukrs"] = bukrs
-            result = await _synapse_get(_path("/lineage"), params)
-            lineage_by_doc = True
-        elif caseId:
-            result = await _synapse_get(_path("/lineage"), {"caseId": caseId})
-            lineage_by_doc = False
-        else:
-            return json.dumps({"error": "caseId or (belnr, gjahr) required. Field 메타데이터 문자열을 전달하지 마세요."})
+        if not caseId:
+            return json.dumps({"error": "caseId required. caseId가 없으면 get_case로 먼저 조회하세요."})
+        result = await _synapse_get(_path("/lineage"), {"caseId": caseId})
         latency_ms = int((time.perf_counter() - start) * 1000)
         try:
             from core.audit import AgentAuditEvent
             ctx = get_request_context()
-            sap_ev = _sap_document_evidence(
-                bukrs=bukrs if lineage_by_doc else None,
-                belnr=belnr if lineage_by_doc else None,
-                gjahr=gjahr if lineage_by_doc else None,
-                from_context=True,
-            )
+            sap_ev = _sap_document_evidence(from_context=True)
             event = AgentAuditEvent.rag_queried(
                 tenant_id=ctx.get("tenant_id") or "default",
                 doc_ids=[],
@@ -720,7 +707,15 @@ async def execute_action(
 # HITL 승인이 필요한 도구 (Finance Agent에서 사용)
 FINANCE_HITL_TOOLS = {"propose_action"}
 
-# 전체 Finance 도구 목록
+# 외부 검색 도구 (선택 의존성: TAVILY_API_KEY 또는 langchain-community)
+def _get_web_search_tool():
+    try:
+        from tools.external_search_tool import web_search
+        return [web_search]
+    except Exception:
+        return []
+
+# 전체 Finance 도구 목록 (web_search: 외부 지식 검색)
 FINANCE_TOOLS = [
     get_case,
     search_documents,
@@ -728,6 +723,7 @@ FINANCE_TOOLS = [
     get_entity,
     get_open_items,
     get_lineage,
+    *_get_web_search_tool(),
     simulate_action,
     propose_action,
     execute_action,

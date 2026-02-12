@@ -1,7 +1,7 @@
 """
 공통 콜백 HTTP 전송
 
-재시도(지수 backoff) 및 공통 헤더. Phase2/Phase3 콜백 모듈에서 사용.
+재시도(지수 backoff) 및 공통 헤더. 감사 분석 / Phase3 콜백 모듈에서 사용.
 """
 
 import asyncio

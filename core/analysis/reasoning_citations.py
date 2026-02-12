@@ -44,15 +44,22 @@ def build_regulation_citations(doc_list: list[dict[str, Any]]) -> str:
         if key in seen:
             continue
         seen.add(key)
+        # 출처 형식: [내부규정: 파일명 p.N] — LLM이 답변 시 동일 형식 사용 유도
+        file_name = doc.get("file_name") or doc.get("fileName")
+        page_number = doc.get("page_number") if doc.get("page_number") is not None else doc.get("pageNumber")
+        citation_prefix = ""
+        if file_name or page_number is not None:
+            p_str = f" p.{int(page_number)}" if page_number is not None else ""
+            citation_prefix = f"[내부규정: {file_name or '규정문서'}{p_str}] "
         excerpt = (
             doc.get("excerpt")
             or doc.get("summary")
             or (doc.get("content") or "")[:300]
         )
         if isinstance(excerpt, str) and excerpt.strip():
-            lines.append(f"- {location}: {excerpt.strip()[:350]}")
+            lines.append(f"- {citation_prefix}{location}: {excerpt.strip()[:350]}")
         else:
-            lines.append(f"- {location}")
+            lines.append(f"- {citation_prefix}{location}")
 
     if not lines:
         return ""

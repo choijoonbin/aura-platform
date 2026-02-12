@@ -1,5 +1,5 @@
 """
-제안·스코어 유틸 (Phase2/Phase3 공통)
+제안·스코어 유틸 (감사 분석 / Phase3 공통)
 
 evidence 기반 스코어, proposal fingerprint 등.
 """

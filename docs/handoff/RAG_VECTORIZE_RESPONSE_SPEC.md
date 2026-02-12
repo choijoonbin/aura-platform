@@ -80,13 +80,27 @@ Aura가 `BACKEND_RAG_CHUNKS_SAVE_URL`에 배치마다 POST합니다. URL 내 `{d
 
 ---
 
-## 4. 실패 응답 (4xx/5xx)
+## 4. 백엔드 역직렬화 (Java / Jackson)
+
+Aura 200 응답 body는 **snake_case** 필드만 사용합니다. `AuraRagVectorizeResponse` 등 DTO에서 역직렬화하려면 다음 중 하나를 적용하세요.
+
+- **권장**: 필드에 `@JsonAlias` 로 snake_case 매핑  
+  예: `@JsonAlias("rag_document_id") String ragDocumentId;`, `@JsonAlias("total_chunks") Integer totalChunks;`, `@JsonAlias("batches_sent") Integer batchesSent;`, `@JsonAlias("batch_size") Integer batchSize;`
+- 또는 `@JsonProperty("rag_document_id")` 등으로 각 필드 명시
+
+**저장 URL 사용 시 200 응답 최상위 키**: `rag_document_id`, `total_chunks`, `batches_sent`, `batch_size` (4개만 존재, 타입은 string/number).
+
+**저장 URL 미사용 시**: `rag_document_id`, `batch_size`, `batches` (배열의 배열). 이 경우 `batches` 의 제네릭 타입은 `List<List<ChunkDto>>` 형태로, 청크 항목은 `chunk_index`, `content`, `embedding`, `metadata` (snake_case).
+
+---
+
+## 5. 실패 응답 (4xx/5xx)
 
 Body: `{ "error": "메시지" }`. 저장 URL 사용 시 백엔드 저장 실패는 502.
 
 ---
 
-## 5. 설정 (Aura .env)
+## 6. 설정 (Aura .env)
 
 - `RAG_CHUNK_BATCH_SIZE`: 배치당 청크 수 (20~50, 기본 30).
 - `BACKEND_RAG_CHUNKS_SAVE_URL`: 설정 시 Aura가 배치마다 이 URL로 POST. 예: `https://backend/api/rag/documents/{doc_id}/chunks`.

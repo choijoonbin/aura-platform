@@ -31,6 +31,13 @@ from tools.synapse_finance_tool import (
 
 logger = logging.getLogger(__name__)
 
+# 동적 팩토리: agent_tool_mapping 바인딩 시 레지스트리 사용
+try:
+    from core.analysis.agent_factory import register_tools
+    register_tools(FINANCE_TOOLS)
+except Exception:
+    pass
+
 
 class EvidenceItem(TypedDict):
     """증거 항목 (규정 인용/RAG, 통계근거, 원천데이터 링크)"""
@@ -77,11 +84,21 @@ class FinanceAgent:
     
     APPROVAL_REQUIRED_TOOLS = FINANCE_HITL_TOOLS
     
-    def __init__(self, checkpointer=None):
-        self.llm_client = get_llm_client()
-        self.tools = FINANCE_TOOLS
+    def __init__(self, checkpointer=None, agent_config=None):
+        model_name = getattr(agent_config, "model_name", None) if agent_config else None
+        self.llm_client = get_llm_client(model_name)
+        from core.analysis.agent_factory import get_tools_by_names
+        if agent_config and getattr(agent_config, "agent_tool_mapping", None):
+            self.tools, self._skipped_tool_names = get_tools_by_names(agent_config.agent_tool_mapping)
+            if not self.tools:
+                self.tools = FINANCE_TOOLS
+                self._skipped_tool_names = []
+        else:
+            self.tools = FINANCE_TOOLS
+            self._skipped_tool_names = []
         self.llm_with_tools = self.llm_client.client.bind_tools(self.tools)
         self.checkpointer = checkpointer or MemorySaver()
+        self.agent_config = agent_config
         self.graph = self._build_graph()
     
     def _build_graph(self) -> StateGraph:
@@ -205,22 +222,38 @@ class FinanceAgent:
         }
 
     async def _analyze_node(self, state: FinanceAgentState) -> dict[str, Any]:
-        """분석 노드: 목표 및 컨텍스트 분석"""
+        """분석 노드: 목표 및 컨텍스트 분석. 스킵된 도구가 있으면 ThoughtStream에 알림 추가."""
+        chain = list(state.get("thought_chain", []))
+        if getattr(self, "_skipped_tool_names", None):
+            chain.append({
+                "thoughtType": "system",
+                "content": f"다음 도구는 스튜디오 설정에 있으나 엔진에 등록되지 않아 이번 실행에서 제외되었습니다: {', '.join(self._skipped_tool_names)}.",
+                "timestamp": datetime.utcnow(),
+                "sources": [],
+            })
         user_input = state["messages"][-1].content if state["messages"] else ""
         goal = state.get("goal") or user_input
-
         thought = {
             "thoughtType": "analysis",
             "content": f"목표 분석: {goal[:150]}...",
             "timestamp": datetime.utcnow(),
             "sources": [],
         }
-
         return {
-            "thought_chain": state.get("thought_chain", []) + [thought],
+            "thought_chain": chain + [thought],
             "goal": goal,
         }
     
+    def _get_effective_system_prompt(self, context: dict[str, Any]) -> str:
+        """API system_instruction 우선, 없으면 get_system_prompt(domain=system_prompt_key) Fallback."""
+        if self.agent_config:
+            raw = (self.agent_config.system_instruction or "").strip()
+            if raw:
+                return raw
+            domain = self.agent_config.system_prompt_key or "finance"
+            return get_system_prompt(domain=domain, context=context)
+        return get_system_prompt(domain="finance", context=context)
+
     async def _plan_node(self, state: FinanceAgentState) -> dict[str, Any]:
         """계획 노드: 조사 및 조치 계획 수립"""
         context = state.get("context", {})
@@ -228,7 +261,7 @@ class FinanceAgent:
         context["tenant_id"] = state.get("tenant_id")
         context["goal"] = state.get("goal", "")
         
-        system_prompt = get_system_prompt(domain="finance", context=context)
+        system_prompt = self._get_effective_system_prompt(context)
         planning_prompt = f"""
         목표: {state.get('goal', '')}
         컨텍스트: caseId={context.get('caseId')}, documentIds={context.get('documentIds')}
@@ -270,7 +303,7 @@ class FinanceAgent:
         }
         
         system_message = HumanMessage(
-            content=get_system_prompt(domain="finance", context=context)
+            content=self._get_effective_system_prompt(context)
         )
         messages = [system_message] + state["messages"]
         
