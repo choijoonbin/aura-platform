@@ -30,7 +30,7 @@ from core.analysis.reasoning_citations import (
     build_citation_reasoning,
     get_violation_clause_evidence,
 )
-from core.analysis.rag import DOC_TYPE_REGULATION, hybrid_retrieve
+from core.analysis.rag import hybrid_retrieve
 from core.config import get_settings
 from core.llm import get_llm_client
 from tools.synapse_finance_tool import get_case, search_documents, get_open_items, get_lineage
@@ -91,6 +91,7 @@ async def run_audit_analysis(
     trace_id: str | None = None,
     body_evidence: dict[str, Any] | None = None,
     model_name: str | None = None,
+    agent_config: Any = None,
 ) -> AsyncGenerator[tuple[str, dict[str, Any]], None]:
     """
     케이스 감사 분석 파이프라인 실행.
@@ -164,13 +165,45 @@ async def run_audit_analysis(
         try:
             bukrs = str(case_data.get("bukrs") or "") if isinstance(case_data, dict) else None
             belnr = str(case_data.get("belnr") or "") if isinstance(case_data, dict) else None
+            # AgentConfig에서 doc_ids와 tenant_id 추출
+            doc_ids = None
+            tenant_id_int = None
+            if agent_config:
+                doc_ids = getattr(agent_config, "doc_ids", None)
+                tenant_id_raw = getattr(agent_config, "tenant_id", None)
+                if tenant_id_raw is not None:
+                    try:
+                        tenant_id_int = int(tenant_id_raw)
+                    except (ValueError, TypeError):
+                        tenant_id_int = None
+            # tenant_id 문자열도 int로 변환 시도
+            if tenant_id_int is None and tenant_id:
+                try:
+                    tenant_id_int = int(tenant_id)
+                except (ValueError, TypeError):
+                    tenant_id_int = None
+
+            # BE docIds 누락 시 body_evidence.doc_id를 임시 범위로 사용 (숫자형만)
+            if (doc_ids is None or len(doc_ids) == 0) and body_evidence and isinstance(body_evidence, dict):
+                raw_doc = body_evidence.get("doc_id") or (body_evidence.get("document") or {}).get("docKey")
+                if isinstance(raw_doc, str) and raw_doc.isdigit():
+                    doc_ids = [int(raw_doc)]
+                elif isinstance(raw_doc, int):
+                    doc_ids = [raw_doc]
+                if doc_ids:
+                    logger.info(
+                        "audit_analysis_pipeline: doc_ids fallback from body_evidence doc_id=%s",
+                        raw_doc,
+                    )
+            
             vector_results = hybrid_retrieve(
                 query="경비 지출 규정 식대 주말 업무",
                 top_k=5,
                 include_article_clause=True,
                 bukrs=bukrs or None,
                 belnr=belnr or None,
-                doc_type_filter=DOC_TYPE_REGULATION,
+                doc_ids=doc_ids,
+                tenant_id=tenant_id_int,
             )
             if vector_results:
                 existing = {str((d.get("docKey") or d.get("id") or d.get("rag_document_id") or "")) for d in doc_list if isinstance(d, dict)}
@@ -185,9 +218,21 @@ async def run_audit_analysis(
         # RAG 우선순위: 내부 규정 유사도가 임계값(기본 0.7) 미만일 때만 외부 검색
         external_search_text = ""
         external_citations: list[dict[str, str]] = []
-        rag_threshold = getattr(get_settings(), "web_search_rag_threshold", 0.7)
-        max_rag_score = max((float(r.get("score", 0)) or 0 for r in vector_results) or [0])
+        settings = get_settings()
+        rag_threshold = getattr(settings, "web_search_rag_threshold", 0.7)
+        if vector_results:
+            max_rag_score = max(float(r.get("score", 0)) or 0 for r in vector_results)
+        else:
+            max_rag_score = 0.0
         need_web_search = not vector_results or max_rag_score < rag_threshold
+        logger.info(
+            "audit_analysis_pipeline: RAG summary case_id=%s results=%s max_score=%.3f threshold=%.3f need_web_search=%s",
+            case_id,
+            len(vector_results) if isinstance(vector_results, list) else 0,
+            max_rag_score,
+            rag_threshold,
+            need_web_search,
+        )
         if need_web_search:
             yield ("step", AnalysisStepEvent(
                 label="WEB_SEARCH",
@@ -204,6 +249,13 @@ async def run_audit_analysis(
                     external_citations = web_result.get("citations", [])
                 else:
                     external_search_text = str(web_result)
+                logger.info(
+                    "audit_analysis_pipeline: web_search completed case_id=%s query=%s text_len=%s citations=%s",
+                    case_id,
+                    web_query,
+                    len(external_search_text or ""),
+                    len(external_citations or []),
+                )
                 if external_search_text and "error" not in (external_search_text[:100] or "").lower():
                     evidence_items.append({
                         "type": "EXTERNAL_WEB",
@@ -494,7 +546,6 @@ async def run_audit_analysis(
         if severity == "HIGH":
             try:
                 from core.notifications import publish_workbench_notification, NOTIFICATION_CATEGORY_AI_DETECT
-                from core.config import get_settings
                 settings = get_settings()
                 from core.notifications import REDIS_CHANNEL_WORKBENCH_ALERT
                 channel = getattr(settings, "workbench_alert_channel", REDIS_CHANNEL_WORKBENCH_ALERT)

@@ -59,6 +59,7 @@ async def send_callback(
     *,
     agent_id: str = "audit",
     version: str = "1.0",
+    error_stage: str | None = None,
 ) -> bool:
     """
     BE 콜백 전송. status=COMPLETED 시 finalResult 포함, FAILED 시 partialEvents에 에러.
@@ -76,8 +77,10 @@ async def send_callback(
         from core.context import get_request_context
         ctx = get_request_context()
         is_sandbox = (ctx.get("x_sandbox") or "").strip().upper() in ("TRUE", "1", "YES")
+        aura_trace_id = ctx.get("aura_trace_id")
     except Exception:
         is_sandbox = False
+        aura_trace_id = None
 
     payload: dict[str, Any] = {
         "runId": run_id,
@@ -87,9 +90,15 @@ async def send_callback(
         "version": version,
         "is_sandbox": is_sandbox,
     }
+    if aura_trace_id:
+        payload["trace"] = {"auraTraceId": aura_trace_id}
     if final_result:
         payload["finalResult"] = _build_final_result(final_result)
-    if error_message:
+    if status.upper() == "FAILED":
+        msg = error_message or "unknown"
+        payload["error"] = {"message": msg, "stage": error_stage or "pipeline"}
+        payload["partialEvents"] = [{"stage": "callback", "errorMessage": msg}]
+    elif error_message:
         payload["partialEvents"] = [{"stage": "callback", "errorMessage": error_message}]
 
     return await post_with_retry(url, payload, success_status_codes=(200,))

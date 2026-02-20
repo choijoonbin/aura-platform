@@ -19,7 +19,7 @@ from langgraph.types import interrupt
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage
 
 from core.llm import get_llm_client
-from core.llm.prompts import get_system_prompt
+from core.llm.prompts import get_system_prompt, get_auditor_prompt
 from tools.synapse_finance_tool import (
     FINANCE_TOOLS,
     FINANCE_HITL_TOOLS,
@@ -245,14 +245,20 @@ class FinanceAgent:
         }
     
     def _get_effective_system_prompt(self, context: dict[str, Any]) -> str:
-        """API system_instruction 우선, 없으면 get_system_prompt(domain=system_prompt_key) Fallback."""
+        """
+        시스템 프롬프트 우선순위:
+        1. API system_instruction (동적 배포)
+        2. aura_auditor.yaml (범용 감사 프롬프트)
+        3. get_system_prompt() (레거시 Fallback)
+        """
         if self.agent_config:
             raw = (self.agent_config.system_instruction or "").strip()
             if raw:
                 return raw
             domain = self.agent_config.system_prompt_key or "finance"
-            return get_system_prompt(domain=domain, context=context)
-        return get_system_prompt(domain="finance", context=context)
+            # 범용 감사 프롬프트 우선 로드 (aura_auditor.yaml)
+            return get_auditor_prompt(domain=domain, context=context)
+        return get_auditor_prompt(domain="finance", context=context)
 
     async def _plan_node(self, state: FinanceAgentState) -> dict[str, Any]:
         """계획 노드: 조사 및 조치 계획 수립"""

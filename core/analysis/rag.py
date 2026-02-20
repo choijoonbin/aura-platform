@@ -290,25 +290,44 @@ def _pgvector_search(
     embedding: str,
     k: int,
     max_distance: float,
-    doc_type_filter: str | None,
     metadata_filter: dict[str, Any] | None,
     prioritize_chapters: tuple[str, ...],
+    doc_ids: list[int] | None = None,
+    tenant_id: int | None = None,
 ) -> list[Any]:
-    """코사인 거리 기반 검색. CAST(:embedding AS vector), CAST(:filter_json AS jsonb) 만 사용."""
+    """코사인 거리 기반 검색. CAST(:embedding AS vector), CAST(:filter_json AS jsonb) 만 사용.
+    
+    Note: doc_type 컬럼은 rag_chunk 테이블에 없음. doc_ids로만 필터링.
+    """
     from sqlalchemy import text
-    # Backend-owned table: id 없음, 본문 컬럼은 chunk_text (RAG_BACKEND_CHUNK_CHECKLIST)
     sql = f"""
             SELECT doc_id, chunk_index, chunk_text AS content,
-                   regulation_article, regulation_clause, location, title,
+                   metadata_json->>'regulation_article' AS regulation_article,
+                   metadata_json->>'regulation_clause' AS regulation_clause,
+                   metadata_json->>'location' AS location,
+                   metadata_json->>'title' AS title,
                    metadata_json,
                    1 - (embedding <=> {_SQL_CAST_VECTOR}) AS score
             FROM {full_table}
             WHERE (embedding <=> {_SQL_CAST_VECTOR}) <= :max_distance
         """
     params: dict[str, Any] = {"embedding": embedding, "k": k, "max_distance": max_distance}
-    if doc_type_filter:
-        sql += " AND doc_type = :doc_type"
-        params["doc_type"] = doc_type_filter
+    
+    # doc_ids 필터: Secure by Default - 빈 리스트면 결과 0건
+    if doc_ids is not None:
+        if len(doc_ids) == 0:
+            logger.warning("[RAG Search] 에이전트에게 할당된 지식(doc_ids)이 없습니다. 연결된 지식이 없으므로 RAG 검색 결과 0건 반환.")
+            return []
+        placeholders = ", ".join(f":doc_id_{i}" for i in range(len(doc_ids)))
+        sql += f" AND doc_id IN ({placeholders})"
+        for i, doc_id in enumerate(doc_ids):
+            params[f"doc_id_{i}"] = int(doc_id)  # doc_id는 bigint 타입
+    
+    # tenant_id 필터: 테이블 컬럼 사용 (metadata_json이 아님)
+    if tenant_id is not None and tenant_id > 0:
+        sql += " AND tenant_id = :tenant_id"
+        params["tenant_id"] = tenant_id
+    
     if metadata_filter and isinstance(metadata_filter, dict):
         sql += f" AND metadata_json @> {_SQL_CAST_JSONB_FILTER}"
         params["filter_json"] = json.dumps(metadata_filter, ensure_ascii=False)
@@ -319,7 +338,14 @@ def _pgvector_search(
             params[f"ch{i}"] = ch
     else:
         sql += f" ORDER BY embedding <=> {_SQL_CAST_VECTOR} LIMIT :k"
-    return list(session.execute(text(sql), params).fetchall())
+    
+    # 디버그 로그
+    debug_params = {k: v for k, v in params.items() if k != "embedding"}
+    logger.info(f"[RAG Search] SQL params (excluding embedding): {debug_params}")
+    
+    results = list(session.execute(text(sql), params).fetchall())
+    logger.info(f"[RAG Search] Query returned {len(results)} rows")
+    return results
 
 
 def _hierarchical_chunk_text(
@@ -570,16 +596,24 @@ def retrieve_rag_pgvector(
     metadata_filter: dict[str, Any] | None = None,
     include_article_clause: bool = True,
     similarity_threshold: float = 0.75,
-    doc_type_filter: str | None = DOC_TYPE_REGULATION,
     prioritize_chapters: tuple[str, ...] = ("제5장", "제6장"),
+    doc_ids: list[int] | None = None,
+    tenant_id: int | None = None,
 ) -> list[dict[str, Any]]:
     """
     코사인 유사도(<=>) 기반 벡터 검색.
     - similarity_threshold 이상만 반환(무관한 규정 인용 방지).
-    - doc_type_filter: 파일명이 아닌 doc_type 컬럼으로 필터. 회계 규정 분석 시 반드시 'REGULATION' 사용하여
-      일반 매뉴얼(doc_type='GENERAL')이 회계 규정 분석에 혼입되지 않도록 격리. None이면 doc_type 조건 미적용.
     - prioritize_chapters: metadata_json.chapter가 이 값이면 최우선 정렬(제5장 부정 탐지, 제6장 정상 집행 기준 등).
+    - doc_ids: 에이전트가 접근 가능한 문서 ID 목록. 빈 리스트면 결과 0건 (Secure by Default).
+    - tenant_id: 테넌트 ID. 0이면 필터 제외, >0이면 해당 테넌트만 검색.
+    
+    Note: doc_type 컬럼은 rag_chunk 테이블에 없음. doc_ids로만 필터링.
     """
+    # Secure by Default: doc_ids가 빈 리스트면 즉시 반환
+    if doc_ids is not None and len(doc_ids) == 0:
+        logger.warning("[RAG Search] 에이전트에게 할당된 지식(doc_ids)이 없습니다. 연결된 지식이 없으므로 RAG 검색 결과 0건 반환.")
+        return []
+    
     emb = _get_embedding_client()
     if emb is None:
         return []
@@ -593,6 +627,11 @@ def retrieve_rag_pgvector(
     k = max(1, min(top_k, 50))
     max_distance = 1.0 - max(0.0, min(1.0, float(similarity_threshold)))
 
+    # 로그: 필터 상태 기록
+    doc_count = len(doc_ids) if doc_ids else None
+    tenant_str = str(tenant_id) if tenant_id and tenant_id > 0 else "0 (system)"
+    logger.info(f"[RAG Search] tenant: {tenant_str}, doc_count: {doc_count if doc_count is not None else 'all'}, threshold: {similarity_threshold}")
+
     try:
         with get_session() as session:
             rows = _pgvector_search(
@@ -601,9 +640,10 @@ def retrieve_rag_pgvector(
                 embedding=vec_str,
                 k=k,
                 max_distance=max_distance,
-                doc_type_filter=doc_type_filter,
                 metadata_filter=metadata_filter,
                 prioritize_chapters=prioritize_chapters or (),
+                doc_ids=doc_ids,
+                tenant_id=tenant_id if tenant_id and tenant_id > 0 else None,
             )
     except Exception as e:
         logger.warning("retrieve_rag_pgvector query failed: %s", e)
@@ -694,18 +734,26 @@ def hybrid_retrieve(
     include_article_clause: bool = True,
     bukrs: str | None = None,
     belnr: str | None = None,
-    doc_type_filter: str | None = DOC_TYPE_REGULATION,
+    doc_ids: list[int] | None = None,
+    tenant_id: int | None = None,
 ) -> list[dict[str, Any]]:
     """
     하이브리드 검색. vector_store_type=pgvector 시 코사인 유사도(<=>) + 전표 맥락(bukrs, belnr) 반영.
     검색 결과에 인용 정보(Article/Clause/location) 보존.
-
-    doc_type_filter: 업로드된 문서의 doc_type으로 격리. 회계 규정 분석 시 'REGULATION'만 검색하여
-    일반 매뉴얼(GENERAL)이 혼입되지 않도록 함. None이면 pgvector에서 doc_type 조건 미적용(다른 용도용).
+    
+    doc_ids: 에이전트가 접근 가능한 문서 ID 목록. 빈 리스트면 결과 0건 (Secure by Default).
+    tenant_id: 테넌트 ID. 0이면 필터 제외, >0이면 해당 테넌트만 검색.
+    
+    Note: doc_type 컬럼은 rag_chunk 테이블에 없음. doc_ids로만 필터링.
 
     Returns:
         [{ "content", "excerpt", "score", "rag_document_id", "regulation_article", "regulation_clause", "location", "title", ... }]
     """
+    # Secure by Default: doc_ids가 빈 리스트면 즉시 반환
+    if doc_ids is not None and len(doc_ids) == 0:
+        logger.warning("[RAG Search] 에이전트에게 할당된 지식(doc_ids)이 없습니다. 연결된 지식이 없으므로 RAG 검색 결과 0건 반환.")
+        return []
+    
     settings = get_settings()
     vs_type = (getattr(settings, "vector_store_type", "none") or "").strip().lower()
     if vs_type == "pgvector":
@@ -723,17 +771,36 @@ def hybrid_retrieve(
             metadata_filter=metadata_filter,
             include_article_clause=include_article_clause,
             similarity_threshold=sim_threshold,
-            doc_type_filter=doc_type_filter,
             prioritize_chapters=("제5장", "제6장"),
+            doc_ids=doc_ids,
+            tenant_id=tenant_id if tenant_id and tenant_id > 0 else None,
         )
     store = get_vector_store()
     if store is None:
         return []
     k = max(1, min(top_k, 50))
+    
+    # Chroma 필터 구성: doc_ids와 tenant_id 포함
+    chroma_filter: dict[str, Any] = {}
+    if doc_ids is not None:
+        if len(doc_ids) == 0:
+            return []  # Secure by Default
+        chroma_filter["doc_id"] = {"$in": [str(d) for d in doc_ids]}
+    if tenant_id is not None and tenant_id > 0:
+        chroma_filter["tenant_id"] = str(tenant_id)
+    
+    # 기존 metadata_filter와 병합
+    final_filter = chroma_filter.copy()
+    if metadata_filter:
+        if final_filter:
+            final_filter = {"$and": [final_filter, metadata_filter]}
+        else:
+            final_filter = metadata_filter
+    
     try:
         # Chroma: similarity_search_with_score + filter
-        if metadata_filter:
-            results = store.similarity_search_with_score(query, k=k, filter=metadata_filter)
+        if final_filter:
+            results = store.similarity_search_with_score(query, k=k, filter=final_filter)
         else:
             results = store.similarity_search_with_score(query, k=k)
     except Exception as e:

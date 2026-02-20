@@ -362,6 +362,11 @@ class Settings(BaseSettings):
         default=None,
         description="에이전트 설정 조회 경로 (기본: api/v1/agents/config). Query: agent_key, Header: X-Tenant-ID 필수.",
     )
+    agent_config_cache_ttl_seconds: int = Field(
+        default=300,
+        ge=0,
+        description="에이전트 설정 캐시 TTL (초). 기본 300초(5분). 0이면 캐시 비활성화 (매번 API 호출). Backend에서 docIds 변경 시 최대 이 시간 후 반영.",
+    )
     web_search_max_calls_per_run: int = Field(
         default=5,
         ge=0,

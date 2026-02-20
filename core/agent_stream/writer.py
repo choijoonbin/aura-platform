@@ -194,6 +194,14 @@ class AgentStreamWriter:
 
         payload = [self._event_to_payload(e) for e in events]
         body: dict = {"events": payload}
+        
+        # 디버그: Agent Event 페이로드 로깅
+        event_summaries = [
+            {"stage": e.get("stage"), "title": e.get("title"), "caseId": e.get("caseId")}
+            for e in payload
+        ]
+        logger.info("Agent stream push: url=%s count=%d events=%s", self._push_url[:60], len(payload), event_summaries)
+        
         ok, status_code, text = await post_json(
             self._push_url,
             body,
@@ -206,6 +214,8 @@ class AgentStreamWriter:
                 status_code,
                 (text[:200] if text else ""),
             )
+        else:
+            logger.debug("Agent stream push ok: status_code=%s", status_code)
         return ok
 
     async def push_one(self, event: AgentEvent) -> bool:

@@ -3,8 +3,122 @@ System Prompts Module
 
 에이전트 및 워크플로우에 사용되는 시스템 프롬프트를 정의합니다.
 Context 기반 동적 프롬프트 주입을 지원합니다.
+
+YAML 기반 외부 프롬프트 파일을 우선 로드하여 코드 수정 없이 프롬프트를 관리할 수 있습니다.
 """
+import logging
+from pathlib import Path
 from typing import Any
+
+import yaml
+
+logger = logging.getLogger(__name__)
+
+# ==================== YAML Prompt Loader ====================
+_PROMPTS_DIR = Path(__file__).parent / "prompts"
+_yaml_prompt_cache: dict[str, dict[str, Any]] = {}
+
+
+def _load_yaml_prompt(filename: str) -> dict[str, Any] | None:
+    """
+    YAML 프롬프트 파일을 로드합니다. 캐싱 적용.
+    
+    Args:
+        filename: 프롬프트 파일명 (예: "aura_auditor.yaml")
+    
+    Returns:
+        파싱된 YAML dict 또는 None (파일 없음/파싱 실패)
+    """
+    if filename in _yaml_prompt_cache:
+        return _yaml_prompt_cache[filename]
+    
+    filepath = _PROMPTS_DIR / filename
+    if not filepath.exists():
+        logger.debug(f"YAML prompt file not found: {filepath}")
+        return None
+    
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+            _yaml_prompt_cache[filename] = data
+            logger.info(f"Loaded YAML prompt: {filename} (version: {data.get('version', 'unknown')})")
+            return data
+    except Exception as e:
+        logger.warning(f"Failed to load YAML prompt {filename}: {e}")
+        return None
+
+
+def get_auditor_prompt(domain: str = "finance", **kwargs: Any) -> str:
+    """
+    범용 감사 에이전트 프롬프트를 반환합니다.
+    aura_auditor.yaml을 우선 로드하고, 도메인별 확장 규칙을 병합합니다.
+    
+    Args:
+        domain: 도메인 (finance, hr, manufacturing 등) - 대소문자 무관
+        **kwargs: 추가 컨텍스트 변수
+    
+    Returns:
+        조합된 시스템 프롬프트 문자열
+    
+    Usage:
+        # 아래 호출 모두 동일하게 동작
+        get_auditor_prompt(domain='finance')
+        get_auditor_prompt(domain='FINANCE')
+        get_auditor_prompt(domain='HR')
+        get_auditor_prompt(domain='hr')
+    """
+    yaml_data = _load_yaml_prompt("aura_auditor.yaml")
+    
+    if yaml_data is None:
+        logger.warning("aura_auditor.yaml not found, falling back to legacy prompt")
+        return get_system_prompt(domain, **kwargs)
+    
+    prompts = yaml_data.get("prompts", {})
+    domain_extensions = yaml_data.get("domain_extensions", {})
+    
+    # 도메인 정규화: 대소문자 무관하게 처리
+    domain_normalized = domain.lower().strip()
+    domain_display = domain_normalized.upper()  # 표시용
+    
+    # 기본 프롬프트 조합
+    sections = [
+        prompts.get("system_role", ""),
+        prompts.get("context_reconstruction", ""),
+        prompts.get("reasoning_guidelines", ""),
+        prompts.get("output_format", ""),
+        prompts.get("citation_rules", ""),
+        prompts.get("professional_judgment", ""),
+        prompts.get("thought_stream_template", ""),
+    ]
+    
+    # 도메인별 확장 규칙 추가 (정규화된 키로 조회)
+    if domain_normalized in domain_extensions:
+        ext = domain_extensions[domain_normalized]
+        additional = ext.get("additional_rules", "")
+        tools = ext.get("tools", [])
+        if additional:
+            sections.append(f"\n[Domain-Specific Rules: {domain_display}]\n{additional}")
+        if tools:
+            tools_str = ", ".join(tools)
+            sections.append(f"\n[Available Tools for {domain_display}]\n{tools_str}")
+        logger.debug(f"get_auditor_prompt: Applied domain extension for '{domain_normalized}'")
+    else:
+        logger.debug(f"get_auditor_prompt: No domain extension found for '{domain_normalized}', using base prompt only")
+    
+    # 컨텍스트 주입
+    context = kwargs.get("context", "")
+    if context:
+        context_str = context if isinstance(context, str) else str(context)
+        sections.append(f"\n[Current Context]\n{context_str}")
+    
+    return "\n".join(section.strip() for section in sections if section.strip())
+
+
+def reload_yaml_prompts() -> None:
+    """YAML 프롬프트 캐시를 클리어하여 다음 호출 시 재로드합니다."""
+    global _yaml_prompt_cache
+    _yaml_prompt_cache.clear()
+    logger.info("YAML prompt cache cleared")
 
 # ==================== Base System Prompt ====================
 BASE_SYSTEM_PROMPT = """

@@ -40,6 +40,13 @@ async def post_with_retry(
     if headers:
         request_headers.update(headers)
 
+    # 디버그: 콜백 페이로드 로깅 (민감 데이터 제외)
+    payload_summary = {
+        k: (v if k not in ("finalResult", "evidence", "ragRefs") else f"<{type(v).__name__}>")
+        for k, v in json_payload.items()
+    }
+    logger.info("Callback sending: url=%s payload_keys=%s summary=%s", url[:80], list(json_payload.keys()), payload_summary)
+    
     last_error: Exception | None = None
     for attempt in range(CALLBACK_MAX_RETRIES):
         try:

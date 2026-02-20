@@ -43,6 +43,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
         "/aura/triggers/case-updated",  # Phase B: 배치 웹훅 (X-Trigger-Secret으로 검증)
     ]
     
+    # 인증 제외 경로 패턴 (startswith로 매칭)
+    EXEMPT_PATTERNS = [
+        "/aura/agents/",  # 백엔드에서 호출하는 refresh 엔드포인트 (B2B 통신)
+        "/api/aura/agents/",  # 게이트웨이를 통한 경로
+    ]
+    
     async def dispatch(
         self,
         request: Request,
@@ -54,7 +60,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         is_exempt = (
             path in self.EXEMPT_PATHS or
-            any(path.startswith(exempt) for exempt in self.EXEMPT_PATHS if exempt.endswith("*"))
+            any(path.startswith(exempt) for exempt in self.EXEMPT_PATHS if exempt.endswith("*")) or
+            any(path.startswith(pattern) for pattern in self.EXEMPT_PATTERNS)
         )
         
         if is_exempt:

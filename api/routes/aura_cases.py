@@ -153,6 +153,7 @@ async def _run_analysis_background(
     """백그라운드 분석 실행 + 큐에 이벤트 적재 + 완료 시 콜백. body_evidence: C(폴백)용. 정책 참조 로그용 context."""
     from core.config import get_settings
     max_web = get_settings().web_search_max_calls_per_run
+    aura_trace_id = f"aura-{run_id[:8]}-{uuid.uuid4().hex[:8]}"
     set_request_context(
         tenant_id=tenant_id,
         user_id="",
@@ -162,22 +163,30 @@ async def _run_analysis_background(
         policy_config_source="dwp_aura.sys_monitoring_configs",
         policy_profile="default",
         x_sandbox=x_sandbox,
+        aura_trace_id=aura_trace_id,
         _guardrails={"web_search_calls": 0, "web_search_max_calls": max_web},
     )
     event_type = "failed"
     payload: dict[str, Any] = {}
     config = None
     try:
-        from core.analysis.agent_factory import fetch_agent_config
+        from core.analysis.agent_factory import fetch_agent_config, select_agent_for_request
         from core.analysis.audit_analysis_pipeline import run_audit_analysis
 
-        config = await fetch_agent_config(agent_id="audit", tenant_id=tenant_id)
+        # Discovery + Selection: 사용자 요청 분석하여 적절한 에이전트 선택
+        agent_id_val = await select_agent_for_request(
+            user_query=None,  # case 분석이므로 케이스 컨텍스트 기반 선택
+            context={"caseId": case_id, "evidence": body_evidence},
+            tenant_id=tenant_id,
+        )
+        config = await fetch_agent_config(agent_id=agent_id_val, tenant_id=tenant_id)
         async for event_type, payload in run_audit_analysis(
             case_id,
             run_id=run_id,
             tenant_id=tenant_id,
             body_evidence=body_evidence,
             model_name=config.model_name,
+            agent_config=config,
         ):
             put_event(run_id, event_type, payload)
             if event_type in ("completed", "failed"):
@@ -199,9 +208,12 @@ async def _run_analysis_background(
                     "proposals": [],
                 }, agent_id=config.agent_id, version=config.version)
         else:
+            err = payload.get("error", "unknown")
+            if isinstance(err, dict):
+                err = err.get("message") or err.get("error") or "unknown"
             await send_callback(
                 run_id, case_id, "FAILED",
-                error_message=payload.get("error", "unknown"),
+                error_message=str(err),
                 agent_id=config.agent_id,
                 version=config.version,
             )
@@ -371,11 +383,20 @@ async def case_analysis_trigger(
         from core.analysis.audit_analysis_pipeline import run_audit_analysis
 
         try:
-            config = await fetch_agent_config(agent_id="audit", tenant_id=tenant_id or "1")
+            from core.analysis.agent_factory import select_agent_for_request
+            
+            # Discovery + Selection: 사용자 요청 분석하여 적절한 에이전트 선택
+            agent_id_val = await select_agent_for_request(
+                user_query=None,  # 케이스 분석이므로 컨텍스트 기반 선택
+                context={"caseId": case_id},
+                tenant_id=tenant_id or "1",
+            )
+            config = await fetch_agent_config(agent_id=agent_id_val, tenant_id=tenant_id or "1")
             async for event_type, payload in run_audit_analysis(
                 case_id,
                 tenant_id=tenant_id or "1",
                 model_name=config.model_name,
+                agent_config=config,
             ):
                 yield format_sse_line(event_type, payload)
                 await asyncio.sleep(STREAM_EVENT_DELAY)

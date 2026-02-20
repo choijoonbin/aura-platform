@@ -48,6 +48,8 @@ class AgentConfig(BaseModel):
     system_instruction: Optional[str] = Field(default=None, description="API로 수신한 시스템 지침 본문. 있으면 get_system_prompt() 대신 최우선 주입 (동적 배포)")
     model_name: str | None = Field(default=None, description="DB model_name 코드 → LLM 엔진 식별자 (Synapse와 동일 코드값)")
     checkpointer: str | None = Field(default="memory", description="memory | sqlite | none")
+    doc_ids: list[int] = Field(default_factory=list, description="에이전트가 접근 가능한 문서 ID 목록. 빈 리스트면 RAG 검색 결과 0건 (Secure by Default)")
+    tenant_id: int = Field(default=0, description="테넌트 ID. 0이면 시스템 에이전트(테넌트 필터 제외), >0이면 해당 테넌트만 접근")
 
 
 # 기본 감사 에이전트 설정 (백엔드 API 미제공 시 폴백)

@@ -9,16 +9,18 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from api.dependencies import CurrentUser, TenantId
+from core.stores.config_store import get_config_store
+from core.analysis.agent_factory import invalidate_agent_list_cache
 from domains.dev.agents.code_agent import get_code_agent
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/agents", tags=["agents"])
+router = APIRouter(prefix="/aura/agents", tags=["agents"])
 
 
 class ChatRequest(BaseModel):
@@ -223,6 +225,95 @@ async def list_tools(user: CurrentUser):
     return {
         "tools": tools,
         "count": len(tools),
+    }
+
+
+@router.post("/{agent_id}/refresh")
+async def refresh_agent_config(
+    agent_id: str,
+    tenant_id: int = Query(..., description="테넌트 ID"),
+    store: Any = None,
+) -> dict[str, Any]:
+    """
+    에이전트 설정 캐시 무효화 (백엔드에서 호출)
+    
+    백엔드에서 에이전트 설정이나 지식 바인딩이 변경되었을 때,
+    Aura의 메모리 캐시를 즉시 무효화하여 다음 요청 시 최신 설정을 가져오도록 합니다.
+    
+    Args:
+        agent_id: 에이전트 ID
+        tenant_id: 테넌트 ID (쿼리 파라미터 또는 헤더에서 추출)
+        store: AgentConfigStore 인스턴스 (의존성 주입)
+    
+    Returns:
+        {"success": True, "agentId": str, "tenantId": int}
+    
+    멱등성: 존재하지 않는 에이전트에 대해서도 성공(200) 반환.
+    """
+    if store is None:
+        store = get_config_store()
+    
+    # tenant_id가 없으면 기본값 1 사용 (시스템 에이전트 고려)
+    tenant_id_val = tenant_id if tenant_id is not None else 1
+    
+    try:
+        invalidated = store.invalidate(tenant_id_val, agent_id)
+        # 에이전트 목록 캐시도 무효화 (에이전트 설정 변경 시 목록도 갱신 필요)
+        invalidate_agent_list_cache(tenant_id_val)
+        logger.info(
+            f"[Refresh] Agent config cache invalidated: {tenant_id_val}:{agent_id} "
+            f"(was_cached={invalidated})"
+        )
+        return {
+            "success": True,
+            "agentId": agent_id,
+            "tenantId": tenant_id_val,
+        }
+    except Exception as e:
+        logger.error(f"[Refresh] Failed to invalidate cache for {tenant_id_val}:{agent_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to refresh agent config: {str(e)}",
+        )
+
+
+@router.get("/cache/stats")
+async def get_cache_stats() -> dict[str, Any]:
+    """
+    에이전트 설정 캐시 상태 조회 (디버깅/모니터링용)
+    
+    Returns:
+        캐시 통계: total_entries, valid_entries, expired_entries, ttl_seconds, entries
+    """
+    store = get_config_store()
+    stats = store.stats()
+    logger.info(f"[Cache Stats] {stats['total_entries']} entries, {stats['valid_entries']} valid, TTL={stats['ttl_seconds']}s")
+    return {
+        "success": True,
+        "cache": stats,
+    }
+
+
+@router.post("/cache/clear")
+async def clear_cache() -> dict[str, Any]:
+    """
+    전체 에이전트 설정 캐시 삭제 (긴급 상황용)
+    
+    주의: 이 API는 모든 에이전트의 캐시를 삭제합니다.
+    다음 요청 시 모든 에이전트 설정이 Backend에서 다시 로드됩니다.
+    
+    Returns:
+        {"success": True, "message": str}
+    """
+    store = get_config_store()
+    store.clear()
+    # 에이전트 목록 캐시도 모두 삭제
+    from core.analysis.agent_factory import _agent_list_cache
+    _agent_list_cache.clear()
+    logger.info("[Cache Clear] All agent config and list caches cleared")
+    return {
+        "success": True,
+        "message": "All agent config caches cleared. Next requests will fetch fresh configs from Backend.",
     }
 
 

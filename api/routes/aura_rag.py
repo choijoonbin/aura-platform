@@ -15,10 +15,11 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, File, Form, UploadFile, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from core.analysis.rag import process_and_vectorize, validate_local_document_path
 from core.config import get_settings
+from core.synapse_schema import DOC_TYPE_REGULATION, DOC_TYPE_HIERARCHICAL, DOC_TYPE_GENERAL
 
 
 class IngestFromPathRequest(BaseModel):
@@ -27,13 +28,41 @@ class IngestFromPathRequest(BaseModel):
     document_path: str = Field(..., description="로컬 절대 경로 (실제 존재·읽기 가능해야 함)")
     rag_document_id: str = Field(default="", description="dwp_aura.rag_document 문서 ID (매핑용)")
     metadata: str = Field(default="", description='JSON 문자열. 예: {"regulation_article":"제5조"}')
+    doc_type: str = Field(default=DOC_TYPE_REGULATION, description=f"문서 타입: {DOC_TYPE_REGULATION}(시멘틱), {DOC_TYPE_HIERARCHICAL}(계층형), {DOC_TYPE_GENERAL}(일반)")
 
 
 class VectorizeByPathBody(BaseModel):
     """POST /documents/{docId}/vectorize 요청 body (백엔드 호출 규격)."""
 
-    document_path: str = Field(..., description="로컬 절대 경로")
-    metadata: str = Field(default="", description='JSON 문자열. 예: {"regulation_article":"제5조"}')
+    tenantId: int | None = Field(default=None, description="테넌트 ID")
+    tenant_id: int | None = Field(default=None, description="테넌트 ID (snake_case, 백엔드 호환)")
+    docId: int | str | None = Field(default=None, description="문서 ID (path와 중복 가능, 숫자 또는 문자열)")
+    doc_id: int | str | None = Field(default=None, description="문서 ID (snake_case, 백엔드 호환)")
+    docType: str | None = Field(default=None, description=f"문서 타입: {DOC_TYPE_REGULATION}(시멘틱), {DOC_TYPE_HIERARCHICAL}(계층형), {DOC_TYPE_GENERAL}(일반)")
+    doc_type: str | None = Field(default=None, description=f"문서 타입 (snake_case, 백엔드 호환)")
+    title: str | None = Field(default=None, description="문서 제목")
+    s3Key: str | None = Field(default=None, description="S3 키 (있는 경우)")
+    url: str | None = Field(default=None, description="URL (있는 경우)")
+    sourceType: str | None = Field(default=None, description="소스 유형 (UPLOAD, S3, URL)")
+    documentPath: str | None = Field(default=None, description="로컬 파일 절대 경로 (camelCase)")
+    document_path: str | None = Field(default=None, description="로컬 파일 절대 경로 (snake_case, 백엔드 호환)")
+    metadata: str | None = Field(default=None, description='JSON 문자열. 예: {"regulation_article":"제5조"}')
+    
+    @field_validator("docId", "doc_id", mode="before")
+    @classmethod
+    def _coerce_doc_id(cls, v: Any) -> str | int | None:
+        """docId를 문자열 또는 숫자로 변환 (백엔드가 숫자로 보낼 수 있음)"""
+        if v is None:
+            return None
+        return v  # int 또는 str 그대로 유지
+    
+    def get_effective_doc_type(self) -> str:
+        """camelCase 또는 snake_case 필드에서 doc_type 추출. 없으면 REGULATION 기본값."""
+        return (self.docType or self.doc_type or DOC_TYPE_REGULATION).strip()
+    
+    def get_effective_tenant_id(self) -> int | None:
+        """camelCase 또는 snake_case 필드에서 tenant_id 추출."""
+        return self.tenantId or self.tenant_id
 
 logger = logging.getLogger(__name__)
 
@@ -151,9 +180,16 @@ async def rag_documents_vectorize(
     body: VectorizeByPathBody,
     batch_size: int = Query(default=30, ge=20, le=50, description="배치당 청크 수 (20~50)"),
 ) -> JSONResponse:
-    document_path = (body.document_path or "").strip()
+    # Raw request body 로깅 (디버깅용)
+    logger.debug(
+        "RAG vectorize raw body: docType=%s doc_type=%s tenantId=%s tenant_id=%s documentPath=%s document_path=%s",
+        body.docType, body.doc_type, body.tenantId, body.tenant_id, body.documentPath, body.document_path,
+    )
+    
+    # 백엔드가 전달하는 필드명: documentPath (camelCase) 또는 document_path (snake_case) 지원
+    document_path = (body.documentPath or body.document_path or "").strip()
     if not document_path:
-        return JSONResponse(status_code=400, content={"error": "document_path required"})
+        return JSONResponse(status_code=400, content={"error": "documentPath or document_path required"})
     suffix = Path(document_path).suffix.lower()
     if suffix not in _ALLOWED_EXTENSIONS:
         return JSONResponse(
@@ -173,13 +209,30 @@ async def rag_documents_vectorize(
         return JSONResponse(status_code=403, content={"error": str(e)})
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
-    rag_document_id = (doc_id or "").strip() or f"rag-{uuid.uuid4().hex[:12]}"
-    metadata = _parse_metadata(body.metadata.strip() or None)
+    # rag_document_id: path의 doc_id 우선, 없으면 body.docId/doc_id (숫자일 수 있음), 없으면 생성
+    doc_id_str = str(doc_id) if doc_id else ""
+    doc_id_from_body = str(body.docId or body.doc_id or "") if (body.docId or body.doc_id) else ""
+    rag_document_id = (doc_id_str or doc_id_from_body or "").strip() or f"rag-{uuid.uuid4().hex[:12]}"
+    # metadata 파싱: body.metadata가 있으면 사용, 없으면 title/s3Key/url 등으로 구성
+    metadata_dict = _parse_metadata(body.metadata.strip() if body.metadata else None)
+    if not metadata_dict and (body.title or body.s3Key or body.url):
+        metadata_dict = {}
+        if body.title:
+            metadata_dict["title"] = body.title
+        if body.s3Key:
+            metadata_dict["s3_key"] = body.s3Key
+        if body.url:
+            metadata_dict["url"] = body.url
+        if body.sourceType:
+            metadata_dict["source_type"] = body.sourceType
+    # docType: camelCase 또는 snake_case 모두 지원 (BE 호환)
+    doc_type = body.get_effective_doc_type()
+    tenant_id = body.get_effective_tenant_id()
     logger.info(
-        "RAG vectorize start: doc_id=%s rag_document_id=%s document_path=%s batch_size=%s",
-        doc_id, rag_document_id, document_path, batch_size,
+        "RAG vectorize start: doc_id=%s rag_document_id=%s document_path=%s batch_size=%s doc_type=%s tenantId=%s (raw: docType=%s, doc_type=%s)",
+        doc_id, rag_document_id, document_path, batch_size, doc_type, tenant_id, body.docType, body.doc_type,
     )
-    result = process_and_vectorize(valid_path, rag_document_id, metadata or None)
+    result = process_and_vectorize(valid_path, rag_document_id, metadata_dict or None, doc_type=doc_type)
     if not result.get("ok"):
         logger.warning("RAG vectorize failed: doc_id=%s error=%s", doc_id, result.get("error"))
         return JSONResponse(
@@ -225,7 +278,8 @@ async def rag_ingest_from_path(body: IngestFromPathRequest) -> JSONResponse:
         return JSONResponse(status_code=400, content={"error": str(e)})
     doc_id = (body.rag_document_id or "").strip() or f"rag-{uuid.uuid4().hex[:12]}"
     metadata = _parse_metadata(body.metadata.strip() or None)
-    result = process_and_vectorize(valid_path, doc_id, metadata or None)
+    doc_type = (body.doc_type or DOC_TYPE_REGULATION).strip()
+    result = process_and_vectorize(valid_path, doc_id, metadata or None, doc_type=doc_type)
     if not result.get("ok"):
         return JSONResponse(
             status_code=422,
@@ -248,6 +302,7 @@ async def rag_ingest(
         default="",
         description='JSON 문자열. 규정 인용용 메타데이터 (예: {"regulation_article":"제5조"})',
     ),
+    doc_type: str = Form(default=DOC_TYPE_REGULATION, description=f"문서 타입: {DOC_TYPE_REGULATION}(시멘틱), {DOC_TYPE_HIERARCHICAL}(계층형), {DOC_TYPE_GENERAL}(일반)"),
 ) -> JSONResponse:
     if not file.filename:
         return JSONResponse(status_code=400, content={"error": "filename required"})
@@ -268,7 +323,8 @@ async def rag_ingest(
         return JSONResponse(status_code=500, content={"error": str(e)})
     try:
         meta = _parse_metadata(metadata.strip() or None)
-        result = process_and_vectorize(tmp_path, doc_id, meta or None)
+        doc_type_val = (doc_type or DOC_TYPE_REGULATION).strip()
+        result = process_and_vectorize(tmp_path, doc_id, meta or None, doc_type=doc_type_val)
         if not result.get("ok"):
             return JSONResponse(
                 status_code=422,
