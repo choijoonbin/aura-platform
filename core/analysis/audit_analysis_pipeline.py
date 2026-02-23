@@ -25,6 +25,7 @@ from core.analysis.audit_analysis_events import (
     AnalysisCompletedEvent,
     AnalysisFailedEvent,
 )
+from core.analysis.thought_stream import generate_thought_stream
 from core.analysis.reasoning_citations import (
     build_regulation_citations,
     build_citation_reasoning,
@@ -39,6 +40,68 @@ logger = logging.getLogger(__name__)
 
 # 분석 비활성 플래그 (DEMO_OFF 등)
 ANALYSIS_DISABLED_ENV = "DEMO_OFF"
+
+# BE step_completion_rate 계산용: step 이벤트 총 개수 (injectStepCompletionRate에서 stepIndex/total_steps * 100)
+TOTAL_ANALYSIS_STEPS = 5
+
+# 2단계 스트리밍: LLM 독백 생성 전에 먼저 던지는 이벤트 메시지 (FE에서 "Thinking..." 또는 타이핑 효과 표시용)
+THOUGHT_PENDING_MESSAGE = "생각 중..."
+
+
+def _build_decision_reason(
+    reason_text: str,
+    violation_clause: str,
+    evidence_items: list[dict[str, Any]],
+    citations: list[dict[str, Any]],
+    doc_id: str | None,
+    item_id: str | None,
+    chunk_id: str | None,
+    target_buzei: str | None,
+    case_data: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """
+    Universal Compliance Auditor 규격의 구조화된 인사이트(Reason + Evidence JSON) 생성.
+    BE V65 decision_reason 저장 및 agent_activity_log 고도화용.
+    """
+    case_data_flat: dict[str, Any] = {}
+    if isinstance(case_data, dict):
+        for k in ("amount", "occurredAt", "occurred_at", "expenseType", "expense_type", "vendorId", "vendor_id"):
+            if k in case_data and case_data[k] is not None:
+                case_data_flat["field"] = k
+                case_data_flat["value"] = case_data[k]
+                break
+        if not case_data_flat and case_data:
+            case_data_flat = {"field": "case", "value": str(case_data)[:200]}
+    evidence_payload: dict[str, Any] = {
+        "source_chunk_id": chunk_id,
+        "doc_id": doc_id,
+        "chunk_index": None,
+        "hierarchy_path": violation_clause or "",
+        "conflict_point": (reason_text[:300] if reason_text else ""),
+        "case_data": case_data_flat,
+    }
+    # evidence_items에서 첫 RAG 청크의 chunk_index 추출
+    for e in evidence_items:
+        if isinstance(e, dict) and (e.get("type") == "RAG_CHUNK" or e.get("chunk_id") or e.get("chunkId")):
+            evidence_payload["chunk_index"] = e.get("chunk_index") or e.get("chunkIndex")
+            break
+    citations_payload: list[dict[str, Any]] = []
+    for c in (citations or [])[:10]:
+        if not isinstance(c, dict):
+            continue
+        citations_payload.append({
+            "source": c.get("source", "내부규정"),
+            "chunk_id": c.get("chunk_id") or c.get("chunkId"),
+            "doc_id": c.get("doc_id") or c.get("docId"),
+            "reference": c.get("title") or c.get("reference", ""),
+            "excerpt": (c.get("excerpt") or c.get("content") or "")[:500],
+            "score": c.get("score"),
+        })
+    return {
+        "reason": reason_text or "",
+        "evidence": evidence_payload,
+        "citations": citations_payload,
+    }
 
 
 def _normalize_body_evidence(body_evidence: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -104,11 +167,26 @@ async def run_audit_analysis(
     now = datetime.now(timezone.utc).isoformat()
 
     try:
-        # started
-        yield ("started", AnalysisStartedEvent(runId=run_id, caseId=case_id, at=now).model_dump())
+        reasoning_history: list[str] = []
+        # ID 매핑: FE Red Glow 등 행/청크 하이라이트용 (chunk_id, target_buzei 노출)
+        id_mapping: dict[str, Any] = {}
 
-        # Step1: 입력 정규화
-        yield ("step", AnalysisStepEvent(label="INPUT_NORM", detail="케이스 입력 정규화 중", percent=10).model_dump())
+        # started (total_steps 포함 시 SSE 시작 시점부터 진행률 계산 가능)
+        yield ("started", AnalysisStartedEvent(runId=run_id, caseId=case_id, at=now, total_steps=TOTAL_ANALYSIS_STEPS).model_dump())
+
+        # Step1: 입력 정규화 (2단계 스트리밍: thought_pending → LLM 독백 → AGENT_STREAM → step)
+        yield ("thought_pending", {"step_label": "INPUT_NORM", "message": THOUGHT_PENDING_MESSAGE, **id_mapping})
+        thought_input_norm = await generate_thought_stream("INPUT_NORM", None, case_id=case_id, reasoning_history=reasoning_history)
+        if thought_input_norm:
+            reasoning_history.append(thought_input_norm)
+        yield ("AGENT_STREAM", {"content": thought_input_norm or "", "step_label": "INPUT_NORM", **id_mapping})
+        yield ("step", {**AnalysisStepEvent(
+            label="INPUT_NORM",
+            detail="케이스 입력 정규화 중",
+            percent=10,
+            total_steps=TOTAL_ANALYSIS_STEPS,
+            thought_stream=thought_input_norm or None,
+        ).model_dump(), **id_mapping})
 
         try:
             case_result = await get_case.ainvoke({"caseId": case_id})
@@ -120,20 +198,44 @@ async def run_audit_analysis(
         if isinstance(case_data, dict) and "error" in case_data:
             case_data = {}
 
-        yield ("step", AnalysisStepEvent(
+        yield ("thought_pending", {"step_label": "EVIDENCE_GATHER", "message": THOUGHT_PENDING_MESSAGE, **id_mapping})
+        thought_evidence_gather = await generate_thought_stream("EVIDENCE_GATHER", case_data, case_id=case_id, reasoning_history=reasoning_history)
+        if thought_evidence_gather:
+            reasoning_history.append(thought_evidence_gather)
+        yield ("AGENT_STREAM", {"content": thought_evidence_gather or "", "step_label": "EVIDENCE_GATHER", **id_mapping})
+        yield ("step", {**AnalysisStepEvent(
             label="EVIDENCE_GATHER",
             detail="케이스 전표 데이터 및 연관 증거 수집 중",
             percent=25,
-        ).model_dump())
+            total_steps=TOTAL_ANALYSIS_STEPS,
+            thought_stream=thought_evidence_gather or None,
+        ).model_dump(), **id_mapping})
 
         # Step2: Evidence 수집
         evidence_items: list[dict[str, Any]] = []
         if case_data:
+            _be = body_evidence if isinstance(body_evidence, dict) else {}
+            doc_id_case = _be.get("doc_id") or (_be.get("document") or {}).get("docKey")
+            item_id_case = _be.get("item_id")
+            buzei_case = _be.get("target_buzei") or _be.get("buzei") or (case_data.get("target_buzei") or case_data.get("buzei") if isinstance(case_data, dict) else None)
+            item_no_case = _be.get("item_no") or (case_data.get("item_no") or case_data.get("item_id") if isinstance(case_data, dict) else None)
+            # ID 매핑 갱신: FE Red Glow용 chunk_id, target_buzei 노출
+            id_mapping["doc_id"] = str(doc_id_case).strip() if doc_id_case is not None else None
+            id_mapping["item_id"] = str(item_id_case).strip() if item_id_case is not None else None
+            id_mapping["target_buzei"] = str(buzei_case).strip() if buzei_case is not None else None
+            if "chunk_id" not in id_mapping:
+                id_mapping["chunk_id"] = None
             evidence_items.append({
                 "type": "CASE",
                 "source": "get_case",
                 "caseId": case_id,
                 "keys": {k: v for k, v in case_data.items() if k in ("bukrs", "belnr", "gjahr", "vendorId", "amount")},
+                "doc_id": doc_id_case,
+                "docId": doc_id_case,
+                "item_id": item_id_case,
+                "itemId": item_id_case,
+                "target_buzei": buzei_case,
+                "item_no": item_no_case,
             })
 
         doc_list: list[dict[str, Any]] = []
@@ -146,21 +248,34 @@ async def run_audit_analysis(
                 doc_list = docs if isinstance(docs, list) else []
             for i, d in enumerate((doc_list or [])[:5]):
                 if isinstance(d, dict):
+                    doc_id_val = d.get("doc_id") or d.get("docId") or d.get("docKey") or d.get("rag_document_id")
+                    item_id_val = d.get("item_id") or d.get("itemId") or (str(i) if i > 0 else None)
                     evidence_items.append({
                         "type": "DOC_HEADER" if i == 0 else "DOC_ITEM",
                         "source": "search_documents",
                         "index": i,
                         "keys": d.get("keys", {}) or {"caseId": case_id},
+                        "doc_id": doc_id_val,
+                        "docId": doc_id_val,
+                        "item_id": item_id_val,
+                        "itemId": item_id_val,
                     })
         except Exception as e:
             logger.debug(f"search_documents failed: {e}")
 
         # 하이브리드 검색 — 사내 규정(Vector DB) 자동 로드
-        yield ("step", AnalysisStepEvent(
+        yield ("thought_pending", {"step_label": "REGULATION_MATCH", "message": THOUGHT_PENDING_MESSAGE, **id_mapping})
+        thought_regulation = await generate_thought_stream("REGULATION_MATCH", case_data, case_id=case_id, reasoning_history=reasoning_history)
+        if thought_regulation:
+            reasoning_history.append(thought_regulation)
+        yield ("AGENT_STREAM", {"content": thought_regulation or "", "step_label": "REGULATION_MATCH", **id_mapping})
+        yield ("step", {**AnalysisStepEvent(
             label="REGULATION_MATCH",
             detail="전표·가맹점 맥락을 바탕으로 사내 규정(Vector DB) 매칭 중입니다.",
             percent=35,
-        ).model_dump())
+            total_steps=TOTAL_ANALYSIS_STEPS,
+            thought_stream=thought_regulation or None,
+        ).model_dump(), **id_mapping})
         vector_results: list[dict[str, Any]] = []
         try:
             bukrs = str(case_data.get("bukrs") or "") if isinstance(case_data, dict) else None
@@ -212,6 +327,21 @@ async def run_audit_analysis(
                     if key and key not in existing:
                         doc_list.append(v)
                         existing.add(key)
+                    # BE evidence_map 채우기: evidence/ragRefs에 doc_id, chunk_id 포함된 항목 추가
+                    cid = v.get("chunk_id") or v.get("chunkId")
+                    if cid and id_mapping.get("chunk_id") is None:
+                        id_mapping["chunk_id"] = str(cid).strip()
+                    evidence_items.append({
+                        "type": "RAG_CHUNK",
+                        "source": "hybrid_retrieve",
+                        "doc_id": v.get("doc_id") or v.get("rag_document_id"),
+                        "docId": v.get("docId") or v.get("doc_id") or v.get("rag_document_id"),
+                        "chunk_id": v.get("chunk_id"),
+                        "chunkId": v.get("chunkId") or v.get("chunk_id"),
+                        "excerpt": (v.get("excerpt") or v.get("content") or "")[:300],
+                        "score": v.get("score"),
+                        "keys": {"caseId": case_id},
+                    })
         except Exception as e:
             logger.debug(f"hybrid_retrieve failed: {e}")
 
@@ -304,11 +434,19 @@ async def run_audit_analysis(
 
         doc_id_ref: str | None = None
         item_id_ref: str | None = None
+        target_buzei: str | None = None  # SAP 전표 행(라인) 식별 — 어떤 전표 행이 문제인지 명시
+        item_no: str | None = None
         if body_evidence and isinstance(body_evidence, dict):
             raw_doc = body_evidence.get("doc_id") or (body_evidence.get("document") or {}).get("docKey")
             raw_item = body_evidence.get("item_id")
             doc_id_ref = _norm_id(raw_doc)
             item_id_ref = _norm_id(raw_item)
+            target_buzei = _norm_id(body_evidence.get("target_buzei") or body_evidence.get("buzei"))
+            item_no = _norm_id(body_evidence.get("item_no") or body_evidence.get("item_id") or raw_item)
+        if not target_buzei and isinstance(case_data, dict):
+            target_buzei = _norm_id(case_data.get("target_buzei") or case_data.get("buzei"))
+        if not item_no and isinstance(case_data, dict):
+            item_no = _norm_id(case_data.get("item_no") or case_data.get("item_id"))
         if doc_id_ref and doc_list:
             # pgvector 검색 결과에서 body_evidence.doc_id와 일치하는 문서를 최상단에 배치(Ranking)
             doc_id_norm = doc_id_ref.strip()
@@ -318,12 +456,33 @@ async def run_audit_analysis(
                 return (match, -(float(d.get("score", 0)) or 0))
             doc_list.sort(key=_doc_rank_key)
 
-        yield ("evidence", AnalysisEvidenceEvent(type="COLLECTED", items=evidence_items).model_dump())
-        yield ("step", AnalysisStepEvent(
+        yield ("thought_pending", {"step_label": "EVIDENCE_COLLECTED", "message": THOUGHT_PENDING_MESSAGE, **id_mapping})
+        evidence_thought = await generate_thought_stream(
+            "EVIDENCE_COLLECTED",
+            case_data,
+            case_id=case_id,
+            evidence_count=len(evidence_items),
+            rag_count=sum(1 for e in evidence_items if e.get("type") == "RAG_CHUNK"),
+            reasoning_history=reasoning_history,
+        )
+        if evidence_thought:
+            reasoning_history.append(evidence_thought)
+        yield ("AGENT_STREAM", {"content": evidence_thought or "", "step_label": "EVIDENCE_COLLECTED", **id_mapping})
+        yield ("evidence", AnalysisEvidenceEvent(type="COLLECTED", items=evidence_items, thought_stream=evidence_thought or None).model_dump())
+        yield ("thought_pending", {"step_label": "RULE_SCORING", "message": THOUGHT_PENDING_MESSAGE, **id_mapping})
+        thought_rule = await generate_thought_stream(
+            "RULE_SCORING", case_data, case_id=case_id, rag_count=len(vector_results) if vector_results else 0, reasoning_history=reasoning_history
+        )
+        if thought_rule:
+            reasoning_history.append(thought_rule)
+        yield ("AGENT_STREAM", {"content": thought_rule or "", "step_label": "RULE_SCORING", **id_mapping})
+        yield ("step", {**AnalysisStepEvent(
             label="RULE_SCORING",
             detail="규정 제한 업종·금액·시간 기준 위반 여부 검토 중입니다.",
             percent=45,
-        ).model_dump())
+            total_steps=TOTAL_ANALYSIS_STEPS,
+            thought_stream=thought_rule or None,
+        ).model_dump(), **id_mapping})
 
         # Step3: 룰 스코어링 (정상/위반 대비: DEMO_NORM_* vs DEMO0000*)
         amount = 0.0
@@ -347,11 +506,20 @@ async def run_audit_analysis(
             overall=round(overall, 2),
         ).model_dump())
 
-        yield ("step", AnalysisStepEvent(
+        yield ("thought_pending", {"step_label": "LLM_REASONING", "message": THOUGHT_PENDING_MESSAGE, **id_mapping})
+        thought_llm = await generate_thought_stream(
+            "LLM_REASONING", case_data, case_id=case_id, evidence_count=len(evidence_items), reasoning_history=reasoning_history
+        )
+        if thought_llm:
+            reasoning_history.append(thought_llm)
+        yield ("AGENT_STREAM", {"content": thought_llm or "", "step_label": "LLM_REASONING", **id_mapping})
+        yield ("step", {**AnalysisStepEvent(
             label="LLM_REASONING",
             detail="규정 조문과 대조하여 위반 여부 판단 및 판단 근거 작성 중입니다.",
             percent=65,
-        ).model_dump())
+            total_steps=TOTAL_ANALYSIS_STEPS,
+            thought_stream=thought_llm or None,
+        ).model_dump(), **id_mapping})
 
         # Step4: LLM reasonText (XAI: 규정 인용형 문장)
         risk_type = "DUPLICATE_INVOICE"
@@ -379,10 +547,13 @@ async def run_audit_analysis(
                 f"케이스 {case_id} 분석 결과를 한 문단으로 요약. ",
                 f"위험 유형: {risk_type}. 스코어: {overall:.2f}. ",
             ]
-            if doc_id or item_id:
+            if doc_id or item_id or target_buzei or item_no:
+                parts = [f"doc_id={doc_id or '미지정'}", f"item_id={item_id or '미지정'}"]
+                if target_buzei or item_no:
+                    parts.append(f"전표 행(target_buzei/item_no)={target_buzei or item_no or '미지정'}")
                 prompt_parts.append(
-                    f"백엔드에서 지정한 문서·항목(doc_id={doc_id or '미지정'}, item_id={item_id or '미지정'})에 대한 "
-                    "상세 내역을 우선 참고하여 규정 준수 여부를 판단하고, 해당 내역 기반으로 이유를 작성하시오. "
+                    f"백엔드에서 지정한 문서·항목({', '.join(parts)})에 대한 "
+                    "상세 내역을 우선 참고하여 규정 준수 여부를 판단하고, 해당 전표 행이 문제인 경우 이유에 반드시 명시하시오. "
                 )
             if regulation_citations:
                 prompt_parts.append(
@@ -436,6 +607,10 @@ async def run_audit_analysis(
                     "excerpt": clause_evidence.get("excerpt"),
                     "article": violation_article,
                     "clause": violation_clause,
+                    "doc_id": clause_evidence.get("doc_id"),
+                    "docId": clause_evidence.get("doc_id"),
+                    "chunk_id": clause_evidence.get("chunk_id"),
+                    "chunkId": clause_evidence.get("chunk_id"),
                 })
             violation_reason = case_context or "시간외 결제 등"
             reason_text = (
@@ -451,11 +626,11 @@ async def run_audit_analysis(
             if "에 의거하여" in citation_sentence:
                 reason_text = citation_sentence + " " + reason_text
 
-        yield ("step", AnalysisStepEvent(
+        yield ("step", {**AnalysisStepEvent(
             label="PROPOSALS",
             detail="권고 조치(결제 보류·추가 확인 등) 생성 중입니다.",
             percent=85,
-        ).model_dump())
+        ).model_dump(), **id_mapping})
 
         # Step5: Proposals
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -517,8 +692,30 @@ async def run_audit_analysis(
             internal_citations.append({**c, "source": "web_search"})
         citations = internal_citations
 
+        # chunk_id: 분석에 사용된 핵심 규정 청크 ID (V65/agent_activity_log snake_case)
+        chunk_id_ref: str | None = None
+        for e in evidence_items:
+            cid = (e.get("chunk_id") or e.get("chunkId")) if isinstance(e, dict) else None
+            if cid:
+                chunk_id_ref = str(cid).strip() or None
+                break
+
+        # decision_reason: Universal Compliance Auditor 규격 — Reason + Evidence JSON (BE V65 저장용)
+        decision_reason = _build_decision_reason(
+            reason_text=reason_text,
+            violation_clause=violation_clause_str,
+            evidence_items=evidence_items,
+            citations=citations,
+            doc_id=doc_id_ref,
+            item_id=item_id_ref,
+            chunk_id=chunk_id_ref,
+            target_buzei=target_buzei,
+            case_data=case_data,
+        )
+
         # finalResult 저장 (콜백 전에 반드시 실행 — break 시 get_audit_analysis_result 사용)
-        # 백엔드 case_analysis_result 테이블 규격: violation_clause, risk_score, reasoning_summary, recommended_action, citations[] 필수
+        # 백엔드 case_analysis_result 테이블 규격: violation_clause, risk_score, reasoning_summary, recommended_action, citations[]
+        # V65: doc_id, item_id, chunk_id, target_buzei 반드시 snake_case
         severity = "HIGH" if overall >= 0.8 else "MEDIUM" if overall >= 0.6 else "LOW"
         from core.streaming.case_stream_store import set_audit_analysis_result
         set_audit_analysis_result(case_id, {
@@ -540,6 +737,12 @@ async def run_audit_analysis(
             "violation_clause": violation_clause_str,
             "recommended_action": recommended_action,
             "citations": citations,
+            "decision_reason": decision_reason,
+            "doc_id": doc_id_ref,
+            "item_id": item_id_ref,
+            "chunk_id": chunk_id_ref,
+            "target_buzei": target_buzei,
+            "item_no": item_no,
         })
 
         # 신규 고위험 케이스 탐지 시 Redis 알림 (workbench:alert, category=AI_DETECT — 백엔드 NotificationService 규격)

@@ -51,6 +51,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **신규 탐지**: Phase2에서 severity=HIGH 케이스 생성 시 `workbench:alert` 채널로 "신규 이상 징후 탐지" 발행 (`workbench_alert_channel`)
 
 ### Changed
+- **Aura 케이스별 호출 규칙 적용 (AURA_CASE_PER_CALL_PROMPT)** (2026-02-20)
+  - **에이전트 스트림(thought/AGENT_STREAM/step)**: REST만 사용 — `REASONING_COMPOSED` 이벤트는 `POST /api/synapse/agent/events`로만 전송, 동일 내용을 Redis `audit:events:ingest`로 보내지 않음.
+  - **감사 이벤트(RAG_QUERIED, SCAN_* 등)**: Redis(또는 HTTP audit)만 사용 — agent/events REST 호출하지 않음.
+  - `core/audit/writer.py`: `ingest_fire_and_forget`에서 이벤트 타입별 분기(`AGENT_STREAM_ONLY_EVENT_TYPES`), 한 종류의 API만 사용·동일 이벤트 이중 전송 제거.
+- **독백 이중화 및 최종 결과물 고도화 (Agent Event Push / Final Result)** (2026-02-23)
+  - **이벤트 푸시 동기화**: `generate_thought_stream`으로 생성한 실시간 독백을 SSE뿐 아니라 `POST /api/synapse/agent/events` 푸시 시에도 사용. `step` 이벤트에 `thought_stream`이 있으면 `AgentAuditEvent.reasoning_composed(..., message=thought_stream)`로 agent_activity_log에 독백이 기록되도록 백그라운드·트리거 양쪽에서 푸시.
+  - **decision_reason 강제화**: 콜백 finalResult에 단순 텍스트 대신 **구조화된 인사이트(Reason + Evidence JSON)** 포함. `_build_decision_reason()`로 `reason`, `evidence`(source_chunk_id, doc_id, chunk_index, hierarchy_path, conflict_point, case_data), `citations` 규격 생성; 없을 경우 reasoning_summary 기반 fallback.
+  - **V65 snake_case 고정**: 최종 결과 키를 `doc_id`, `item_id`, `chunk_id`, `target_buzei`로 고정하여 BE V65 스키마 저장 일치.
+- **SSE 이벤트 타입·페이로드 정규화** (2026-02-23)
+  - **이벤트 명칭 일치**: FE 수신 대기 이벤트 — `thought_pending`(데이터: step_label, message "생각 중..."), `AGENT_STREAM`(데이터: content "추론문장", step_label), `step`(기술적 단계 완료), `data: [DONE]`(스트림 종료).
+  - **AGENT_STREAM 신규 발행**: LLM 독백 완성 시마다 `AGENT_STREAM` 이벤트로 `content` 전송; 기존 `step`의 thought_stream과 동일 문장(호환 유지).
+  - **ID 매핑 노출**: thought_pending·AGENT_STREAM·step 페이로드에 `chunk_id`, `target_buzei`(및 doc_id, item_id) 포함 — FE Red Glow 등 행 하이라이트 지원.
+  - **추론 연속성·마크다운**: reasoning_history 활용 연속 독백; thought_stream 프롬프트에 `****금액****`, `**제n조**` 등 FE 인하우스 렌더러 규격 마크다운 강조 지시 추가.
+  - 스펙: `docs/aura/docs/streaming/AURA_SSE_SPEC.md` 갱신, §11 다른 시스템에 공유할 내용(FE·백엔드 전달용) 추가.
+- **청킹 완료 시 Synapse RAG 상태 API 1회 호출** (2026-02-23)
+  - 청킹·벡터화 **종료 시에만** `POST /api/synapse/rag/status`에 `status=COMPLETED`, `message`(선택) 1회 전송. 진행 중(PROCESSING)은 백엔드에서 업데이트 관리.
+  - 설정: `synapse_rag_status_url`(미지정 시 `dwp_gateway_url` + `/api/synapse/rag/status`).
+  - 적용: `POST /aura/rag/documents/{doc_id}/vectorize`, `POST /aura/rag/ingest-from-path`, `POST /aura/rag/ingest` 성공 후 COMPLETED 1회만 호출.
 - **전반 공통화·모듈화 (API / core)** (2026-02-06)
   - API: `api/schemas/common.py` — `coerce_case_run_id` (caseId/runId str 변환) 공통화
   - API: `api/sse_utils.py` — `SSE_HEADERS`, `format_sse_line` 도입; aura_cases, aura_analysis_runs, aura_backend에서 사용

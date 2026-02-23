@@ -52,6 +52,8 @@ _RE_CHAPTER = re.compile(r"^(제\d+장)\s*(.*)$", re.MULTILINE)   # 제1장 총�
 _RE_ARTICLE = re.compile(r"^(제\d+조)\s*(.*)$", re.MULTILINE)   # 제12조 식대
 _RE_CLAUSE = re.compile(r"^(\d+항)\s*(.*)$", re.MULTILINE)       # 1항
 _RE_SUB = re.compile(r"^[\(（]?\d+[\)）]?호\s*(.*)$", re.MULTILINE)  # (1)호 or 1호
+# 경고용: 줄 시작이 규정 헤딩 형태(제n장/제n조/n항)인데 상세 regex 미매칭일 때만 경고 (문장 중간 '조항' 등은 제외)
+_RE_LOOKS_LIKE_HEADING = re.compile(r"^(제\d+[장조]|\d+항|[\(（]?\d+[\)）]?호)")
 
 # ---------------------------------------------------------------------------
 # Phase 6: Embedding & Vector Store (optional deps: pypdf, langchain-text-splitters, chromadb, langchain-chroma)
@@ -254,6 +256,49 @@ def _notify_backend_rag_completed(doc_id: str) -> None:
         logger.warning("Backend RAG callback error: %s", e)
 
 
+def _get_synapse_rag_status_url() -> str | None:
+    """POST /api/synapse/rag/status 호출 URL. 미설정 시 dwp_gateway_url + /api/synapse/rag/status."""
+    settings = get_settings()
+    url = getattr(settings, "synapse_rag_status_url", None) or ""
+    if url.strip():
+        return url.rstrip("/")
+    base = (getattr(settings, "dwp_gateway_url", None) or "").rstrip("/")
+    if not base:
+        return None
+    return f"{base}/api/synapse/rag/status"
+
+
+async def notify_synapse_rag_status(
+    status: str,
+    doc_id: str,
+    message: str | None = None,
+) -> bool:
+    """
+    청킹·벡터화 완료 시 Synapse에 상태 전달 (진행 중은 백엔드에서 관리).
+    POST /api/synapse/rag/status — body: { status: "COMPLETED", doc_id, message? }.
+
+    청킹 종료 시점에만 status=COMPLETED로 1회 호출.
+    """
+    url = _get_synapse_rag_status_url()
+    if not url or not doc_id:
+        return False
+    payload: dict[str, Any] = {"status": status, "doc_id": str(doc_id)}
+    if message:
+        payload["message"] = message
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(url, json=payload)
+            if r.status_code >= 400:
+                logger.warning("Synapse RAG status POST failed: %s %s", r.status_code, r.text)
+                return False
+            logger.debug("Synapse RAG status: %s doc_id=%s", status, doc_id)
+            return True
+    except Exception as e:
+        logger.warning("Synapse RAG status POST error: %s", e)
+        return False
+
+
 def _embedding_to_pgvector(embedding: list[float]) -> str:
     """[0.1, -0.2, ...] → '[0.1,-0.2,...]' for PostgreSQL vector literal."""
     return "[" + ",".join(str(float(x)) for x in embedding) + "]"
@@ -416,7 +461,8 @@ def _hierarchical_chunk_text(
         m_ar = _RE_ARTICLE.match(stripped)
         m_cl = _RE_CLAUSE.match(stripped)
         m_sub = _RE_SUB.match(stripped)
-        if not (m_ch or m_ar or m_cl or m_sub) and ("제" in stripped and ("조" in stripped or "항" in stripped)):
+        # 규정 헤딩처럼 보이는데(줄 시작이 제n장/제n조/n항 등) 상세 regex 미매칭일 때만 경고. 문장 중간 '조항' 등은 제외.
+        if not (m_ch or m_ar or m_cl or m_sub) and _RE_LOOKS_LIKE_HEADING.match(stripped):
             sample = (stripped[:200] + ("..." if len(stripped) > 200 else ""))
             logger.warning(
                 "hierarchical_chunk: regulation_article 추출 실패 — Regex 미매칭 라인 샘플 (doc_title=%s): %s",
@@ -658,13 +704,24 @@ def retrieve_rag_pgvector(
         title = row[6] if len(row) > 6 else None
         metadata_json = row[7] if len(row) > 7 else None
         score = float(row[8]) if len(row) > 8 else (0.9 - i * 0.05)
+        doc_id_val = row[0] if len(row) > 0 else None
+        chunk_index_val = row[1] if len(row) > 1 else None
+        chunk_id_from_meta = None
+        if isinstance(metadata_json, dict):
+            chunk_id_from_meta = metadata_json.get("chunk_id")
+        chunk_id_val = chunk_id_from_meta or (f"chunk_{doc_id_val}_{chunk_index_val}" if doc_id_val is not None and chunk_index_val is not None else None)
         item = {
             "content": content,
             "excerpt": (content[:400] if len(content) > 400 else content),
             "score": round(score, 2),
-            "rag_document_id": row[0] if len(row) > 0 else None,
+            "rag_document_id": doc_id_val,
+            "doc_id": doc_id_val,
+            "docId": doc_id_val,
+            "chunk_index": chunk_index_val,
+            "chunk_id": chunk_id_val,
+            "chunkId": chunk_id_val,
             "sourceType": "DOCUMENT",
-            "sourceKey": row[0] if len(row) > 0 else f"vec-{i}",
+            "sourceKey": doc_id_val if doc_id_val is not None else f"vec-{i}",
         }
         if isinstance(metadata_json, dict):
             if metadata_json.get("page_number") is not None:

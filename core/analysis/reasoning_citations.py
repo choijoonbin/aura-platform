@@ -98,6 +98,8 @@ def get_violation_clause_evidence(doc_list: list[dict[str, Any]], article: str, 
                     "location": location or f"규정 {a} {c}".strip(),
                     "excerpt": excerpt,
                     "content": content,
+                    "doc_id": doc.get("doc_id") or doc.get("docId") or doc.get("rag_document_id"),
+                    "chunk_id": doc.get("chunk_id") or doc.get("chunkId"),
                 }
     return None
 

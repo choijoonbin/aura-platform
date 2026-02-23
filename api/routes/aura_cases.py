@@ -35,6 +35,8 @@ router = APIRouter(prefix="/aura/cases", tags=["aura-cases"])
 
 # SSE 이벤트 간 최소 지연 (초)
 STREAM_EVENT_DELAY = 0.15
+# 백그라운드 분석 완료 후 큐 삭제 전 대기 시간 (BE 프록시가 completed 수신할 시간 확보)
+QUEUE_REMOVAL_DELAY_SEC = 2.0
 
 
 def _format_case_sse_event(ev: CaseStreamEvent) -> str:
@@ -189,6 +191,22 @@ async def _run_analysis_background(
             agent_config=config,
         ):
             put_event(run_id, event_type, payload)
+            # 독백 이중화: thought_stream 또는 AGENT_STREAM content를 agent/events에도 푸시 (message·reasoning에 실시간 독백 반영)
+            thought_content = payload.get("thought_stream") if event_type == "step" else payload.get("content") if event_type == "AGENT_STREAM" else None
+            if thought_content:
+                try:
+                    from core.audit.schemas import AgentAuditEvent
+                    from core.audit.writer import get_audit_writer
+                    ev = AgentAuditEvent.reasoning_composed(
+                        tenant_id=tenant_id,
+                        case_id=case_id,
+                        actor_agent_id=config.agent_id if config else "finance_agent",
+                        trace_id=f"trace-{case_id}-{run_id[:8]}",
+                        message=thought_content,
+                    )
+                    get_audit_writer().ingest_fire_and_forget(ev)
+                except Exception as e:
+                    logger.debug("Agent stream push (thought_stream/AGENT_STREAM) skipped: %s", e)
             if event_type in ("completed", "failed"):
                 break
 
@@ -227,8 +245,8 @@ async def _run_analysis_background(
             version=config.version if config else "1.0",
         )
     finally:
-        # 스트림이 proposal·completed 수신할 시간 확보 (레이스 컨디션 방지)
-        await asyncio.sleep(2.0)
+        # 스트림이 completed/failed 수신할 시간 확보 (BE 프록시 연결 지연 대비)
+        await asyncio.sleep(QUEUE_REMOVAL_DELAY_SEC)
         remove_queue(run_id)
 
 
@@ -284,16 +302,26 @@ async def case_analysis_stream(
     감사 분석 스트림 (SSE)
 
     GET /aura/cases/{caseId}/analysis/stream?runId={runId}
-    started → step → evidence → confidence → proposal → completed | failed
+    runId는 쿼리 스트링 필수. UUID/문자열 그대로 run_store에 전달.
+    started → thought_pending → AGENT_STREAM → step → ... → completed | failed → data: [DONE]
     """
-    run_id = runId
+    run_id = (coerce_case_run_id(runId) or "").strip()
+    if not run_id:
+        logger.warning("case_analysis_stream: runId missing or empty case_id=%s", case_id)
+        return JSONResponse(
+            status_code=400,
+            content={"error": "runId is required", "runId": None},
+        )
     if not queue_exists(run_id):
         logger.info(
             "case_analysis_stream: runId not found or already completed run_id=%s case_id=%s",
-            run_id,
+            run_id[:8],
             case_id,
         )
-        return {"error": "runId not found or already completed", "runId": run_id}
+        return JSONResponse(
+            status_code=404,
+            content={"error": "runId not found or already completed", "runId": run_id},
+        )
 
     logger.info("case_analysis_stream: start consuming run_id=%s case_id=%s", run_id, case_id)
 
@@ -399,6 +427,22 @@ async def case_analysis_trigger(
                 agent_config=config,
             ):
                 yield format_sse_line(event_type, payload)
+                # 독백 이중화: thought_stream 또는 AGENT_STREAM content를 agent/events에도 푸시
+                thought_content = payload.get("thought_stream") if event_type == "step" else payload.get("content") if event_type == "AGENT_STREAM" else None
+                if thought_content:
+                    try:
+                        from core.audit.schemas import AgentAuditEvent
+                        from core.audit.writer import get_audit_writer
+                        ev = AgentAuditEvent.reasoning_composed(
+                            tenant_id=tenant_id or "1",
+                            case_id=case_id,
+                            actor_agent_id=config.agent_id if config else "finance_agent",
+                            trace_id=f"trace-{case_id}-trigger",
+                            message=thought_content,
+                        )
+                        get_audit_writer().ingest_fire_and_forget(ev)
+                    except Exception as e:
+                        logger.debug("Agent stream push (thought_stream/AGENT_STREAM) skipped: %s", e)
                 await asyncio.sleep(STREAM_EVENT_DELAY)
         except Exception as e:
             logger.exception(f"Audit analysis trigger failed: {e}")

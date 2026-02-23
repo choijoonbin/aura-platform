@@ -81,10 +81,10 @@ Content-Type: application/json
 |----------|------|
 | 스키마 | `core/agent_stream/schemas.py` |
 | Writer | `core/agent_stream/writer.py` |
-| Audit 연동 | `core/audit/writer.py` - ingest_fire_and_forget 시 자동 emit |
+| Audit 연동 | `core/audit/writer.py` - 에이전트 스트림(REASONING_COMPOSED)만 ingest_fire_and_forget 시 emit, 감사 이벤트는 Redis만 |
 | 샘플 시드 | `scripts/seed_agent_stream_events.py` |
 
-**Audit → Agent Stream 변환**: Audit 이벤트 발행 시 자동으로 AgentEvent로 변환하여 push.
+**Audit → Agent Stream**: 에이전트 스트림 이벤트(REASONING_COMPOSED)만 AgentEvent로 변환해 REST push; 동일 이벤트는 Redis로 보내지 않음. 감사 이벤트(RAG_QUERIED, SCAN_* 등)는 Redis만 사용.
 
 ---
 

@@ -20,6 +20,6 @@ SSE_HEADERS = {
 def format_sse_line(event_type: str, payload: dict[str, Any]) -> str:
     """
     SSE 한 줄 형식: event + data (ensure_ascii=False).
-    analysis-runs, cases run stream 등 공통 포맷용.
+    event_type은 그대로 "event:" 라인에 사용 (예: thought_pending, AGENT_STREAM, step).
     """
     return f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"

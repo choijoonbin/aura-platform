@@ -22,12 +22,14 @@ def get_or_create_queue(run_id: str) -> asyncio.Queue[tuple[str, dict[str, Any]]
 
 
 def put_event(run_id: str, event_type: str, payload: dict[str, Any]) -> None:
-    """이벤트 큐에 추가 (non-blocking)"""
+    """이벤트 큐에 추가 (non-blocking). thought_pending/AGENT_STREAM/step 등이 동일 runId 큐에 적재됨."""
     q = get_or_create_queue(run_id)
     try:
         q.put_nowait((event_type, payload))
+        if event_type in ("thought_pending", "AGENT_STREAM", "step"):
+            logger.debug("run_store: put_event run_id=%s event_type=%s", run_id[:8] if run_id else "", event_type)
     except asyncio.QueueFull:
-        logger.warning(f"Run {run_id} event queue full, dropping event {event_type}")
+        logger.warning("Run %s event queue full, dropping event %s", run_id[:8] if run_id else "", event_type)
 
 
 def remove_queue(run_id: str) -> None:
@@ -37,7 +39,11 @@ def remove_queue(run_id: str) -> None:
 
 
 async def get_event(run_id: str, timeout: float = 300.0) -> tuple[str, dict[str, Any]] | None:
-    """큐에서 이벤트 조회 (timeout 초 대기)"""
+    """
+    큐에서 이벤트 조회 (timeout 초 대기).
+    큐가 이미 삭제되었으면 None 반환(스트림은 [DONE] 후 종료).
+    타임아웃 시에도 None 반환하여 스트림이 무한 대기하지 않도록 함.
+    """
     if run_id not in _run_queues:
         return None
     try:

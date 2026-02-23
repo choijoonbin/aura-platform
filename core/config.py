@@ -111,6 +111,11 @@ class Settings(BaseSettings):
         default=None,
         description="청크 배치 저장 URL. {doc_id} 플레이스홀더 사용 가능. 예: https://backend/api/rag/documents/{doc_id}/chunks",
     )
+    # 청킹/벡터화 완료 시 Synapse에 상태 전달 (POST /api/synapse/rag/status, 진행 중은 백엔드 관리)
+    synapse_rag_status_url: str | None = Field(
+        default=None,
+        description="RAG 상태 전달 URL (미지정 시 dwp_gateway_url + /api/synapse/rag/status). 청킹 종료 시 COMPLETED 1회만 호출.",
+    )
     chroma_persist_dir: str = Field(
         default="./data/chroma",
         description="Chroma persistence directory (vector_store_type=chroma)",

@@ -20,6 +20,11 @@ logger = logging.getLogger(__name__)
 
 AUDIT_CHANNEL = getattr(settings, "audit_redis_channel", "audit:events:ingest")
 
+# 에이전트 스트림(thought/AGENT_STREAM/step) 전용 이벤트 → REST만 사용, Redis로 보내지 않음 (AURA_CASE_PER_CALL_PROMPT)
+# 현재 thought/스트림 내용은 모두 reasoning_composed()로만 발행되며 event_type="AGENT/REASONING_COMPOSED" 사용.
+# SSE 이벤트 이름(thought_pending, AGENT_STREAM, step)이 추후 AuditEvent.event_type으로 쓰일 경우를 대비해 함께 포함.
+AGENT_STREAM_ONLY_EVENT_TYPES = ("REASONING_COMPOSED", "AGENT_STREAM", "step", "thought_pending")
+
 
 def _get_audit_url() -> str:
     """Audit API URL (audit_delivery_mode=http 시)"""
@@ -153,17 +158,26 @@ class AuditWriter:
         """
         비동기 전송 (블로킹 없음)
         백그라운드 태스크로 실행.
-        Agent Stream push도 함께 수행 (Prompt C: agent_stream_events_enabled 시).
+
+        케이스별 호출 규칙 (AURA_CASE_PER_CALL_PROMPT):
+        - 에이전트 스트림(thought/AGENT_STREAM/step, REASONING_COMPOSED): REST만 사용 → emit_from_audit만 호출, Redis 미발행.
+        - 그 외 감사 이벤트(RAG_QUERIED, SCAN_* 등): Redis만 사용 → _safe_ingest만 호출, REST agent/events 미호출.
+        동일 이벤트를 REST와 Redis 양쪽에 보내지 않음.
         """
         if not self._enabled:
             return
+        et = getattr(event, "event_type", "") or ""
+        is_agent_stream_only = any(t in et for t in AGENT_STREAM_ONLY_EVENT_TYPES)
+        if is_agent_stream_only:
+            # 에이전트 스트림 → REST만 (동일 내용 Redis로 보내지 않음)
+            try:
+                from core.agent_stream.writer import get_agent_stream_writer
+                get_agent_stream_writer().emit_from_audit(event)
+            except Exception as e:
+                logger.debug(f"Agent stream emit skipped: {e}")
+            return
+        # 감사 이벤트 → Redis(또는 HTTP audit)만
         asyncio.create_task(self._safe_ingest(event))
-        # Prompt C: Audit 발행 시 Agent Stream에도 push
-        try:
-            from core.agent_stream.writer import get_agent_stream_writer
-            get_agent_stream_writer().emit_from_audit(event)
-        except Exception as e:
-            logger.debug(f"Agent stream emit skipped: {e}")
 
     async def _safe_ingest(self, event: AuditEvent) -> None:
         try:

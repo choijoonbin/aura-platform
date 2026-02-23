@@ -17,7 +17,11 @@ from fastapi import APIRouter, File, Form, UploadFile, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
-from core.analysis.rag import process_and_vectorize, validate_local_document_path
+from core.analysis.rag import (
+    process_and_vectorize,
+    validate_local_document_path,
+    notify_synapse_rag_status,
+)
 from core.config import get_settings
 from core.synapse_schema import DOC_TYPE_REGULATION, DOC_TYPE_HIERARCHICAL, DOC_TYPE_GENERAL
 
@@ -245,7 +249,9 @@ async def rag_documents_vectorize(
         "RAG vectorize chunks ready: doc_id=%s num_chunks=%s save_url_set=%s (BE expects response keys: rag_document_id, total_chunks|batches, batches_sent, batch_size)",
         doc_id, len(chunks), bool(save_url),
     )
-    return _build_vectorize_response(rag_document_id, chunks, batch_size, save_url)
+    response = _build_vectorize_response(rag_document_id, chunks, batch_size, save_url)
+    await notify_synapse_rag_status("COMPLETED", rag_document_id, "청킹·벡터화 완료")
+    return response
 
 
 @router.post(
@@ -287,7 +293,9 @@ async def rag_ingest_from_path(body: IngestFromPathRequest) -> JSONResponse:
         )
     batch_size = getattr(settings, "rag_chunk_batch_size", 30)
     save_url = getattr(settings, "backend_rag_chunks_save_url", None) or None
-    return _build_vectorize_response(result["rag_document_id"], result["chunks"], batch_size, save_url)
+    response = _build_vectorize_response(result["rag_document_id"], result["chunks"], batch_size, save_url)
+    await notify_synapse_rag_status("COMPLETED", doc_id, "청킹·벡터화 완료")
+    return response
 
 
 @router.post(
@@ -333,7 +341,9 @@ async def rag_ingest(
         settings = get_settings()
         batch_size = getattr(settings, "rag_chunk_batch_size", 30)
         save_url = getattr(settings, "backend_rag_chunks_save_url", None) or None
-        return _build_vectorize_response(result["rag_document_id"], result["chunks"], batch_size, save_url)
+        response = _build_vectorize_response(result["rag_document_id"], result["chunks"], batch_size, save_url)
+        await notify_synapse_rag_status("COMPLETED", doc_id, "청킹·벡터화 완료")
+        return response
     finally:
         try:
             if tmp_path.exists():

@@ -20,8 +20,18 @@ def _build_final_result(audit_result: dict[str, Any]) -> dict[str, Any]:
     audit_result → BE finalResult.
     백엔드 case_analysis_result 테이블 저장 규격에 맞춤.
     필수 필드: violation_clause, risk_score, reasoning_summary, recommended_action, citations[].
+    V65: doc_id, item_id, chunk_id, target_buzei 반드시 snake_case로 고정.
+    decision_reason: Universal Compliance Auditor 규격(Reason + Evidence JSON) 강제.
     """
     score = audit_result.get("score", 0)
+    # decision_reason: 구조화된 인사이트(Reason + Evidence JSON) — 단순 텍스트 대신 사용
+    decision_reason = audit_result.get("decision_reason")
+    if not decision_reason or not isinstance(decision_reason, dict):
+        decision_reason = {
+            "reason": audit_result.get("reasoning_summary", audit_result.get("reasonText", "")),
+            "evidence": {},
+            "citations": audit_result.get("citations", []),
+        }
     return {
         "score": score,
         "severity": audit_result.get("severity", "MEDIUM"),
@@ -47,6 +57,14 @@ def _build_final_result(audit_result: dict[str, Any]) -> dict[str, Any]:
         "reasoning_summary": audit_result.get("reasoning_summary", audit_result.get("reasonText", "")),
         "recommended_action": audit_result.get("recommended_action", ""),
         "citations": audit_result.get("citations", []),
+        # 최종 결과 고도화: 구조화된 인사이트 (Reason + Evidence JSON)
+        "decision_reason": decision_reason,
+        # V65 스키마: 문서·행·청크 식별 — snake_case 고정 (BE 저장 일치)
+        "doc_id": audit_result.get("doc_id"),
+        "item_id": audit_result.get("item_id"),
+        "chunk_id": audit_result.get("chunk_id"),
+        "target_buzei": audit_result.get("target_buzei"),
+        "item_no": audit_result.get("item_no"),
     }
 
 

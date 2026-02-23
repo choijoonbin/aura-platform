@@ -114,16 +114,20 @@ def _audit_event_to_agent_event(audit_event: Any) -> AgentEvent:
             pass
     action_id = ev.get("actionId") or (rid if rt == "AGENT_ACTION" else None)
 
-    # metadata_json 규격 강제: format_metadata 사용
+    # metadata_json 규격 강제: format_metadata 사용 (insight_summary, logical_step, visual_hint 지원)
     outcome = data.get("outcome", "")
     severity = data.get("severity", "INFO")
     status = _severity_to_metadata_status(severity, outcome)
-    evidence = {k: v for k, v in ev.items() if k not in ("message", "caseKey", "caseId", "traceId", "actionId")}
+    # evidence에서 에이전트 추론 고도화 필드는 metadata 최상위로 전달, 나머지는 evidence 유지
+    evidence = {k: v for k, v in ev.items() if k not in ("message", "caseKey", "caseId", "traceId", "actionId", "insight_summary", "logical_step", "visual_hint")}
     metadata_json = format_metadata(
         title=_stage_to_title(stage, event_type),
         reasoning=str(message),
         evidence=evidence,
         status=status,
+        insight_summary=ev.get("insight_summary"),
+        logical_step=ev.get("logical_step"),
+        visual_hint=ev.get("visual_hint"),
     )
 
     return AgentEvent(

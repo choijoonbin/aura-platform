@@ -80,7 +80,7 @@ def get_auditor_prompt(domain: str = "finance", **kwargs: Any) -> str:
     domain_normalized = domain.lower().strip()
     domain_display = domain_normalized.upper()  # 표시용
     
-    # 기본 프롬프트 조합
+    # 기본 프롬프트 조합 (에이전트 추론·인사이트 생성: internal_monologue, data_interpretation, agent_activity_log_metadata 포함)
     sections = [
         prompts.get("system_role", ""),
         prompts.get("context_reconstruction", ""),
@@ -88,6 +88,9 @@ def get_auditor_prompt(domain: str = "finance", **kwargs: Any) -> str:
         prompts.get("output_format", ""),
         prompts.get("citation_rules", ""),
         prompts.get("professional_judgment", ""),
+        prompts.get("internal_monologue", ""),
+        prompts.get("data_interpretation_personification", ""),
+        prompts.get("agent_activity_log_metadata", ""),
         prompts.get("thought_stream_template", ""),
     ]
     

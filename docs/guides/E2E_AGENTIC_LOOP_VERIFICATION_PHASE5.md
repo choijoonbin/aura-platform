@@ -12,7 +12,7 @@
 | **search_documents / get_document / get_lineage / get_open_items** | `_emit_audit_event` 내 예외 | 해당 RAG/evidence 감사 미발행 (except pass) |
 | **hooks (scan_started, scan_completed, reasoning_composed)** | `_emit_audit` 내 예외 또는 context에 case_id 없음(reasoning_composed) | 해당 Audit 미발행; reasoning은 case_id 있을 때만 발행 |
 | **tools (simulate, propose, execute, sap_*)** | `_emit_audit_event` 내 예외 | 해당 액션 감사 미발행 |
-| **AuditWriter.ingest_fire_and_forget** | Agent Stream `emit_from_audit` 예외 | Redis/HTTP는 시도되나 Agent Stream push만 스킵(debug 로그) |
+| **AuditWriter.ingest_fire_and_forget** | REASONING_COMPOSED: emit_from_audit 예외 시 REST push만 스킵(debug 로그). 그 외: _safe_ingest 예외 시 Redis/HTTP 스킵 |
 | **트리거** | 중복(caseId+updated_at) 또는 auto-start 조건 미충족 | 에이전트 미실행 → 해당 케이스에 대한 로그 전부 없음 |
 | **Phase2 분석** | `DEMO_OFF` 환경변수 | 분석 비활성 → Phase2 경로 로그 없음 |
 | **HITL** | 사용자 거부/타임아웃 후 재개 없음 | execute/approval 관련 로그 없음 |
@@ -63,7 +63,9 @@ set_request_context(tenant_id, case_id, case_key, policy_config_source, policy_p
 [Hooks] analyze 시작 → scan_started 감사
         tools 종료 / reflect → scan_completed, reasoning_composed 감사 (policy_reference 포함)
         ↓
-[AuditWriter] ingest_fire_and_forget → Redis publish + Agent Stream emit_from_audit
+[AuditWriter] ingest_fire_and_forget → 이벤트 타입별 분기:
+  - REASONING_COMPOSED(에이전트 스트림): Agent Stream emit_from_audit만 → REST agent/events (Redis 미발행)
+  - 그 외 감사 이벤트: Redis publish만 (agent/events 미호출)
         ↓
 [Agent Stream Writer] _audit_event_to_agent_event → format_metadata(title, reasoning, evidence, status)
         ↓

@@ -30,6 +30,15 @@ def _case_context(state: dict[str, Any]) -> tuple[str | None, str | None]:
     return case_id, case_key
 
 
+async def _thought_content_async(node_name: str, state: dict[str, Any]) -> str:
+    """
+    LLM이 현재 컨텍스트(state)를 바탕으로 실시간 추론 문장을 생성합니다.
+    미리 짜인 대본이 아니라, 이 순간 전표를 고민하는 문장을 반환합니다.
+    """
+    from core.analysis.thought_stream import generate_thought_stream
+    return await generate_thought_stream(node_name, state=state)
+
+
 def _apply_case_resource(event: Any, state: dict[str, Any]) -> None:
     """
     context에 case_id가 있으면 모든 agent_activity_log 생성 시 resource_type='CASE', resource_id=case_id 자동 설정.
@@ -83,10 +92,11 @@ class FinanceSSEHook:
             except Exception:
                 pass
             evidence_refs = [{"type": e.get("type"), "source": e.get("source"), "ref": e.get("ref")} for e in state.get("evidence", [])]
+            content = await _thought_content_async("analyze", state)
             self.event_queue.append(
                 ThoughtEvent(
                     thoughtType=ThoughtType.ANALYSIS,
-                    content="케이스 목표 및 컨텍스트 분석을 시작합니다.",
+                    content=content,
                     sources=[e.get("source", "") for e in state.get("evidence", [])],
                     metadata={"evidence_refs": evidence_refs} if evidence_refs else {},
                     step="ANALYSIS",
@@ -96,10 +106,11 @@ class FinanceSSEHook:
         elif node_name == "evidence_gather":
             evidence_refs = [{"type": e.get("type"), "source": e.get("source"), "ref": e.get("ref")} for e in state.get("evidence", [])]
             ref_summary = ", ".join(e.get("source", "") for e in state.get("evidence", [])) or "없음"
+            content = await _thought_content_async("evidence_gather", state)
             self.event_queue.append(
                 ThoughtEvent(
                     thoughtType=ThoughtType.ANALYSIS,
-                    content=f"사내 규정집 및 케이스 데이터에서 관련 조항·증거를 탐색 중입니다.",
+                    content=content,
                     sources=[e.get("source", "") for e in state.get("evidence", [])],
                     metadata={"evidence_refs": evidence_refs} if evidence_refs else {},
                     step="INTERNAL_POLICY_LOOKUP",
@@ -108,10 +119,11 @@ class FinanceSSEHook:
             )
         elif node_name == "plan":
             evidence_refs = [{"type": e.get("type"), "source": e.get("source"), "ref": e.get("ref")} for e in state.get("evidence", [])]
+            content = await _thought_content_async("plan", state)
             self.event_queue.append(
                 ThoughtEvent(
                     thoughtType=ThoughtType.PLANNING,
-                    content="조사 및 조치 계획을 수립합니다.",
+                    content=content,
                     sources=[e.get("source", "") for e in state.get("evidence", [])],
                     metadata={"evidence_refs": evidence_refs} if evidence_refs else {},
                     step="PLANNING",
@@ -119,10 +131,11 @@ class FinanceSSEHook:
                 ).model_dump()
             )
         elif node_name == "execute":
+            content = await _thought_content_async("execute", state)
             self.event_queue.append(
                 ThoughtEvent(
                     thoughtType=ThoughtType.REASONING,
-                    content="규정과 대조하여 판단 근거를 작성합니다. (도구 선택 및 실행 준비)",
+                    content=content,
                     sources=[],
                     step="FINAL_SYNTHESIS",
                     evidence=None,
@@ -142,10 +155,11 @@ class FinanceSSEHook:
                 )
         elif node_name == "reflect":
             evidence_refs = [e.get("source", "") for e in state.get("evidence", [])]
+            content = await _thought_content_async("reflect", state)
             self.event_queue.append(
                 ThoughtEvent(
                     thoughtType=ThoughtType.REFLECTION,
-                    content="조사 결과를 검토하고 최종 판단 근거를 정리합니다.",
+                    content=content,
                     sources=evidence_refs,
                     step="REFLECTION",
                     evidence=", ".join(evidence_refs) if evidence_refs else None,
