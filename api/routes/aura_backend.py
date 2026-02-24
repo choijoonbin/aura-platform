@@ -16,7 +16,7 @@ from fastapi import APIRouter, Header, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
-from api.dependencies import CurrentUser, TenantId
+from api.dependencies import CurrentUser, OptionalUser, TenantId
 from api.sse_utils import SSE_HEADERS
 from api.schemas.events import (
     SSE_EVENT_PAYLOAD_VERSION,
@@ -33,6 +33,7 @@ from api.schemas.events import (
 )
 from api.schemas.hitl_events import HITLEvent
 from core.action_integrity import record_case_action
+from core.security.auth import User
 from core.memory.hitl_manager import get_hitl_manager
 from domains.dev.agents.enhanced_agent import get_enhanced_agent
 from domains.dev.agents.hooks import create_sse_hook
@@ -150,7 +151,7 @@ def format_sse_event(event_type: str, data: dict[str, Any], event_id: str | None
 @router.post("/test/stream")
 async def backend_stream(
     request: BackendStreamRequest,
-    user: CurrentUser,
+    user: OptionalUser,
     tenant_id: TenantId,
     x_dwp_source: str | None = Header(None, alias="X-DWP-Source"),
     x_dwp_caller_type: str | None = Header(None, alias="X-DWP-Caller-Type"),
@@ -160,6 +161,7 @@ async def backend_stream(
     """
     백엔드 연동용 SSE 스트리밍 엔드포인트 (POST)
     
+    인증이 없을 때(테스트/데모) 기본 사용자(user_id=test, tenant_id=1)로 동작합니다.
     Gateway를 통한 접근: POST /api/aura/test/stream
     실제 경로: POST /aura/test/stream
     
@@ -183,10 +185,13 @@ async def backend_stream(
     - HITL 이벤트 전송 시 실행 중지 및 Redis Pub/Sub 대기
     - Last-Event-ID 헤더 지원: 재연결 시 중단 지점부터 재개 (이벤트 ID 기반)
     """
+    effective_user = user or User(user_id="test", tenant_id="1", role="user")
+    effective_tenant_id = tenant_id or effective_user.tenant_id or "1"
+
     async def event_generator():
         """SSE 이벤트 생성기 (백엔드 요구사항 준수)"""
         # X-User-ID 헤더 검증 (백엔드 요구사항: JWT sub와 일치해야 함)
-        if x_user_id and x_user_id != user.user_id:
+        if x_user_id and x_user_id != effective_user.user_id:
             logger.warning(
                 f"User ID mismatch: JWT sub={user.user_id}, X-User-ID header={x_user_id}"
             )
@@ -194,7 +199,7 @@ async def backend_stream(
                 "type": "error",
                 "error": "User ID mismatch",
                 "errorType": "ValidationError",
-                "message": f"X-User-ID header ({x_user_id}) does not match JWT sub claim ({user.user_id})",
+                "message": f"X-User-ID header ({x_user_id}) does not match JWT sub claim ({effective_user.user_id})",
                 "timestamp": int(datetime.utcnow().timestamp()),
             }
             yield format_sse_event("error", error_data, "0")
@@ -202,7 +207,7 @@ async def backend_stream(
             return
         
         event_queue: list[dict[str, Any]] = []
-        session_id = f"session_{user.user_id}_{int(datetime.utcnow().timestamp())}"
+        session_id = f"session_{effective_user.user_id}_{int(datetime.utcnow().timestamp())}"
         
         # 이벤트 ID 카운터 (재연결 지원)
         event_id_counter = 0
@@ -237,7 +242,7 @@ async def backend_stream(
             hook = create_sse_hook(event_queue)
             
             # Thread ID 생성
-            thread_id = request.thread_id or f"{user.user_id}_{tenant_id}_{int(datetime.utcnow().timestamp())}"
+            thread_id = request.thread_id or f"{effective_user.user_id}_{effective_tenant_id}_{int(datetime.utcnow().timestamp())}"
             
             # 컨텍스트 병합 (요청의 context와 헤더 정보)
             merged_context = {
@@ -258,8 +263,8 @@ async def backend_stream(
             # 에이전트 스트리밍 실행 (prompt 사용)
             async for graph_event in agent.stream(
                 user_input=request.prompt,
-                user_id=user.user_id,
-                tenant_id=tenant_id,
+                user_id=effective_user.user_id,
+                tenant_id=effective_tenant_id,
                 context=merged_context,
                 thread_id=thread_id,
             ):
@@ -295,8 +300,8 @@ async def backend_stream(
                                 session_id=session_id,
                                 action_type=approval["toolName"],
                                 context=approval["toolArgs"],
-                                user_id=user.user_id,
-                                tenant_id=tenant_id,
+                                user_id=effective_user.user_id,
+                                tenant_id=effective_tenant_id,
                             )
                             
                             # HITL 이벤트 발행 (백엔드 요구 형식)

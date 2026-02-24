@@ -211,7 +211,9 @@ data: <JSON payload>
 
 - `error`: 항상 **string** (예: `str(exception)`).
 - `stage`: string (발생 단계 식별용).
-- `{ "message", "stage" }` 형태가 아니라 **`{ "error", "stage" }`** 객체로 고정.
+- **FE 요구**: `event: failed` 를 보낼 때 **반드시 한 줄 이상의 `data`** 를 함께 보냄. `data` 를 비우면 FE는 "서버에서 상세 사유 미전달"로 처리함. FE는 `data` 의 **error**(문자열) 또는 **message**(문자열), 필요 시 **stage** 를 파싱해 사용자에게 표시.
+- **Aura 구현**: `api/sse_utils.py` 의 `format_sse_line("failed", payload)` 호출 시 `_normalize_failed_payload` 로 payload를 정규화하여, 비어 있거나 `error`/`message` 가 없으면 `message: "분석 실패"`, `stage: "pipeline"` 을 보강함. Phase3 등에서 `error` 가 객체(`{ "message", "stage" }`)인 경우 최상위 `message`, `stage`, `error`(문자열)로 풀어서 전송.
+- `{ "message", "stage" }` 형태도 FE가 파싱 가능하므로, **`error`(문자열) 또는 `message`(문자열) 중 하나 이상**이 포함되면 됨.
 
 ---
 

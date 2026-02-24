@@ -47,6 +47,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
     EXEMPT_PATTERNS = [
         "/aura/agents/",  # 백엔드에서 호출하는 refresh 엔드포인트 (B2B 통신)
         "/api/aura/agents/",  # 게이트웨이를 통한 경로
+        "/aura/test/stream",  # 테스트/데모용 스트림 (OptionalUser로 처리, 토큰 없이 호출 가능)
     ]
     
     async def dispatch(

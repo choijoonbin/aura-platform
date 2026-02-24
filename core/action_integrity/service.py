@@ -128,6 +128,8 @@ async def record_case_action(
         try:
             store = await get_redis_store()
             payload_str = json.dumps(payload, ensure_ascii=False)
+            from core.notifications import _log_redis_publish
+            _log_redis_publish(channel, payload)
             await store.client.publish(channel, payload_str.encode("utf-8"))
             logger.info("HITL feedback logged and published: case_id=%s approved=%s channel=%s", case_id, approved, channel)
         except Exception as e:

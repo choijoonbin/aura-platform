@@ -130,8 +130,8 @@ class AuditWriter:
         try:
             from core.memory.redis_store import get_redis_store
             store = await get_redis_store()
-            # Redis PUBLISH: decode_responses=False인 client는 bytes 필요
             channel = self._redis_channel
+            logger.info("Redis publish: channel=%s data=%s", channel, payload_str[:500] + ("..." if len(payload_str) > 500 else ""))
             await store.client.publish(channel, payload_str.encode("utf-8"))
             return True
         except Exception as e:

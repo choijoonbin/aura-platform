@@ -166,6 +166,12 @@ async def case_updated_webhook(
         logger.warning(f"Trigger dedup check failed: {e}")
 
     if _should_auto_start(severity, status_val):
+        try:
+            from core.notifications import publish_analysis_started
+            run_id_trigger = f"trigger-{case_id}-{trace_id[:8]}"
+            asyncio.create_task(publish_analysis_started(case_id, run_id_trigger))
+        except Exception as e:
+            logger.debug("Redis ANALYSIS_STARTED publish skipped: %s", e)
         asyncio.create_task(
             _run_finance_agent_background(
                 case_id=case_id,

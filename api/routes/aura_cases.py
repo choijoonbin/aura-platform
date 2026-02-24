@@ -273,13 +273,18 @@ async def case_analysis_runs(
 
     get_or_create_queue(run_id)
     x_sandbox = request.headers.get("X-Sandbox")
+    stream_url = f"/aura/analysis-runs/{run_id}/stream"
+    try:
+        from core.notifications import publish_analysis_started
+        asyncio.create_task(publish_analysis_started(case_id, run_id, stream_url=stream_url))
+    except Exception as e:
+        logger.debug("Redis ANALYSIS_STARTED publish skipped: %s", e)
     asyncio.create_task(_run_analysis_background(
         case_id, run_id, tenant_id_val, auth_token,
         body_evidence=body.evidence,
         x_sandbox=x_sandbox,
     ))
 
-    stream_url = f"/aura/analysis-runs/{run_id}/stream"
     return JSONResponse(
         status_code=202,
         content={
@@ -412,7 +417,13 @@ async def case_analysis_trigger(
 
         try:
             from core.analysis.agent_factory import select_agent_for_request
-            
+            run_id_trigger = f"trigger-{case_id}-{uuid.uuid4().hex[:8]}"
+            try:
+                from core.notifications import publish_analysis_started
+                await publish_analysis_started(case_id, run_id_trigger, stream_url=f"/aura/cases/{case_id}/analysis/stream?runId={run_id_trigger}")
+            except Exception as e:
+                logger.debug("Redis ANALYSIS_STARTED publish skipped: %s", e)
+
             # Discovery + Selection: 사용자 요청 분석하여 적절한 에이전트 선택
             agent_id_val = await select_agent_for_request(
                 user_query=None,  # 케이스 분석이므로 컨텍스트 기반 선택

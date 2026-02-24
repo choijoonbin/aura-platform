@@ -51,6 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **신규 탐지**: Phase2에서 severity=HIGH 케이스 생성 시 `workbench:alert` 채널로 "신규 이상 징후 탐지" 발행 (`workbench_alert_channel`)
 
 ### Changed
+- **Redis 이벤트 발행 규격 준수 (BE NotificationType)** (2026-02-20)
+  - **이벤트 type 상수화**: Redis 발행 시 `type` 필드를 BE NotificationType Enum 명칭과 대소문자 일치하도록 상수 사용. `NOTIFICATION_TYPE_ANALYSIS_STARTED`, `NOTIFICATION_TYPE_AI_DETECT`, `NOTIFICATION_TYPE_RAG_STATUS`, `NOTIFICATION_TYPE_CASE_ACTION` (기존 category 값과 동일, type/category 모두 동일 값으로 설정).
+  - **Redis 발행 로그**: `publish_workbench_notification`/`publish_workbench_notification_sync`, `AuditWriter._ingest_via_redis`, `record_case_action` 내 Redis publish 직전에 채널명·데이터 내용 로그 추가 (`Redis publish: channel=... type=... data=...`).
+  - **분석 시작 Redis 알림**: 데모/트리거 포함 분석 비동기 시작 시 `workbench:case:action` 채널로 `type=ANALYSIS_STARTED` 이벤트 발행. 적용 위치: `POST /aura/cases/{caseId}/analysis-runs` 수신 직후, `POST /aura/cases/{caseId}/analysis/trigger` 스트림 시작 시, `POST /aura/triggers/case-updated` 자동 시작 시.
 - **Aura 케이스별 호출 규칙 적용 (AURA_CASE_PER_CALL_PROMPT)** (2026-02-20)
   - **에이전트 스트림(thought/AGENT_STREAM/step)**: REST만 사용 — `REASONING_COMPOSED` 이벤트는 `POST /api/synapse/agent/events`로만 전송, 동일 내용을 Redis `audit:events:ingest`로 보내지 않음.
   - **감사 이벤트(RAG_QUERIED, SCAN_* 등)**: Redis(또는 HTTP audit)만 사용 — agent/events REST 호출하지 않음.
