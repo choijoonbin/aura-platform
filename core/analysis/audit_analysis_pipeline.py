@@ -47,6 +47,51 @@ TOTAL_ANALYSIS_STEPS = 5
 # 2단계 스트리밍: LLM 독백 생성 전에 먼저 던지는 이벤트 메시지 (FE에서 "Thinking..." 또는 타이핑 효과 표시용)
 THOUGHT_PENDING_MESSAGE = "생각 중..."
 
+# 기술 단계(INPUT_NORM 등) 독백: 사용자 피로도 감소를 위해 아주 짧게 (work.txt 품질 유지는 REGULATION_MATCH·RULE_SCORING·LLM_REASONING 등에서)
+INPUT_NORM_THOUGHT_SHORT = "데이터 정밀 분석 중"
+
+
+def _coords_payload(id_mapping: dict[str, Any]) -> dict[str, Any]:
+    """thought_pending / AGENT_STREAM / step 모든 이벤트에 누락 없이 넣을 좌표 (target_buzei, chunk_id, doc_id)."""
+    return {
+        "target_buzei": id_mapping.get("target_buzei"),
+        "chunk_id": id_mapping.get("chunk_id"),
+        "doc_id": id_mapping.get("doc_id"),
+    }
+
+
+def _build_evidence_map_json(
+    evidence_items: list[dict[str, Any]],
+    target_buzei: str | None,
+    doc_id: str | None,
+) -> list[dict[str, Any]]:
+    """전표 행(buzei) ↔ 규정 chunk_id 1:1 매핑 배열. FE/BE 좌표 하이라이트 및 감사 추적용."""
+    out: list[dict[str, Any]] = []
+    buzei = (str(target_buzei).strip() or None) if target_buzei is not None else None
+    for e in evidence_items:
+        if not isinstance(e, dict):
+            continue
+        cid = e.get("chunk_id") or e.get("chunkId")
+        if not cid:
+            continue
+        cid = str(cid).strip()
+        # 동일 (buzei, chunk_id) 중복 제거
+        row = {"target_buzei": buzei, "chunk_id": cid, "doc_id": doc_id}
+        if row not in out:
+            out.append(row)
+    if not out and (buzei or doc_id):
+        # 단일 행/문서인 경우 한 건이라도 넣기
+        chunk_id_ref = None
+        for e in evidence_items:
+            if isinstance(e, dict):
+                cid = e.get("chunk_id") or e.get("chunkId")
+                if cid:
+                    chunk_id_ref = str(cid).strip()
+                    break
+        if chunk_id_ref or buzei:
+            out.append({"target_buzei": buzei, "chunk_id": chunk_id_ref, "doc_id": doc_id})
+    return out
+
 
 def _build_decision_reason(
     reason_text: str,
@@ -58,10 +103,11 @@ def _build_decision_reason(
     chunk_id: str | None,
     target_buzei: str | None,
     case_data: dict[str, Any] | None,
+    recommended_action: str = "",
 ) -> dict[str, Any]:
     """
     Universal Compliance Auditor 규격의 구조화된 인사이트(Reason + Evidence JSON) 생성.
-    BE V65 decision_reason 저장 및 agent_activity_log 고도화용.
+    BE V65 decision_reason 저장 및 callback 시 [종합 판정 / 핵심 근거 / 위반 조항 / 권고 사항] 분리 + evidence_map_json(buzei↔chunk_id).
     """
     case_data_flat: dict[str, Any] = {}
     if isinstance(case_data, dict):
@@ -80,7 +126,6 @@ def _build_decision_reason(
         "conflict_point": (reason_text[:300] if reason_text else ""),
         "case_data": case_data_flat,
     }
-    # evidence_items에서 첫 RAG 청크의 chunk_index 추출
     for e in evidence_items:
         if isinstance(e, dict) and (e.get("type") == "RAG_CHUNK" or e.get("chunk_id") or e.get("chunkId")):
             evidence_payload["chunk_index"] = e.get("chunk_index") or e.get("chunkIndex")
@@ -97,11 +142,68 @@ def _build_decision_reason(
             "excerpt": (c.get("excerpt") or c.get("content") or "")[:500],
             "score": c.get("score"),
         })
+    # 구조화: [종합 판정 / 핵심 근거 / 위반 조항 / 권고 사항] 분리 (callback → BE ReasoningPanelDto)
+    # BE: summary_verdict/summaryVerdict → summaryVerdict, key_grounds/keyGrounds(문자열 배열) → keyGrounds
+    summary_verdict = (reason_text or "").strip()[:500]  # 종합 판정 요약
+    _full = (reason_text or "").strip()
+    # key_grounds: BE가 List<String>으로 파싱 → 보고서 탭 핵심 근거 바인딩
+    key_grounds: list[str] = [s.strip() for s in _full.replace("\n", ". ").split(". ") if s.strip()] if _full else []
+    if not key_grounds and _full:
+        key_grounds = [_full]
+    evidence_map_json = _build_evidence_map_json(evidence_items, target_buzei, doc_id)
     return {
         "reason": reason_text or "",
         "evidence": evidence_payload,
         "citations": citations_payload,
+        "summary_verdict": summary_verdict,
+        "key_grounds": key_grounds,
+        "violation_clause": violation_clause or "",
+        "recommendations": recommended_action or "",
+        "evidence_map_json": evidence_map_json,
     }
+
+
+def _normalize_get_case_response(case_data: dict[str, Any] | None) -> dict[str, Any]:
+    """
+    GET /api/synapse/agent-tools/cases/{caseId} 응답 정규화.
+    - ApiResponse<T> 래핑 시 data 필드 안의 CaseDetailDto 사용.
+    - amount: data.evidence.amount → data.evidence.documentOrOpenItem.amount → data.fiDocItems[0].wrbtr
+    - belnr/documentNumber: data.keys.belnr
+    - buzei/target_buzei: data.keys.buzei
+    최상위 amount/belnr/buzei 등으로 채워 반환해 파이프라인·thought_stream에서 동일 필드명으로 사용.
+    """
+    if not case_data or not isinstance(case_data, dict):
+        return case_data or {}
+    # ApiResponse<T>: data에 실제 CaseDetailDto
+    payload = case_data.get("data") if isinstance(case_data.get("data"), dict) else case_data
+    out = dict(payload)
+    ev = out.get("evidence") or {}
+    keys = out.get("keys") or {}
+    items = out.get("fiDocItems") or out.get("fiDocItemList") or []
+    if not isinstance(ev, dict):
+        ev = {}
+    if not isinstance(keys, dict):
+        keys = {}
+    # amount: evidence.amount → evidence.documentOrOpenItem.amount → fiDocItems[0].wrbtr
+    if out.get("amount") is None and out.get("totalAmount") is None:
+        amount = ev.get("amount")
+        if amount is None:
+            doc = ev.get("documentOrOpenItem") or {}
+            amount = doc.get("amount") if isinstance(doc, dict) else None
+        if amount is None and isinstance(items, list) and items and isinstance(items[0], dict):
+            amount = items[0].get("wrbtr")
+        if amount is not None:
+            out["amount"] = amount
+            out["totalAmount"] = amount
+    # belnr / documentNumber: keys.belnr
+    if keys.get("belnr") is not None:
+        out["belnr"] = keys["belnr"]
+        out["documentNumber"] = keys["belnr"]
+    # buzei / target_buzei: keys.buzei
+    if keys.get("buzei") is not None:
+        out["buzei"] = keys["buzei"]
+        out["target_buzei"] = keys["buzei"]
+    return out
 
 
 def _normalize_body_evidence(body_evidence: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -166,27 +268,45 @@ async def run_audit_analysis(
     trace = trace_id or f"trace-{case_id}-{run_id[:8]}"
     now = datetime.now(timezone.utc).isoformat()
 
+    # 진단: 요청 케이스 식별 — 금액 불일치 시 "요청 case_id vs get_case 응답" 추적용
+    logger.info(
+        "audit_analysis start case_id=%s run_id=%s body_evidence_keys=%s",
+        case_id,
+        run_id,
+        list((body_evidence or {}).keys()) if isinstance(body_evidence, dict) else None,
+    )
+
     try:
         reasoning_history: list[str] = []
-        # ID 매핑: FE Red Glow 등 행/청크 하이라이트용 (chunk_id, target_buzei 노출)
-        id_mapping: dict[str, Any] = {}
+        # ID 매핑: FE Red Glow 등 행/청크 하이라이트용 — thought_pending/AGENT_STREAM/step에 target_buzei, chunk_id, doc_id 누락 없이 포함
+        id_mapping: dict[str, Any] = {"target_buzei": None, "chunk_id": None, "doc_id": None}
+        if body_evidence and isinstance(body_evidence, dict):
+            _raw_doc = body_evidence.get("doc_id") or (body_evidence.get("document") or {}).get("docKey")
+            _raw_buzei = body_evidence.get("target_buzei") or body_evidence.get("buzei")
+            if _raw_doc is not None:
+                id_mapping["doc_id"] = str(_raw_doc).strip() or None
+            if _raw_buzei is not None:
+                id_mapping["target_buzei"] = str(_raw_buzei).strip() or None
 
         # started (total_steps 포함 시 SSE 시작 시점부터 진행률 계산 가능)
         yield ("started", AnalysisStartedEvent(runId=run_id, caseId=case_id, at=now, total_steps=TOTAL_ANALYSIS_STEPS).model_dump())
 
-        # Step1: 입력 정규화 (2단계 스트리밍: thought_pending → LLM 독백 → AGENT_STREAM → step)
-        yield ("thought_pending", {"step_label": "INPUT_NORM", "message": THOUGHT_PENDING_MESSAGE, **id_mapping})
-        thought_input_norm = await generate_thought_stream("INPUT_NORM", None, case_id=case_id, reasoning_history=reasoning_history)
+        def _with_coords(payload: dict[str, Any]) -> dict[str, Any]:
+            return {**_coords_payload(id_mapping), **payload}
+
+        # Step1: 입력 정규화 (2단계 스트리밍: thought_pending → 독백 → AGENT_STREAM → step) — 기술 단계는 짧은 독백
+        yield ("thought_pending", _with_coords({"step_label": "INPUT_NORM", "message": THOUGHT_PENDING_MESSAGE, **id_mapping}))
+        thought_input_norm = INPUT_NORM_THOUGHT_SHORT  # LLM 호출 없이 사용자 피로도 감소
         if thought_input_norm:
             reasoning_history.append(thought_input_norm)
-        yield ("AGENT_STREAM", {"content": thought_input_norm or "", "step_label": "INPUT_NORM", **id_mapping})
-        yield ("step", {**AnalysisStepEvent(
+        yield ("AGENT_STREAM", _with_coords({"content": thought_input_norm or "", "step_label": "INPUT_NORM", **id_mapping}))
+        yield ("step", _with_coords({**AnalysisStepEvent(
             label="INPUT_NORM",
             detail="케이스 입력 정규화 중",
             percent=10,
             total_steps=TOTAL_ANALYSIS_STEPS,
             thought_stream=thought_input_norm or None,
-        ).model_dump(), **id_mapping})
+        ).model_dump(), **id_mapping}))
 
         try:
             case_result = await get_case.ainvoke({"caseId": case_id})
@@ -197,19 +317,46 @@ async def run_audit_analysis(
 
         if isinstance(case_data, dict) and "error" in case_data:
             case_data = {}
+        # 백엔드가 evidence.amount, keys.belnr, documentOrOpenItem 등 중첩으로 내려주면 최상위로 채움
+        case_data = _normalize_get_case_response(case_data)
 
-        yield ("thought_pending", {"step_label": "EVIDENCE_GATHER", "message": THOUGHT_PENDING_MESSAGE, **id_mapping})
+        # 진단: get_case 응답 전표·금액 — 백엔드가 해당 case_id에 대해 어떤 데이터를 내려줬는지 확인 (금액 불일치 추적)
+        if isinstance(case_data, dict) and case_data:
+            _belnr = case_data.get("belnr") or case_data.get("documentNumber")
+            _amt = case_data.get("amount") or case_data.get("totalAmount")
+            logger.info(
+                "get_case response case_id=%s belnr=%s documentNumber=%s amount=%s totalAmount=%s",
+                case_id,
+                case_data.get("belnr"),
+                case_data.get("documentNumber"),
+                case_data.get("amount"),
+                case_data.get("totalAmount"),
+            )
+            if _belnr is not None or _amt is not None:
+                logger.info(
+                    "audit_analysis case_identifiers case_id=%s belnr_or_docNo=%s amount_used=%s",
+                    case_id, _belnr, _amt,
+                )
+            # 금액/전표번호가 없을 때: 백엔드가 다른 키로 내려주는지 확인용 — 응답 최상위 키 목록 로그
+            if _amt is None and _belnr is None:
+                _top_keys = list(case_data.keys())[:30]
+                logger.info(
+                    "get_case response missing amount/belnr case_id=%s top_level_keys=%s (backend may use different field names or nest under another key)",
+                    case_id, _top_keys,
+                )
+
+        yield ("thought_pending", _with_coords({"step_label": "EVIDENCE_GATHER", "message": THOUGHT_PENDING_MESSAGE, **id_mapping}))
         thought_evidence_gather = await generate_thought_stream("EVIDENCE_GATHER", case_data, case_id=case_id, reasoning_history=reasoning_history)
         if thought_evidence_gather:
             reasoning_history.append(thought_evidence_gather)
-        yield ("AGENT_STREAM", {"content": thought_evidence_gather or "", "step_label": "EVIDENCE_GATHER", **id_mapping})
-        yield ("step", {**AnalysisStepEvent(
+        yield ("AGENT_STREAM", _with_coords({"content": thought_evidence_gather or "", "step_label": "EVIDENCE_GATHER", **id_mapping}))
+        yield ("step", _with_coords({**AnalysisStepEvent(
             label="EVIDENCE_GATHER",
             detail="케이스 전표 데이터 및 연관 증거 수집 중",
             percent=25,
             total_steps=TOTAL_ANALYSIS_STEPS,
             thought_stream=thought_evidence_gather or None,
-        ).model_dump(), **id_mapping})
+        ).model_dump(), **id_mapping}))
 
         # Step2: Evidence 수집
         evidence_items: list[dict[str, Any]] = []
@@ -264,18 +411,18 @@ async def run_audit_analysis(
             logger.debug(f"search_documents failed: {e}")
 
         # 하이브리드 검색 — 사내 규정(Vector DB) 자동 로드
-        yield ("thought_pending", {"step_label": "REGULATION_MATCH", "message": THOUGHT_PENDING_MESSAGE, **id_mapping})
+        yield ("thought_pending", _with_coords({"step_label": "REGULATION_MATCH", "message": THOUGHT_PENDING_MESSAGE, **id_mapping}))
         thought_regulation = await generate_thought_stream("REGULATION_MATCH", case_data, case_id=case_id, reasoning_history=reasoning_history)
         if thought_regulation:
             reasoning_history.append(thought_regulation)
-        yield ("AGENT_STREAM", {"content": thought_regulation or "", "step_label": "REGULATION_MATCH", **id_mapping})
-        yield ("step", {**AnalysisStepEvent(
+        yield ("AGENT_STREAM", _with_coords({"content": thought_regulation or "", "step_label": "REGULATION_MATCH", **id_mapping}))
+        yield ("step", _with_coords({**AnalysisStepEvent(
             label="REGULATION_MATCH",
             detail="전표·가맹점 맥락을 바탕으로 사내 규정(Vector DB) 매칭 중입니다.",
             percent=35,
             total_steps=TOTAL_ANALYSIS_STEPS,
             thought_stream=thought_regulation or None,
-        ).model_dump(), **id_mapping})
+        ).model_dump(), **id_mapping}))
         vector_results: list[dict[str, Any]] = []
         try:
             bukrs = str(case_data.get("bukrs") or "") if isinstance(case_data, dict) else None
@@ -364,11 +511,11 @@ async def run_audit_analysis(
             need_web_search,
         )
         if need_web_search:
-            yield ("step", AnalysisStepEvent(
+            yield ("step", _with_coords({**AnalysisStepEvent(
                 label="WEB_SEARCH",
                 detail="사내 규정에 관련 조항이 없어 외부 회계/세무 기준을 검색합니다." if vector_results else "사내 규정 검색 결과가 없어 외부 검색을 수행합니다.",
                 percent=38,
-            ).model_dump())
+            ).model_dump(), **id_mapping}))
             try:
                 from tools.external_search_tool import run_web_search_for_pipeline
                 expense_type = (isinstance(case_data, dict) and (case_data.get("expenseType") or case_data.get("expense_type") or "")) or "경비"
@@ -456,7 +603,7 @@ async def run_audit_analysis(
                 return (match, -(float(d.get("score", 0)) or 0))
             doc_list.sort(key=_doc_rank_key)
 
-        yield ("thought_pending", {"step_label": "EVIDENCE_COLLECTED", "message": THOUGHT_PENDING_MESSAGE, **id_mapping})
+        yield ("thought_pending", _with_coords({"step_label": "EVIDENCE_COLLECTED", "message": THOUGHT_PENDING_MESSAGE, **id_mapping}))
         evidence_thought = await generate_thought_stream(
             "EVIDENCE_COLLECTED",
             case_data,
@@ -467,22 +614,22 @@ async def run_audit_analysis(
         )
         if evidence_thought:
             reasoning_history.append(evidence_thought)
-        yield ("AGENT_STREAM", {"content": evidence_thought or "", "step_label": "EVIDENCE_COLLECTED", **id_mapping})
+        yield ("AGENT_STREAM", _with_coords({"content": evidence_thought or "", "step_label": "EVIDENCE_COLLECTED", **id_mapping}))
         yield ("evidence", AnalysisEvidenceEvent(type="COLLECTED", items=evidence_items, thought_stream=evidence_thought or None).model_dump())
-        yield ("thought_pending", {"step_label": "RULE_SCORING", "message": THOUGHT_PENDING_MESSAGE, **id_mapping})
+        yield ("thought_pending", _with_coords({"step_label": "RULE_SCORING", "message": THOUGHT_PENDING_MESSAGE, **id_mapping}))
         thought_rule = await generate_thought_stream(
             "RULE_SCORING", case_data, case_id=case_id, rag_count=len(vector_results) if vector_results else 0, reasoning_history=reasoning_history
         )
         if thought_rule:
             reasoning_history.append(thought_rule)
-        yield ("AGENT_STREAM", {"content": thought_rule or "", "step_label": "RULE_SCORING", **id_mapping})
-        yield ("step", {**AnalysisStepEvent(
+        yield ("AGENT_STREAM", _with_coords({"content": thought_rule or "", "step_label": "RULE_SCORING", **id_mapping}))
+        yield ("step", _with_coords({**AnalysisStepEvent(
             label="RULE_SCORING",
             detail="규정 제한 업종·금액·시간 기준 위반 여부 검토 중입니다.",
             percent=45,
             total_steps=TOTAL_ANALYSIS_STEPS,
             thought_stream=thought_rule or None,
-        ).model_dump(), **id_mapping})
+        ).model_dump(), **id_mapping}))
 
         # Step3: 룰 스코어링 (정상/위반 대비: DEMO_NORM_* vs DEMO0000*)
         amount = 0.0
@@ -506,20 +653,20 @@ async def run_audit_analysis(
             overall=round(overall, 2),
         ).model_dump())
 
-        yield ("thought_pending", {"step_label": "LLM_REASONING", "message": THOUGHT_PENDING_MESSAGE, **id_mapping})
+        yield ("thought_pending", _with_coords({"step_label": "LLM_REASONING", "message": THOUGHT_PENDING_MESSAGE, **id_mapping}))
         thought_llm = await generate_thought_stream(
             "LLM_REASONING", case_data, case_id=case_id, evidence_count=len(evidence_items), reasoning_history=reasoning_history
         )
         if thought_llm:
             reasoning_history.append(thought_llm)
-        yield ("AGENT_STREAM", {"content": thought_llm or "", "step_label": "LLM_REASONING", **id_mapping})
-        yield ("step", {**AnalysisStepEvent(
+        yield ("AGENT_STREAM", _with_coords({"content": thought_llm or "", "step_label": "LLM_REASONING", **id_mapping}))
+        yield ("step", _with_coords({**AnalysisStepEvent(
             label="LLM_REASONING",
             detail="규정 조문과 대조하여 위반 여부 판단 및 판단 근거 작성 중입니다.",
             percent=65,
             total_steps=TOTAL_ANALYSIS_STEPS,
             thought_stream=thought_llm or None,
-        ).model_dump(), **id_mapping})
+        ).model_dump(), **id_mapping}))
 
         # Step4: LLM reasonText (XAI: 규정 인용형 문장)
         risk_type = "DUPLICATE_INVOICE"
@@ -626,11 +773,11 @@ async def run_audit_analysis(
             if "에 의거하여" in citation_sentence:
                 reason_text = citation_sentence + " " + reason_text
 
-        yield ("step", {**AnalysisStepEvent(
+        yield ("step", _with_coords({**AnalysisStepEvent(
             label="PROPOSALS",
             detail="권고 조치(결제 보류·추가 확인 등) 생성 중입니다.",
             percent=85,
-        ).model_dump(), **id_mapping})
+        ).model_dump(), **id_mapping}))
 
         # Step5: Proposals
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -700,7 +847,7 @@ async def run_audit_analysis(
                 chunk_id_ref = str(cid).strip() or None
                 break
 
-        # decision_reason: Universal Compliance Auditor 규격 — Reason + Evidence JSON (BE V65 저장용)
+        # decision_reason: 구조화 [종합 판정 / 핵심 근거 / 위반 조항 / 권고 사항] + evidence_map_json(buzei↔chunk_id 1:1)
         decision_reason = _build_decision_reason(
             reason_text=reason_text,
             violation_clause=violation_clause_str,
@@ -711,6 +858,7 @@ async def run_audit_analysis(
             chunk_id=chunk_id_ref,
             target_buzei=target_buzei,
             case_data=case_data,
+            recommended_action=recommended_action,
         )
 
         # finalResult 저장 (콜백 전에 반드시 실행 — break 시 get_audit_analysis_result 사용)

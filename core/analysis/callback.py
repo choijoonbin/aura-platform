@@ -3,16 +3,24 @@ Case Audit Analysis — BE Callback
 
 분석 완료 시 BE로 POST. 재시도 3회 (지수 backoff).
 멱등성: 동일 (runId, proposal) 재전송 시 BE dedup 처리.
+콜백 200 OK 후: POST …/cases/{caseId}/status 로 케이스 상태를 RESOLVED 로 갱신 (정상 종료 시만).
 """
 
 import logging
 from datetime import datetime, timezone
 from typing import Any
 
+import httpx
+
 from core.config import settings
 from core.analysis.callback_client import post_with_retry
 
 logger = logging.getLogger(__name__)
+
+# 케이스 상태 API: 정상 완료 시 호출. 실패(FAILED) 시에는 호출하지 않음.
+CASE_STATUS_PATH = "/api/synapse/cases/{case_id}/status"
+CASE_STATUS_ON_COMPLETE = "RESOLVED"
+CASE_STATUS_TIMEOUT = 10.0
 
 
 def _build_final_result(audit_result: dict[str, Any]) -> dict[str, Any]:
@@ -33,6 +41,7 @@ def _build_final_result(audit_result: dict[str, Any]) -> dict[str, Any]:
             "citations": audit_result.get("citations", []),
         }
     return {
+        "status": "COMPLETED",
         "score": score,
         "severity": audit_result.get("severity", "MEDIUM"),
         "reasonText": audit_result.get("reasonText", ""),
@@ -119,4 +128,35 @@ async def send_callback(
     elif error_message:
         payload["partialEvents"] = [{"stage": "callback", "errorMessage": error_message}]
 
-    return await post_with_retry(url, payload, success_status_codes=(200,))
+    ok = await post_with_retry(url, payload, success_status_codes=(200,))
+    # 콜백 200 OK 후, 정상 완료 시에만 케이스 상태 API 호출 (진행중 → RESOLVED). 실패 건은 호출 안 함.
+    if ok and status.upper() == "COMPLETED":
+        await _notify_case_status(case_id)
+    return ok
+
+
+async def _notify_case_status(case_id: str, new_status: str = CASE_STATUS_ON_COMPLETE) -> bool:
+    """
+    POST …/api/synapse/cases/{caseId}/status — 케이스를 완료 처리.
+    Body: { "status": "RESOLVED" }. 실패 시 로그만 남기고 True 반환(콜백 성공은 이미 완료).
+    """
+    base = settings.dwp_gateway_url.rstrip("/")
+    path = CASE_STATUS_PATH.format(case_id=case_id).lstrip("/")
+    url = f"{base}/{path}" if not path.startswith("http") else path
+    body = {"status": new_status}
+    try:
+        from core.context import get_synapse_headers
+        headers = get_synapse_headers()
+    except Exception as e:
+        logger.debug("case status headers skipped: %s", e)
+        headers = {"Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=CASE_STATUS_TIMEOUT) as client:
+            resp = await client.post(url, json=body, headers=headers)
+            if resp.status_code in (200, 201, 202):
+                logger.info("case status updated case_id=%s status=%s", case_id, new_status)
+                return True
+            logger.warning("case status API case_id=%s status_code=%s %s", case_id, resp.status_code, resp.text[:200])
+    except Exception as e:
+        logger.warning("case status API failed case_id=%s: %s", case_id, e)
+    return False
