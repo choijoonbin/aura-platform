@@ -18,6 +18,7 @@ from api.schemas.events import (
     PlanStepStatus,
     ToolExecutionStatus,
 )
+from core.analysis.thought_stream import enforce_grounded_public_thought
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,19 @@ async def _thought_content_async(node_name: str, state: dict[str, Any]) -> str:
     미리 짜인 대본이 아니라, 이 순간 전표를 고민하는 문장을 반환합니다.
     """
     from core.analysis.thought_stream import generate_thought_stream
-    return await generate_thought_stream(node_name, state=state)
+    raw = await generate_thought_stream(node_name, state=state)
+    evidence_items = state.get("evidence")
+    if not isinstance(evidence_items, list):
+        evidence_items = []
+    case_data = state.get("case_data")
+    if not isinstance(case_data, dict):
+        case_data = state.get("context") if isinstance(state.get("context"), dict) else None
+    return enforce_grounded_public_thought(
+        raw,
+        case_data=case_data,
+        evidence_items=evidence_items,
+        require_rag_for_claims=True,
+    )
 
 
 def _apply_case_resource(event: Any, state: dict[str, Any]) -> None:

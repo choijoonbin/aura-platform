@@ -5,13 +5,14 @@ Finance 도메인 에이전트 SSE 스트리밍 및 HITL 승인 API입니다.
 """
 
 import asyncio
+import base64
 import logging
 import uuid
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Header, Request
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Header, Query, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
 from api.dependencies import CurrentUser, TenantId
@@ -22,6 +23,7 @@ from core.context import set_request_context
 from core.memory.hitl_manager import get_hitl_manager
 from core.analysis.agent_factory import fetch_agent_config
 from core.memory.checkpointer_factory import get_finance_checkpointer
+from core.observability import incr, start_timer, stop_timer
 from domains.finance.agents.finance_agent import FinanceAgent
 from domains.finance.agents.hooks import create_finance_sse_hook
 
@@ -55,6 +57,53 @@ class FinanceStreamRequest(BaseModel):
         elif p:
             self.prompt = p
         return self
+
+
+@router.get("/graph")
+async def finance_graph(
+    format: str = Query(default="mermaid", pattern="^(mermaid|png)$"),
+):
+    """
+    Finance LangGraph 구조 조회.
+
+    - format=mermaid: mermaid 텍스트 반환
+    - format=png: base64 PNG 반환(런타임 지원 시)
+    """
+    agent = FinanceAgent(checkpointer=get_finance_checkpointer(), agent_config=None)
+    graph = agent.graph.get_graph() if hasattr(agent.graph, "get_graph") else None
+    if graph is None:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Finance graph is not available"},
+        )
+
+    if format == "mermaid":
+        if hasattr(graph, "draw_mermaid"):
+            return {"format": "mermaid", "graph": graph.draw_mermaid()}
+        return JSONResponse(
+            status_code=501,
+            content={"error": "Mermaid renderer is not supported in this runtime"},
+        )
+
+    if hasattr(graph, "draw_mermaid_png"):
+        try:
+            png_bytes = graph.draw_mermaid_png()
+            return {
+                "format": "png",
+                "encoding": "base64",
+                "graph": base64.b64encode(png_bytes).decode("ascii"),
+            }
+        except Exception as e:
+            logger.warning("finance_graph png render failed: %s", e)
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"PNG rendering failed: {type(e).__name__}"},
+            )
+
+    return JSONResponse(
+        status_code=501,
+        content={"error": "PNG renderer is not supported in this runtime"},
+    )
 
 
 def _enrich_event_data(
@@ -110,8 +159,11 @@ async def finance_stream(
     )
     
     async def event_generator():
+        timer = start_timer()
+        incr("finance_stream_requests_total")
         # X-User-ID 헤더 검증 (JWT sub와 일치해야 함) — P0-1
         if x_user_id and x_user_id != user.user_id:
+            incr("finance_stream_validation_error_total")
             logger.warning(
                 f"X-User-ID mismatch: header={x_user_id}, jwt_sub={user.user_id}, "
                 f"tenant_id={tenant_id_val}, trace_id={trace_id}"
@@ -246,6 +298,8 @@ async def finance_stream(
                                     event_id_counter += 1
                                     yield format_sse_event("end", end_data, str(event_id_counter))
                                     yield "data: [DONE]\n\n"
+                                    incr("finance_stream_timeout_total")
+                                    stop_timer(timer, "finance_stream_duration_ms")
                                     return
                                 
                                 if signal.get("type") == "rejection":
@@ -323,6 +377,8 @@ async def finance_stream(
             event_id_counter += 1
             yield format_sse_event("end", end_data, str(event_id_counter))
             yield "data: [DONE]\n\n"
+            incr("finance_stream_success_total")
+            stop_timer(timer, "finance_stream_duration_ms")
             
         except Exception as e:
             logger.error(f"Finance streaming failed: {e}", exc_info=True)
@@ -335,6 +391,8 @@ async def finance_stream(
             event_id_counter += 1
             yield format_sse_event("error", error_data, str(event_id_counter))
             yield "data: [DONE]\n\n"
+            incr("finance_stream_error_total")
+            stop_timer(timer, "finance_stream_duration_ms")
     
     return StreamingResponse(
         event_generator(),

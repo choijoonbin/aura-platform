@@ -12,8 +12,11 @@ Step5: 결과 payload 구성 후 BE 콜백 (선택)
 
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, AsyncGenerator
 
 from core.analysis.audit_analysis_events import (
@@ -25,7 +28,10 @@ from core.analysis.audit_analysis_events import (
     AnalysisCompletedEvent,
     AnalysisFailedEvent,
 )
-from core.analysis.thought_stream import generate_thought_stream
+from core.analysis.thought_stream import (
+    enforce_grounded_public_thought,
+    generate_thought_stream,
+)
 from core.analysis.reasoning_citations import (
     build_regulation_citations,
     build_citation_reasoning,
@@ -34,6 +40,7 @@ from core.analysis.reasoning_citations import (
 from core.analysis.rag import hybrid_retrieve
 from core.config import get_settings
 from core.llm import get_llm_client
+from core.observability import incr, start_timer, stop_timer
 from tools.synapse_finance_tool import get_case, search_documents, get_open_items, get_lineage
 
 logger = logging.getLogger(__name__)
@@ -85,6 +92,17 @@ _AGENT_STREAM_PLACEHOLDERS = frozenset({
     "처리 중입니다.",
 })
 
+_PROMPT_INJECTION_PATTERNS = (
+    "ignore previous",
+    "ignore all previous",
+    "system prompt",
+    "developer message",
+    "act as",
+    "jailbreak",
+    "do not follow",
+    "prompt injection",
+)
+
 
 def _is_agent_stream_insight(content: str | None) -> bool:
     """True면 AGENT_STREAM으로 발행. 플레이스홀더·기술 로그·빈 문자열이면 False."""
@@ -103,6 +121,240 @@ def _is_agent_stream_insight(content: str | None) -> bool:
     if "data analyzing" in lower or "data analysing" in lower:
         return False
     return True
+
+
+def _build_dynamic_rag_query(
+    case_data: dict[str, Any] | None,
+    *,
+    intended_risk_type: str | None = None,
+) -> str:
+    """
+    전표 속성 기반 동적 RAG 질의 생성.
+    고정 문구 대신 금액/시각/업종/거래처/위험유형을 결합해 규정 검색 정확도를 높인다.
+    """
+    tokens: list[str] = ["법인카드", "전표", "규정", "감사", "준수"]
+    if intended_risk_type and str(intended_risk_type).strip():
+        tokens.append(str(intended_risk_type).strip())
+    if not isinstance(case_data, dict):
+        return " ".join(tokens)
+    expense_type = case_data.get("expenseType") or case_data.get("expense_type")
+    merchant = case_data.get("merchantName") or case_data.get("merchant_name")
+    occurred = case_data.get("occurredAt") or case_data.get("occurred_at")
+    risk_key = case_data.get("riskTypeKey") or case_data.get("risk_type")
+    amount = case_data.get("amount") or case_data.get("totalAmount")
+    if expense_type:
+        tokens.append(str(expense_type))
+    if merchant:
+        tokens.append(str(merchant))
+    if occurred:
+        tokens.extend(["발생시각", str(occurred)])
+    if risk_key:
+        tokens.append(str(risk_key))
+    if amount is not None:
+        tokens.extend(["금액", str(amount)])
+    # 중복 제거 + 순서 유지
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for t in tokens:
+        key = t.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(key)
+    return " ".join(deduped)
+
+
+@lru_cache(maxsize=1)
+def _load_mcc_rule_links() -> dict[str, dict[str, Any]]:
+    """
+    MCC -> regulation_article/exception_clause 매핑 로드.
+    Aura 단독 운영을 위해 로컬 JSON 기반으로 동작하며, 파일 누락 시 빈 매핑 반환.
+    """
+    path = Path(__file__).resolve().parents[2] / "data" / "mcc_rule_links.json"
+    try:
+        raw = path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
+    except Exception as e:
+        logger.warning("mcc rule links load failed: %s", e)
+    return {}
+
+
+def _extract_mcc_code(case_data: dict[str, Any] | None) -> str | None:
+    if not isinstance(case_data, dict):
+        return None
+    raw = case_data.get("mccCode") or case_data.get("mcc_code")
+    if raw is None and isinstance(case_data.get("evidence"), dict):
+        raw = case_data["evidence"].get("mccCode") or case_data["evidence"].get("mcc_code")
+    if raw is None:
+        return None
+    code = str(raw).strip()
+    return code or None
+
+
+def _extract_case_occurred_date(case_data: dict[str, Any] | None) -> str | None:
+    if not isinstance(case_data, dict):
+        return None
+    raw = case_data.get("occurredAt") or case_data.get("occurred_at")
+    if not raw:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    return s[:10]
+
+
+def _build_rule_first_constraints(
+    case_data: dict[str, Any] | None,
+    *,
+    settings_obj: Any,
+) -> dict[str, Any]:
+    """
+    룰 기반 1차 제약 생성:
+    - MCC 명시 매핑으로 우선 조항 후보 집합 생성
+    - index_version/effective_date를 검색 컨텍스트로 함께 전달
+    """
+    out: dict[str, Any] = {"articles": [], "index_version": None, "effective_date": None}
+    mcc_code = _extract_mcc_code(case_data)
+    links = _load_mcc_rule_links()
+    if mcc_code and mcc_code in links and isinstance(links[mcc_code], dict):
+        row = links[mcc_code]
+        out["mcc_code"] = mcc_code
+        out["articles"] = list(row.get("articles") or [])
+        out["exception_clauses"] = list(row.get("exception_clauses") or [])
+        out["keywords"] = list(row.get("keywords") or [])
+    idx_ver = getattr(settings_obj, "rag_index_version", None)
+    if idx_ver:
+        out["index_version"] = str(idx_ver).strip()
+    eff = getattr(settings_obj, "rag_effective_date_override", None) or _extract_case_occurred_date(case_data)
+    if eff:
+        out["effective_date"] = str(eff).strip()
+    return out
+
+
+def _apply_rule_first_filter(
+    results: list[dict[str, Any]],
+    *,
+    preferred_articles: list[str] | None = None,
+    effective_date: str | None = None,
+) -> list[dict[str, Any]]:
+    """
+    1차 룰 필터링(정확도) + 미스 시 유연성 보존:
+    - article가 있으면 우선 article 매칭 결과를 반환
+    - article 매칭이 전무하면 원결과 유지(벡터 유연성 유지)
+    - effective_date가 있으면 metadata_json의 유효기간과 대조
+    """
+    if not results:
+        return []
+    out = list(results)
+    if effective_date:
+        eff = []
+        for r in out:
+            meta = r.get("metadata_json") if isinstance(r.get("metadata_json"), dict) else {}
+            if not meta:
+                eff.append(r)
+                continue
+            eff_from = str(meta.get("effective_from") or meta.get("effectiveDateFrom") or "").strip()
+            eff_to = str(meta.get("effective_to") or meta.get("effectiveDateTo") or "").strip()
+            if eff_from and effective_date < eff_from:
+                continue
+            if eff_to and effective_date > eff_to:
+                continue
+            eff.append(r)
+        out = eff
+    articles = [str(a).replace(" ", "") for a in (preferred_articles or []) if str(a).strip()]
+    if not articles:
+        return out
+    filtered: list[dict[str, Any]] = []
+    for r in out:
+        article = str(r.get("regulation_article") or r.get("regulationArticle") or "").replace(" ", "")
+        location = str(r.get("location") or "").replace(" ", "")
+        if any(a and (a == article or a in location) for a in articles):
+            filtered.append(r)
+    return filtered if filtered else out
+
+
+def _sanitize_external_reference_text(text: str) -> str:
+    """외부 검색 결과에서 프롬프트 인젝션/지시문 패턴 제거."""
+    if not isinstance(text, str):
+        return ""
+    lines: list[str] = []
+    for line in text.splitlines():
+        low = line.lower()
+        if any(p in low for p in _PROMPT_INJECTION_PATTERNS):
+            continue
+        # 과도한 제어문자/코드블록 유도 제거
+        if re.search(r"`{3,}|<script|</script>", low):
+            continue
+        lines.append(line)
+    out = "\n".join(lines).strip()
+    if len(out) > 3500:
+        out = out[:3500]
+    return out
+
+
+def _rerank_vector_results(
+    results: list[dict[str, Any]],
+    *,
+    case_data: dict[str, Any] | None = None,
+    preferred_articles: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """
+    규정 조항/업무 문맥 우선 리랭킹.
+    - 벡터 score
+    - location/regulation 조항 존재 여부
+    - 경비유형 키워드 일치
+    """
+    if not results:
+        return []
+    expense = ""
+    if isinstance(case_data, dict):
+        expense = str(case_data.get("expenseType") or case_data.get("expense_type") or "").strip().lower()
+    preferred_set = {str(a).replace(" ", "") for a in (preferred_articles or []) if str(a).strip()}
+
+    def _rank(d: dict[str, Any]) -> tuple[float, float, float]:
+        score = float(d.get("score", 0) or 0)
+        has_rule = 1.0 if (d.get("location") or d.get("regulation_article") or d.get("regulationArticle")) else 0.0
+        article = str(d.get("regulation_article") or d.get("regulationArticle") or "").replace(" ", "")
+        location = str(d.get("location") or "").replace(" ", "")
+        rule_link_bonus = 1.0 if (preferred_set and any(a and (a == article or a in location) for a in preferred_set)) else 0.0
+        text = (
+            str(d.get("title") or "")
+            + " "
+            + str(d.get("location") or "")
+            + " "
+            + str(d.get("excerpt") or d.get("content") or "")
+        ).lower()
+        semantic_bonus = 1.0 if (expense and expense in text) else 0.0
+        weighted = (score * 0.5) + (has_rule * 0.25) + (semantic_bonus * 0.1) + (rule_link_bonus * 0.15)
+        return (weighted, has_rule, score)
+
+    return sorted(results, key=_rank, reverse=True)
+
+
+def _run_self_verification(
+    *,
+    reason_text: str,
+    evidence_items: list[dict[str, Any]],
+    violation_clauses: list[str],
+    citations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """
+    최종 결론의 최소 논리 정합성 점검.
+    실패시키기보다 품질 이슈를 구조적으로 기록하여 HITL/운영자가 확인 가능하게 한다.
+    """
+    issues: list[str] = []
+    if not (reason_text or "").strip():
+        issues.append("reason_text_missing")
+    if not evidence_items:
+        issues.append("evidence_missing")
+    if not violation_clauses:
+        issues.append("violation_clause_missing")
+    if not citations:
+        issues.append("citation_missing")
+    status = "pass" if not issues else "warn"
+    return {"status": status, "issues": issues}
 
 
 def _coords_payload(id_mapping: dict[str, Any]) -> dict[str, Any]:
@@ -346,6 +598,8 @@ async def run_audit_analysis(
     )
 
     try:
+        timer = start_timer()
+        incr("audit_analysis_runs_total")
         reasoning_history: list[str] = []
         # AGENT_STREAM 중복 송출 방지: 직전에 보낸 content와 100% 동일하면 스킵
         last_agent_stream_content: list[str | None] = [None]
@@ -445,8 +699,22 @@ async def run_audit_analysis(
                     case_id, _top_keys,
                 )
 
+        # No-RAG thought guard에서 선참조되므로 초기화는 thought 생성 전에 수행
+        evidence_items: list[dict[str, Any]] = []
+
         yield ("thought_pending", _with_coords({"step_label": "EVIDENCE_GATHER", "message": THOUGHT_PENDING_MESSAGE, **id_mapping}))
-        thought_evidence_gather = await generate_thought_stream("EVIDENCE_GATHER", case_data, case_id=case_id, intended_risk_type=intended_risk_type, reasoning_history=reasoning_history)
+        thought_evidence_gather = enforce_grounded_public_thought(
+            await generate_thought_stream(
+                "EVIDENCE_GATHER",
+                case_data,
+                case_id=case_id,
+                intended_risk_type=intended_risk_type,
+                reasoning_history=reasoning_history,
+            ),
+            case_data=case_data if isinstance(case_data, dict) else None,
+            evidence_items=evidence_items,
+            require_rag_for_claims=True,
+        )
         if thought_evidence_gather:
             reasoning_history.append(thought_evidence_gather)
         if _is_agent_stream_insight(thought_evidence_gather):
@@ -464,7 +732,6 @@ async def run_audit_analysis(
         ).model_dump(), **id_mapping}))
 
         # Step2: Evidence 수집
-        evidence_items: list[dict[str, Any]] = []
         if case_data:
             _be = body_evidence if isinstance(body_evidence, dict) else {}
             doc_id_case = _be.get("doc_id") or (_be.get("document") or {}).get("docKey")
@@ -517,7 +784,18 @@ async def run_audit_analysis(
 
         # 하이브리드 검색 — 사내 규정(Vector DB) 자동 로드
         yield ("thought_pending", _with_coords({"step_label": "REGULATION_MATCH", "message": THOUGHT_PENDING_MESSAGE, **id_mapping}))
-        thought_regulation = await generate_thought_stream("REGULATION_MATCH", case_data, case_id=case_id, intended_risk_type=intended_risk_type, reasoning_history=reasoning_history)
+        thought_regulation = enforce_grounded_public_thought(
+            await generate_thought_stream(
+                "REGULATION_MATCH",
+                case_data,
+                case_id=case_id,
+                intended_risk_type=intended_risk_type,
+                reasoning_history=reasoning_history,
+            ),
+            case_data=case_data if isinstance(case_data, dict) else None,
+            evidence_items=evidence_items,
+            require_rag_for_claims=True,
+        )
         if thought_regulation:
             reasoning_history.append(thought_regulation)
         if _is_agent_stream_insight(thought_regulation):
@@ -534,6 +812,7 @@ async def run_audit_analysis(
             thought_stream=_step_thought,
         ).model_dump(), **id_mapping}))
         vector_results: list[dict[str, Any]] = []
+        rag_constraints: dict[str, Any] = {"articles": [], "effective_date": None, "index_version": None}
         try:
             bukrs = str(case_data.get("bukrs") or "") if isinstance(case_data, dict) else None
             belnr = str(case_data.get("belnr") or "") if isinstance(case_data, dict) else None
@@ -568,14 +847,49 @@ async def run_audit_analysis(
                         raw_doc,
                     )
             
+            settings = get_settings()
+            rag_constraints = _build_rule_first_constraints(
+                case_data if isinstance(case_data, dict) else None,
+                settings_obj=settings,
+            )
+            rag_query = _build_dynamic_rag_query(
+                case_data if isinstance(case_data, dict) else None,
+                intended_risk_type=intended_risk_type,
+            )
+            if rag_constraints.get("articles"):
+                rag_query = f"{rag_query} {' '.join(rag_constraints.get('articles') or [])}"
+            if rag_constraints.get("keywords"):
+                rag_query = f"{rag_query} {' '.join(rag_constraints.get('keywords') or [])}"
+            metadata_filter: dict[str, Any] | None = None
+            if rag_constraints.get("index_version"):
+                metadata_filter = {"index_version": rag_constraints["index_version"]}
             vector_results = hybrid_retrieve(
-                query="경비 지출 규정 식대 주말 업무",
+                query=rag_query,
                 top_k=5,
                 include_article_clause=True,
                 bukrs=bukrs or None,
                 belnr=belnr or None,
+                metadata_filter=metadata_filter,
                 doc_ids=doc_ids,
                 tenant_id=tenant_id_int,
+            )
+            vector_results = _apply_rule_first_filter(
+                vector_results,
+                preferred_articles=rag_constraints.get("articles"),
+                effective_date=rag_constraints.get("effective_date"),
+            )
+            vector_results = _rerank_vector_results(
+                vector_results,
+                case_data=case_data if isinstance(case_data, dict) else None,
+                preferred_articles=rag_constraints.get("articles"),
+            )
+            logger.info(
+                "audit_analysis_pipeline: RAG constraints case_id=%s mcc=%s articles=%s index_version=%s effective_date=%s",
+                case_id,
+                rag_constraints.get("mcc_code"),
+                rag_constraints.get("articles"),
+                rag_constraints.get("index_version"),
+                rag_constraints.get("effective_date"),
             )
             if vector_results:
                 existing = {str((d.get("docKey") or d.get("id") or d.get("rag_document_id") or "")) for d in doc_list if isinstance(d, dict)}
@@ -632,10 +946,10 @@ async def run_audit_analysis(
                 web_query = f"법인카드 {expense_type} 세무처리 국세청 가이드라인 회계기준"
                 web_result = await run_web_search_for_pipeline(web_query)
                 if isinstance(web_result, dict):
-                    external_search_text = web_result.get("text", "")
+                    external_search_text = _sanitize_external_reference_text(web_result.get("text", ""))
                     external_citations = web_result.get("citations", [])
                 else:
-                    external_search_text = str(web_result)
+                    external_search_text = _sanitize_external_reference_text(str(web_result))
                 logger.info(
                     "audit_analysis_pipeline: web_search completed case_id=%s query=%s text_len=%s citations=%s",
                     case_id,
@@ -714,14 +1028,19 @@ async def run_audit_analysis(
             doc_list.sort(key=_doc_rank_key)
 
         yield ("thought_pending", _with_coords({"step_label": "EVIDENCE_COLLECTED", "message": THOUGHT_PENDING_MESSAGE, **id_mapping}))
-        evidence_thought = await generate_thought_stream(
-            "EVIDENCE_COLLECTED",
-            case_data,
-            case_id=case_id,
-            evidence_count=len(evidence_items),
-            rag_count=sum(1 for e in evidence_items if e.get("type") == "RAG_CHUNK"),
-            intended_risk_type=intended_risk_type,
-            reasoning_history=reasoning_history,
+        evidence_thought = enforce_grounded_public_thought(
+            await generate_thought_stream(
+                "EVIDENCE_COLLECTED",
+                case_data,
+                case_id=case_id,
+                evidence_count=len(evidence_items),
+                rag_count=sum(1 for e in evidence_items if e.get("type") == "RAG_CHUNK"),
+                intended_risk_type=intended_risk_type,
+                reasoning_history=reasoning_history,
+            ),
+            case_data=case_data if isinstance(case_data, dict) else None,
+            evidence_items=evidence_items,
+            require_rag_for_claims=True,
         )
         if evidence_thought:
             reasoning_history.append(evidence_thought)
@@ -733,8 +1052,18 @@ async def run_audit_analysis(
         _ev_thought = None if _is_agent_stream_insight(evidence_thought) else (evidence_thought or None)
         yield ("evidence", AnalysisEvidenceEvent(type="COLLECTED", items=evidence_items, thought_stream=_ev_thought).model_dump())
         yield ("thought_pending", _with_coords({"step_label": "RULE_SCORING", "message": THOUGHT_PENDING_MESSAGE, **id_mapping}))
-        thought_rule = await generate_thought_stream(
-            "RULE_SCORING", case_data, case_id=case_id, rag_count=len(vector_results) if vector_results else 0, intended_risk_type=intended_risk_type, reasoning_history=reasoning_history
+        thought_rule = enforce_grounded_public_thought(
+            await generate_thought_stream(
+                "RULE_SCORING",
+                case_data,
+                case_id=case_id,
+                rag_count=len(vector_results) if vector_results else 0,
+                intended_risk_type=intended_risk_type,
+                reasoning_history=reasoning_history,
+            ),
+            case_data=case_data if isinstance(case_data, dict) else None,
+            evidence_items=evidence_items,
+            require_rag_for_claims=True,
         )
         if thought_rule:
             reasoning_history.append(thought_rule)
@@ -775,8 +1104,18 @@ async def run_audit_analysis(
         ).model_dump())
 
         yield ("thought_pending", _with_coords({"step_label": "LLM_REASONING", "message": THOUGHT_PENDING_MESSAGE, **id_mapping}))
-        thought_llm = await generate_thought_stream(
-            "LLM_REASONING", case_data, case_id=case_id, evidence_count=len(evidence_items), intended_risk_type=intended_risk_type, reasoning_history=reasoning_history
+        thought_llm = enforce_grounded_public_thought(
+            await generate_thought_stream(
+                "LLM_REASONING",
+                case_data,
+                case_id=case_id,
+                evidence_count=len(evidence_items),
+                intended_risk_type=intended_risk_type,
+                reasoning_history=reasoning_history,
+            ),
+            case_data=case_data if isinstance(case_data, dict) else None,
+            evidence_items=evidence_items,
+            require_rag_for_claims=True,
         )
         if thought_llm:
             reasoning_history.append(thought_llm)
@@ -1035,6 +1374,21 @@ async def run_audit_analysis(
             if "에 의거하여" in citation_sentence:
                 reason_text = citation_sentence + " " + reason_text
 
+        grounded_reason = enforce_grounded_public_thought(
+            reason_text,
+            case_data=case_data if isinstance(case_data, dict) else None,
+            evidence_items=evidence_items,
+            require_rag_for_claims=True,
+        )
+        if grounded_reason != reason_text:
+            if screening_reason_text:
+                reason_text = (
+                    f"{screening_reason_text} "
+                    "현재 규정 근거 매칭이 충분하지 않아 확정 판단은 보류합니다."
+                )
+            else:
+                reason_text = grounded_reason
+
         yield ("step", _with_coords({**AnalysisStepEvent(
             label="PROPOSALS",
             detail="권고 조치(결제 보류·추가 확인 등) 생성 중입니다.",
@@ -1124,6 +1478,22 @@ async def run_audit_analysis(
             recommended_action=recommended_action,
             item_no=item_no,
         )
+        self_verify = _run_self_verification(
+            reason_text=reason_text,
+            evidence_items=evidence_items,
+            violation_clauses=decision_reason.get("violation_clauses", violation_clauses),
+            citations=citations,
+        )
+        if self_verify.get("status") != "pass":
+            evidence_items.append(
+                {
+                    "type": "SELF_VERIFY",
+                    "source": "self_verification",
+                    "status": self_verify.get("status"),
+                    "issues": self_verify.get("issues", []),
+                }
+            )
+        decision_reason["self_verification"] = self_verify
 
         # finalResult 저장 (콜백 전에 반드시 실행 — break 시 get_audit_analysis_result 사용)
         # 백엔드 case_analysis_result 테이블 규격: violation_clause, risk_score, reasoning_summary, recommended_action, citations[]
@@ -1187,7 +1557,10 @@ async def run_audit_analysis(
             evidence_map_json=decision_reason.get("evidence_map_json", []),
         ).model_dump()
         yield ("completed", completed_payload)
+        incr("audit_analysis_completed_total")
+        stop_timer(timer, "audit_analysis_duration_ms")
 
     except Exception as e:
         logger.exception(f"Audit analysis failed for {case_id}")
+        incr("audit_analysis_failed_total")
         yield ("failed", AnalysisFailedEvent(error=str(e), stage="pipeline").model_dump())

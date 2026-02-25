@@ -16,7 +16,12 @@ from core.config import settings
 
 def _create_chat_model(model: str | None = None, **kwargs: Any) -> BaseChatModel:
     """설정에 따라 ChatOpenAI 또는 AzureChatOpenAI 반환. model이 있으면 해당 엔진(배포명) 사용."""
-    deployment_or_model = model or settings.azure_openai_deployment or settings.openai_model
+    deployment_or_model = (
+        model
+        or settings.model_version_pin
+        or settings.azure_openai_deployment
+        or settings.openai_model
+    )
     if settings.use_azure_openai:
         from langchain_openai import AzureChatOpenAI
         return AzureChatOpenAI(
@@ -62,7 +67,12 @@ class LLMClient:
             **kwargs: ChatOpenAI에 전달할 추가 파라미터
         """
         self.api_key = api_key or settings.openai_api_key or settings.azure_openai_api_key
-        self.model = model or settings.azure_openai_deployment or settings.openai_model
+        self.model = (
+            model
+            or settings.model_version_pin
+            or settings.azure_openai_deployment
+            or settings.openai_model
+        )
         self.temperature = temperature if temperature is not None else settings.openai_temperature
         self.max_tokens = max_tokens or settings.openai_max_tokens
         self.extra_kwargs = kwargs

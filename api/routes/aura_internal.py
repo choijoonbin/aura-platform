@@ -19,6 +19,7 @@ from core.context import set_request_context
 from core.analysis.phase3_pipeline import run_phase3_analysis
 from core.analysis.phase3_callback import send_phase3_callback
 from core.analysis.run_store import get_or_create_queue, put_event, remove_queue
+from core.observability import snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,12 @@ class Phase3TriggerRequest(BaseModel):
     @classmethod
     def _coerce_str(cls, v: Any) -> Any:
         return coerce_case_run_id(v)
+
+
+@router.get("/metrics")
+async def aura_internal_metrics():
+    """Aura 프로세스 내부 경량 메트릭 스냅샷."""
+    return snapshot()
 
 
 async def _run_phase3_background(

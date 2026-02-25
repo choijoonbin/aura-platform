@@ -270,6 +270,63 @@ uvicorn main:app --host 0.0.0.0 --port 9000 --workers 4
 - Swagger UI: http://localhost:9000/docs
 - ReDoc: http://localhost:9000/redoc
 
+### 7. A-Phase 기능 사용 가이드 (A1~A9)
+
+#### 7-1) Finance LangGraph 조회 (A1)
+
+```bash
+# 토큰 생성
+TOKEN=$(python3 - <<'PY'
+from core.security.auth import create_token
+print(create_token(user_id="local-test", tenant_id="1"))
+PY
+)
+
+# Mermaid 텍스트 조회
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:9000/agents/finance/graph?format=mermaid"
+```
+
+현재 플로우:
+
+__start__ -> analyze
+analyze -> evidence_gather (caseId 있을 때)
+analyze -> plan (caseId 없을 때)
+evidence_gather -> plan -> execute
+execute -> tools (tool call 있을 때)
+execute -> reflect (tool call 없을 때)
+tools -> reflect -> __end__
+
+
+#### 7-2) 내부 경량 메트릭 조회 (A9)
+
+```bash
+curl -s "http://127.0.0.1:9000/aura/internal/metrics"
+```
+
+#### 7-3) 모델/프롬프트 버전 핀 설정 (A8)
+
+`.env`에 아래 값을 추가/수정:
+
+```env
+MODEL_VERSION_PIN=gpt-4.1-2025-04-14
+PROMPT_VERSION_PIN=aura-auditor-v1
+EXPERIMENT_TAG=exp-a1
+```
+
+#### 7-4) A-Phase 품질 테스트 실행 (A9)
+
+```bash
+pytest -q tests/unit/test_audit_pipeline_quality.py
+```
+
+#### 7-5) A2~A7 동작 요약
+
+- 동적 reasoning 생성: 고정 문구 최소화 및 케이스 맥락 기반 요약
+- 동적 RAG 질의/리랭킹: 전표 속성 기반 검색 + 규정/문맥 우선 정렬
+- Self-Verification: 근거/조항/인용 누락 점검 후 결과에 반영
+- Thought stream 정제: 내부 CoT 노출 리스크를 줄인 공개용 문장 제공
+
 ---
 
 ## 👨‍💻 개발 가이드

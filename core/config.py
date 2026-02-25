@@ -40,6 +40,10 @@ class Settings(BaseSettings):
         default="gpt-4o-mini",
         description="OpenAI 모델 이름 (또는 Azure deployment name)",
     )
+    model_version_pin: str | None = Field(
+        default=None,
+        description="모델 버전 핀 (설정 시 openai_model 대신 우선 사용). 예: gpt-4.1-2025-04-14",
+    )
     openai_temperature: float = Field(
         default=0.7,
         ge=0.0,
@@ -67,6 +71,14 @@ class Settings(BaseSettings):
     azure_openai_api_version: str = Field(
         default="2024-02-15-preview",
         description="Azure OpenAI API version",
+    )
+    prompt_version_pin: str = Field(
+        default="aura-auditor-v1",
+        description="프롬프트 버전 태그(실험/롤백 추적용)",
+    )
+    experiment_tag: str | None = Field(
+        default=None,
+        description="실험/AB 태그(로그·관측성용)",
     )
     # Embedding (Phase 6 RAG vector pipeline)
     openai_embedding_model: str = Field(
@@ -98,6 +110,14 @@ class Settings(BaseSettings):
         ge=0.0,
         le=1.0,
         description="pgvector 유사도 하한. 이 값 미만 결과는 제외 (기본 0.75)",
+    )
+    rag_index_version: str | None = Field(
+        default=None,
+        description="RAG 지식 인덱스 버전 핀 (예: 2026Q1). 설정 시 metadata.index_version 필터로 검색 범위 고정",
+    )
+    rag_effective_date_override: str | None = Field(
+        default=None,
+        description="규정 효력일 강제값(YYYY-MM-DD). 미설정 시 case 발생일 기준",
     )
     # RAG 벡터화 응답: 청크 배치 크기 (20~50). 대용량 시 메모리·전송 부담 완화.
     rag_chunk_batch_size: int = Field(
@@ -467,8 +487,9 @@ class Settings(BaseSettings):
     @property
     def openai_config(self) -> dict[str, Any]:
         """OpenAI/Azure 설정을 딕셔너리로 반환"""
+        effective_model = self.model_version_pin or self.azure_openai_deployment or self.openai_model
         base = {
-            "model": self.azure_openai_deployment or self.openai_model,
+            "model": effective_model,
             "temperature": self.openai_temperature,
             "max_tokens": self.openai_max_tokens,
         }

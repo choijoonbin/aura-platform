@@ -723,6 +723,7 @@ def retrieve_rag_pgvector(
             "sourceKey": doc_id_val if doc_id_val is not None else f"vec-{i}",
         }
         if isinstance(metadata_json, dict):
+            item["metadata_json"] = metadata_json
             if metadata_json.get("page_number") is not None:
                 item["page_number"] = metadata_json["page_number"]
             if metadata_json.get("file_path"):
@@ -736,6 +737,7 @@ def retrieve_rag_pgvector(
         elif isinstance(metadata_json, str):
             try:
                 meta = json.loads(metadata_json)
+                item["metadata_json"] = meta if isinstance(meta, dict) else {}
                 if meta.get("page_number") is not None:
                     item["page_number"] = meta["page_number"]
                 if meta.get("file_path"):

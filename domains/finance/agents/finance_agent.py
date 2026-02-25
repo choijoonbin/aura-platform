@@ -279,6 +279,15 @@ class FinanceAgent:
         response = await self.llm_client.client.ainvoke(messages)
         
         plan_steps = self._parse_plan(response.content)
+        # Observe-Think-Act-Verify 기본 골격을 항상 포함해 힌트 의존 없이 자율 조사 흐름을 고정한다.
+        otav_defaults = [
+            "1. Observe: 전표 데이터의 특이점(요일/시각/업종/예산/패턴)을 관찰합니다.",
+            "2. Think: 필요한 규정 장/조항 후보를 선택합니다.",
+            "3. Act: 선택된 규정 조항을 조회하고 근거를 연결합니다.",
+            "4. Verify: 결론과 근거의 모순 여부를 자가 검증합니다.",
+        ]
+        if len(plan_steps) < 4:
+            plan_steps = self._parse_plan("\n".join(otav_defaults))
         evidence_refs = [
             {"type": e.get("type"), "source": e.get("source"), "ref": e.get("ref")}
             for e in state.get("evidence", [])
@@ -462,9 +471,28 @@ class FinanceAgent:
             "sources": state.get("evidence", []),
         }
         
-        final_response = AIMessage(
-            content="조사 및 조치 제안이 완료되었습니다. 결과를 확인해주세요."
+        evidence_count = len(state.get("evidence", []))
+        logs = state.get("execution_logs", [])
+        executed_count = sum(1 for l in logs if l.get("status") == "success")
+        rejected_count = sum(1 for l in logs if l.get("status") == "rejected")
+        summary = (
+            f"조사 결과를 정리했습니다. 수집 근거 {evidence_count}건, "
+            f"도구 실행 {executed_count}건, 사용자 거절 {rejected_count}건입니다."
         )
+        try:
+            context = state.get("context") or {}
+            verify_prompt = (
+                "다음 감사 실행 요약을 2문장 한국어로 정리하되 과장 없이 사실만 기술하세요.\n"
+                f"- summary: {summary}\n"
+                f"- goal: {state.get('goal', '')}\n"
+                f"- context: {context}\n"
+            )
+            llm_text = await self.llm_client.ainvoke(verify_prompt)
+            if isinstance(llm_text, str) and llm_text.strip():
+                summary = llm_text.strip()
+        except Exception:
+            pass
+        final_response = AIMessage(content=summary)
         
         return {
             "messages": state["messages"] + [final_response],

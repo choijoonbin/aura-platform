@@ -6,6 +6,7 @@
 """
 
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,129 @@ GENERATIVE_MONOLOGUE_SYSTEM = """[Role]
 - 문장 내 **금액**, **제n조**, **시간** 등 핵심 수치·조항은 반드시 마크다운으로 강조하십시오.
 - 금액: **1,234,567원** 형태로 표기. 조항: **제5조**, **제1항** 형태로 표기."""
 
+_COT_SENSITIVE_PATTERNS = (
+    "chain-of-thought",
+    "숨은 추론",
+    "내부 추론",
+    "system prompt",
+    "raw cot",
+)
+
+_ARTICLE_PATTERN = re.compile(r"제\s*\d+\s*조")
+_UNSUPPORTED_QUANT_PATTERN = re.compile(r"\b\d+\s*%|\b\d+\s*개월")
+_SPECULATIVE_CLAIM_PATTERN = re.compile(
+    r"(과거\s*승인|유사한\s*패턴|반복적(?:으로)?\s*발생|의혹|업무\s*연관성\s*(?:결여|부재)|재무\s*건전성.*리스크)"
+)
+_RISK_ASSERTION_PATTERN = re.compile(
+    r"(위반\s*가능성|위반(?:입니다|으로\s*판단)|리스크를\s*초래|점검이\s*필요|판단됩니다)"
+)
+
+
+def sanitize_public_thought(text: str) -> str:
+    """
+    외부 노출용 thought 정제.
+    내부 추론이 유출될 소지가 있는 문구를 제거하고 길이를 제한합니다.
+    """
+    if not isinstance(text, str):
+        return ""
+    out = text.strip()
+    lower = out.lower()
+    for pattern in _COT_SENSITIVE_PATTERNS:
+        if pattern in lower:
+            out = "근거를 종합해 규정 적합성을 검토 중입니다."
+            break
+    if len(out) > 260:
+        out = out[:257] + "..."
+    return out
+
+
+def _has_rag_evidence(evidence_items: list[dict[str, Any]] | None) -> bool:
+    if not evidence_items:
+        return False
+    for e in evidence_items:
+        if not isinstance(e, dict):
+            continue
+        t = str(e.get("type") or "").upper()
+        if t in {"RAG_CHUNK", "REGULATION_CLAUSE"}:
+            return True
+        if e.get("chunk_id") or e.get("chunkId") or e.get("location") or e.get("article"):
+            return True
+    return False
+
+
+def _has_supported_quant_source(
+    *,
+    case_data: dict[str, Any] | None = None,
+    evidence_items: list[dict[str, Any]] | None = None,
+) -> bool:
+    if isinstance(case_data, dict):
+        for k in ("increase_rate", "comparison_period_months", "pattern_delta_percent"):
+            if case_data.get(k) is not None:
+                return True
+    if evidence_items:
+        for e in evidence_items:
+            if not isinstance(e, dict):
+                continue
+            if e.get("increase_rate") is not None or e.get("comparison_period_months") is not None:
+                return True
+            if isinstance(e.get("stats"), dict):
+                stats = e["stats"]
+                if stats.get("increase_rate") is not None or stats.get("comparison_period_months") is not None:
+                    return True
+    return False
+
+
+def _has_history_evidence(evidence_items: list[dict[str, Any]] | None) -> bool:
+    if not evidence_items:
+        return False
+    for e in evidence_items:
+        if not isinstance(e, dict):
+            continue
+        t = str(e.get("type") or "").upper()
+        if t in {"SIMILAR_CASE", "PATTERN_STATS", "HISTORY", "OPEN_ITEMS", "LINEAGE"}:
+            return True
+        src = str(e.get("source") or "").lower()
+        if any(k in src for k in ("search_documents", "get_open_items", "lineage")):
+            return True
+    return False
+
+
+def enforce_grounded_public_thought(
+    text: str,
+    *,
+    case_data: dict[str, Any] | None = None,
+    evidence_items: list[dict[str, Any]] | None = None,
+    require_rag_for_claims: bool = False,
+) -> str:
+    """
+    No-RAG, No-Claim:
+    - RAG 근거 없는 조항/위반 단정 금지
+    - 근거 없는 비율·기간(예: 20%, 3개월) 금지
+    """
+    out = sanitize_public_thought(text)
+    if not out:
+        return out
+    has_rag = _has_rag_evidence(evidence_items)
+    has_quant_source = _has_supported_quant_source(case_data=case_data, evidence_items=evidence_items)
+    has_history = _has_history_evidence(evidence_items)
+    has_article_claim = bool(_ARTICLE_PATTERN.search(out))
+    has_unsupported_quant = bool(_UNSUPPORTED_QUANT_PATTERN.search(out)) and not has_quant_source
+    has_strong_claim = any(k in out for k in ("명백히 위반", "위반하고 있음", "위반입니다", "확인하였습니다", "판단됩니다"))
+    has_speculative_claim = bool(_SPECULATIVE_CLAIM_PATTERN.search(out))
+    has_risk_assertion = bool(_RISK_ASSERTION_PATTERN.search(out))
+
+    if has_unsupported_quant:
+        return "수신 데이터와 규정 근거를 재대조 중입니다. 확정 수치는 검증 후 제시하겠습니다."
+    if has_article_claim and not has_rag:
+        return "규정 조항 매칭을 진행 중이며, 조항 근거가 확인되면 상세 판단을 제시하겠습니다."
+    if has_speculative_claim and not has_history:
+        return "수신 전표와 수집 증거를 대조 중이며, 확인된 근거만으로 판단을 업데이트하겠습니다."
+    if has_risk_assertion and not has_rag:
+        return "규정 근거가 확인된 항목부터 순차적으로 판단을 제시하겠습니다."
+    if require_rag_for_claims and has_strong_claim and not has_rag:
+        return "현재 규정 근거 매칭이 완료되지 않아 확정 판단을 보류합니다."
+    return out
+
 
 def _build_context_dict(case_data: dict[str, Any] | None, **kwargs: Any) -> dict[str, Any]:
     """LLM에 전달할 구조화된 컨텍스트. 구체적 수치·사실을 담습니다."""
@@ -102,9 +226,9 @@ def _build_context_dict(case_data: dict[str, Any] | None, **kwargs: Any) -> dict
 # 단계별 Reasoning Tone 가이드 (의도·전문성 방향 제시, 대본 아님)
 _STEP_REASONING_TONE: dict[str, str] = {
     "INPUT_NORM": "입력된 데이터를 정밀 분석하여, 이번 건이 휴일 지출인지 혹은 한도 초과인지 검토할 우선순위를 설정하는 단계입니다. 금액·시각·가맹점을 반영한 한 문장 독백을 생성하십시오.",
-    "EVIDENCE_GATHER": "{amount}원 결제 건과 연관된 과거 승인 내역 및 동일 부서의 유사 패턴을 추적하여 증거의 연결 고리를 확보하는 단계입니다. 구체적 금액·시각이 있으면 문장에 넣으십시오.",
+    "EVIDENCE_GATHER": "수신 전표 데이터와 현재 확보된 증거를 대조하여, 확인 가능한 사실 근거를 정리하는 단계입니다. 실제 제공된 금액·시각만 사용하십시오.",
     "REGULATION_MATCH": "사내 규정를 바탕으로, 결제 시점이 업무 연관성을 인정받을 수 있는 예외 조항에 해당되는지 대조하는 단계입니다. 발생 시각·경비 유형을 활용하십시오.",
-    "RULE_SCORING": "수집된 증거와 규정 조문을 종합하여, 단순 실수보다 의도적인 한도 우회 정황이 포착되면 위험도를 상향 조정하는 단계입니다. 규정 매칭 건수 등이 있으면 반영하십시오.",
+    "RULE_SCORING": "수집된 증거와 규정 조문을 종합하여 위험도를 산정하는 단계입니다. 규정 매칭이 없으면 확정 판단 대신 추가 확인 필요성을 표현하십시오.",
     "LLM_REASONING": "최종 판정을 내리기 전, 감사관의 시각으로 이 지출이 회사의 재무 건전성에 미칠 임팩트를 고려하여 논리적 근거를 정리하는 단계입니다.",
     "EVIDENCE_COLLECTED": "규정·전표 등 증거를 수집한 직후, 이 증거가 위반 판단과 어떤 상관관계가 있는지·어떤 규정과 대조할지 독백하는 단계입니다. 증거 건수를 활용하십시오.",
     "analyze": "케이스 목표와 컨텍스트를 분석하여, 어떤 규정·업종·시점을 검토할지 우선순위를 정하는 단계입니다.",

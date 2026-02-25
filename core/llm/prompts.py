@@ -12,6 +12,8 @@ from typing import Any
 
 import yaml
 
+from core.config import settings
+
 logger = logging.getLogger(__name__)
 
 # ==================== YAML Prompt Loader ====================
@@ -114,7 +116,13 @@ def get_auditor_prompt(domain: str = "finance", **kwargs: Any) -> str:
         context_str = context if isinstance(context, str) else str(context)
         sections.append(f"\n[Current Context]\n{context_str}")
     
-    return "\n".join(section.strip() for section in sections if section.strip())
+    prompt_text = "\n".join(section.strip() for section in sections if section.strip())
+    version_tag = getattr(settings, "prompt_version_pin", "aura-auditor-v1")
+    experiment_tag = getattr(settings, "experiment_tag", None)
+    header = f"[Prompt-Version] {version_tag}"
+    if experiment_tag:
+        header += f" [Experiment] {experiment_tag}"
+    return f"{header}\n\n{prompt_text}"
 
 
 def reload_yaml_prompts() -> None:
