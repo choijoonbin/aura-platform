@@ -385,7 +385,7 @@ async def select_agent_for_request(
     
     Fallback: 가용 에이전트가 없거나 선택 실패 시 "finance_aura" 반환 (백엔드에 실재하는 기본 키)
     """
-    logger.info(
+    logger.debug(
         "select_agent_for_request: start tenant_id=%s user_query=%s context_keys=%s",
         tenant_id,
         (user_query[:200] + "..." if user_query and len(user_query) > 200 else user_query),
@@ -402,8 +402,7 @@ async def select_agent_for_request(
     if len(agents) == 1:
         agent_key = agents[0].get("agentKey") or agents[0].get("agent_key")
         if agent_key:
-            logger.info("select_agent_for_request: single-agent shortcut key=%s", agent_key)
-            logger.info(f"select_agent_for_request: Single agent available, selected {agent_key}")
+            logger.info("select_agent_for_request: selected key=%s (single agent)", agent_key)
             return agent_key
     
     # 3. LLM 기반 선택 로직
@@ -421,7 +420,7 @@ async def select_agent_for_request(
             }
             for a in agents[:10]  # 최대 10개만 고려
         ]
-        logger.info(
+        logger.debug(
             "select_agent_for_request: candidates=%s",
             [a.get("agentKey") or a.get("agent_key") for a in agents_summary],
         )
@@ -468,8 +467,7 @@ JSON 형식 없이 agentKey만 반환합니다.
         # agentKey 검증
         available_keys = [a.get("agentKey") or a.get("agent_key") for a in agents_summary]
         if selected_key in available_keys:
-            logger.info("select_agent_for_request: decision=llm key=%s", selected_key)
-            logger.info(f"select_agent_for_request: LLM selected {selected_key} for query: {query_context[:50]}")
+            logger.info("select_agent_for_request: selected key=%s (llm)", selected_key)
             return selected_key
         else:
             # 응답이 agentKey가 아니면 도메인 기반 추론
@@ -483,33 +481,30 @@ JSON 형식 없이 agentKey만 반환합니다.
                     if domain_upper in ("DEV", "DEVOPS"):
                         selected_key = a.get("agentKey") or a.get("agent_key")
                         if selected_key:
-                            logger.info("select_agent_for_request: decision=domain key=%s domain=%s", selected_key, domain_upper)
-                            logger.info(f"select_agent_for_request: Domain-based selection (DEV/DEVOPS): {selected_key}")
+                            logger.info("select_agent_for_request: selected key=%s (domain=%s)", selected_key, domain_upper)
                             return selected_key
             elif any(kw in query_lower for kw in ["finance", "전표", "회계", "경비", "지출", "송장", "재무", "accounting"]):
                 for a in agents_summary:
                     if a.get("domain", "").upper() == "FINANCE":
                         selected_key = a.get("agentKey") or a.get("agent_key")
                         if selected_key:
-                            logger.info("select_agent_for_request: decision=domain key=%s domain=FINANCE", selected_key)
-                            logger.info(f"select_agent_for_request: Domain-based selection (FINANCE): {selected_key}")
+                            logger.info("select_agent_for_request: selected key=%s (domain=FINANCE)", selected_key)
                             return selected_key
             elif any(kw in query_lower for kw in ["인사", "채용", "직원", "hr", "human"]):
                 for a in agents_summary:
                     if a.get("domain", "").upper() == "HR":
                         selected_key = a.get("agentKey") or a.get("agent_key")
                         if selected_key:
-                            logger.info("select_agent_for_request: decision=domain key=%s domain=HR", selected_key)
-                            logger.info(f"select_agent_for_request: Domain-based selection (HR): {selected_key}")
+                            logger.info("select_agent_for_request: selected key=%s (domain=HR)", selected_key)
                             return selected_key
             
-            logger.info("select_agent_for_request: decision=fallback_first key=%s", agents_summary[0].get("agentKey") or agents_summary[0].get("agent_key") or "finance_aura")
-            logger.warning(f"select_agent_for_request: LLM selected invalid key '{selected_key}', falling back to first agent")
+            fallback_key = agents_summary[0].get("agentKey") or agents_summary[0].get("agent_key") or "finance_aura"
+            logger.info("select_agent_for_request: selected key=%s (fallback, llm invalid)", fallback_key)
             return agents_summary[0].get("agentKey") or agents_summary[0].get("agent_key") or "finance_aura"
     
     except Exception as e:
-        logger.info("select_agent_for_request: decision=exception fallback to first agent (if any)")
-        logger.warning(f"select_agent_for_request: LLM selection failed: {e}, falling back to first agent")
+        logger.debug("select_agent_for_request: LLM selection failed: %s", e)
+        logger.info("select_agent_for_request: selected key=finance_aura (exception fallback)")
         if agents:
             return agents[0].get("agentKey") or agents[0].get("agent_key") or "finance_aura"
         return "finance_aura"

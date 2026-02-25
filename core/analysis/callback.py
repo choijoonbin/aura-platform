@@ -3,7 +3,7 @@ Case Audit Analysis — BE Callback
 
 분석 완료 시 BE로 POST. 재시도 3회 (지수 backoff).
 멱등성: 동일 (runId, proposal) 재전송 시 BE dedup 처리.
-콜백 200 OK 후: POST …/cases/{caseId}/status 로 케이스 상태를 RESOLVED 로 갱신 (정상 종료 시만).
+콜백 200 OK 후: POST …/cases/{caseId}/status 로 케이스 상태를 NEW 로 갱신 (정상 종료 시만).
 """
 
 import logging
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 케이스 상태 API: 정상 완료 시 호출. 실패(FAILED) 시에는 호출하지 않음.
 CASE_STATUS_PATH = "/api/synapse/cases/{case_id}/status"
-CASE_STATUS_ON_COMPLETE = "RESOLVED"
+CASE_STATUS_ON_COMPLETE = "NEW"
 CASE_STATUS_TIMEOUT = 10.0
 
 
@@ -60,15 +60,14 @@ def _build_final_result(audit_result: dict[str, Any]) -> dict[str, Any]:
             }
             for p in audit_result.get("proposals", [])
         ],
-        # case_analysis_result 필수 필드 (Autonomous Conclusion + citations)
         "risk_score": audit_result.get("risk_score", round(score * 100)),
         "violation_clause": audit_result.get("violation_clause", ""),
+        "violation_clauses": audit_result.get("violation_clauses", decision_reason.get("violation_clauses", [])),
         "reasoning_summary": audit_result.get("reasoning_summary", audit_result.get("reasonText", "")),
         "recommended_action": audit_result.get("recommended_action", ""),
         "citations": audit_result.get("citations", []),
-        # 최종 결과 고도화: 구조화된 인사이트 (Reason + Evidence JSON)
         "decision_reason": decision_reason,
-        # V65 스키마: 문서·행·청크 식별 — snake_case 고정 (BE 저장 일치)
+        "evidence_map_json": audit_result.get("evidence_map_json", decision_reason.get("evidence_map_json", [])),
         "doc_id": audit_result.get("doc_id"),
         "item_id": audit_result.get("item_id"),
         "chunk_id": audit_result.get("chunk_id"),
@@ -129,7 +128,7 @@ async def send_callback(
         payload["partialEvents"] = [{"stage": "callback", "errorMessage": error_message}]
 
     ok = await post_with_retry(url, payload, success_status_codes=(200,))
-    # 콜백 200 OK 후, 정상 완료 시에만 케이스 상태 API 호출 (진행중 → RESOLVED). 실패 건은 호출 안 함.
+    # 콜백 200 OK 후, 정상 완료 시에만 케이스 상태 API 호출 (진행중 → NEW). 실패 건은 호출 안 함.
     if ok and status.upper() == "COMPLETED":
         await _notify_case_status(case_id)
     return ok
@@ -138,7 +137,7 @@ async def send_callback(
 async def _notify_case_status(case_id: str, new_status: str = CASE_STATUS_ON_COMPLETE) -> bool:
     """
     POST …/api/synapse/cases/{caseId}/status — 케이스를 완료 처리.
-    Body: { "status": "RESOLVED" }. 실패 시 로그만 남기고 True 반환(콜백 성공은 이미 완료).
+    Body: { "status": "NEW" }. 실패 시 로그만 남기고 True 반환(콜백 성공은 이미 완료).
     """
     base = settings.dwp_gateway_url.rstrip("/")
     path = CASE_STATUS_PATH.format(case_id=case_id).lstrip("/")

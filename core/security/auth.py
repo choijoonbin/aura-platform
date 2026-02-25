@@ -45,6 +45,21 @@ class User(BaseModel):
     is_authenticated: bool = True
 
 
+# S2S 인증 시 사용하는 시스템 사용자 (X-Internal-Service-Key 검증 통과 시)
+INTERNAL_SERVICE_USER_ID = "internal-service"
+
+
+def get_internal_service_user(tenant_id: str = "1") -> User:
+    """내부 서비스(S2S) 인증 통과 시 SecurityContext용 사용자. role=admin으로 시스템 권한 부여."""
+    return User(
+        user_id=INTERNAL_SERVICE_USER_ID,
+        tenant_id=tenant_id,
+        email=None,
+        role="admin",
+        is_authenticated=True,
+    )
+
+
 class AuthService:
     """
     인증 서비스 클래스

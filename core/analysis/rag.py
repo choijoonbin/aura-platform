@@ -384,12 +384,11 @@ def _pgvector_search(
     else:
         sql += f" ORDER BY embedding <=> {_SQL_CAST_VECTOR} LIMIT :k"
     
-    # 디버그 로그
     debug_params = {k: v for k, v in params.items() if k != "embedding"}
-    logger.info(f"[RAG Search] SQL params (excluding embedding): {debug_params}")
-    
+    logger.debug("[RAG Search] SQL params (excluding embedding): %s", debug_params)
+
     results = list(session.execute(text(sql), params).fetchall())
-    logger.info(f"[RAG Search] Query returned {len(results)} rows")
+    logger.debug("[RAG Search] Query returned %d rows", len(results))
     return results
 
 

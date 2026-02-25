@@ -134,6 +134,7 @@ class AuraAnalyzeRequest(BaseModel):
     runId: str = Field(..., description="BE가 생성한 run 식별자")
     caseId: str | None = Field(default=None, description="케이스 ID (path와 중복 가능, BE는 Long으로 전송)")
     evidence: dict[str, Any] | None = Field(default=None, description="evidence snapshot (문서/라인/오픈아이템/거래처 등)")
+    intended_risk_type: str | None = Field(default=None, description="사용자 지정 위험 유형(예: 사적유용, 중복청구). 있으면 최우선 가이드로 분석.")
     mode: str | None = Field(default="LIVE", description="LIVE | SIMULATION")
     requestedBy: str | None = Field(default="HUMAN", description="HUMAN | SYSTEM")
     options: dict[str, Any] | None = Field(default=None, description="model, policyVersion 등")
@@ -150,6 +151,7 @@ async def _run_analysis_background(
     tenant_id: str,
     auth_token: str | None,
     body_evidence: dict[str, Any] | None = None,
+    intended_risk_type: str | None = None,
     x_sandbox: str | None = None,
 ):
     """백그라운드 분석 실행 + 큐에 이벤트 적재 + 완료 시 콜백. body_evidence: C(폴백)용. 정책 참조 로그용 context."""
@@ -187,6 +189,7 @@ async def _run_analysis_background(
             run_id=run_id,
             tenant_id=tenant_id,
             body_evidence=body_evidence,
+            intended_risk_type=intended_risk_type,
             model_name=config.model_name,
             agent_config=config,
         ):
@@ -208,6 +211,21 @@ async def _run_analysis_background(
                 except Exception as e:
                     logger.debug("Agent stream push (thought_stream/AGENT_STREAM) skipped: %s", e)
             if event_type in ("completed", "failed"):
+                # 끝맺음: completed 시 agent_activity_log에 '분석 완료' 메시지 한 건 푸시 (BE 타임라인 마지막 행)
+                if event_type == "completed":
+                    try:
+                        from core.audit.schemas import AgentAuditEvent
+                        from core.audit.writer import get_audit_writer
+                        closing_ev = AgentAuditEvent.reasoning_composed(
+                            tenant_id=tenant_id,
+                            case_id=case_id,
+                            actor_agent_id=config.agent_id if config else "finance_agent",
+                            trace_id=f"trace-{case_id}-{run_id[:8]}",
+                            message="본 건에 대한 분석을 마쳤습니다. 판정 요약은 추론 탭에서 확인하실 수 있습니다.",
+                        )
+                        get_audit_writer().ingest_fire_and_forget(closing_ev)
+                    except Exception as e:
+                        logger.debug("Analysis completed closing message push skipped: %s", e)
                 break
 
         if event_type == "completed":
@@ -282,6 +300,7 @@ async def case_analysis_runs(
     asyncio.create_task(_run_analysis_background(
         case_id, run_id, tenant_id_val, auth_token,
         body_evidence=body.evidence,
+        intended_risk_type=body.intended_risk_type or (body.evidence.get("intended_risk_type") if isinstance(body.evidence, dict) else None) or (body.options.get("intended_risk_type") if isinstance(body.options, dict) else None),
         x_sandbox=x_sandbox,
     ))
 
@@ -454,6 +473,20 @@ async def case_analysis_trigger(
                         get_audit_writer().ingest_fire_and_forget(ev)
                     except Exception as e:
                         logger.debug("Agent stream push (thought_stream/AGENT_STREAM) skipped: %s", e)
+                if event_type == "completed":
+                    try:
+                        from core.audit.schemas import AgentAuditEvent
+                        from core.audit.writer import get_audit_writer
+                        closing_ev = AgentAuditEvent.reasoning_composed(
+                            tenant_id=tenant_id or "1",
+                            case_id=case_id,
+                            actor_agent_id=config.agent_id if config else "finance_agent",
+                            trace_id=f"trace-{case_id}-trigger",
+                            message="본 건에 대한 분석을 마쳤습니다. 판정 요약은 추론 탭에서 확인하실 수 있습니다.",
+                        )
+                        get_audit_writer().ingest_fire_and_forget(closing_ev)
+                    except Exception as e:
+                        logger.debug("Analysis completed closing message push skipped: %s", e)
                 await asyncio.sleep(STREAM_EVENT_DELAY)
         except Exception as e:
             logger.exception(f"Audit analysis trigger failed: {e}")
@@ -696,17 +729,20 @@ async def case_analysis(
             "score": audit_result.get("score", 0),
             "severity": audit_result.get("severity", "MEDIUM"),
         }
-        # Autonomous Conclusion (BE/FE Aura AI Workspace 연동)
+        # Autonomous Conclusion (BE/FE Aura AI Workspace 연동) — violation_clause, evidence_map_json 필수
         if audit_result.get("risk_score") is not None:
             out["risk_score"] = audit_result["risk_score"]
-        if audit_result.get("violation_clause") is not None:
-            out["violation_clause"] = audit_result["violation_clause"]
+        out["violation_clause"] = audit_result.get("violation_clause", "")
+        out["violation_clauses"] = audit_result.get("violation_clauses", [])
         if audit_result.get("reasoning_summary") is not None:
             out["reasoning_summary"] = audit_result["reasoning_summary"]
         if audit_result.get("recommended_action") is not None:
             out["recommended_action"] = audit_result["recommended_action"]
         if audit_result.get("citations") is not None:
             out["citations"] = audit_result["citations"]
+        out["evidence_map_json"] = audit_result.get("evidence_map_json", [])
+        if audit_result.get("decision_reason") is not None:
+            out["decision_reason"] = audit_result["decision_reason"]
         return out
 
     # Fallback: get_case 기반 templates

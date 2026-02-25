@@ -2,12 +2,13 @@
 API Middleware Module
 
 FastAPI 미들웨어를 구현합니다.
-- JWT 인증
+- JWT 인증 + 내부 서비스 전용 API Key (X-Internal-Service-Key) 이중 인증
 - X-Tenant-ID 헤더 처리
 - 로깅 (raw ASGI: SSE 스트림 본문을 건드리지 않음, BE 중계 0바이트 방지)
 - 예외 처리
 """
 
+import hmac
 import logging
 import time
 import uuid
@@ -19,17 +20,19 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from core.config import settings
-from core.security.auth import extract_bearer_token, get_user_from_token
+from core.security.auth import extract_bearer_token, get_internal_service_user, get_user_from_token
 
 logger = logging.getLogger(__name__)
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
     """
-    JWT 인증 미들웨어
-    
-    Authorization 헤더에서 JWT를 추출하고 검증합니다.
-    검증된 사용자 정보를 request.state에 저장합니다.
+    JWT 인증 미들웨어 + 내부 서비스(S2S) API Key 인증.
+
+    - 인증 제외 경로: EXEMPT_PATHS / EXEMPT_PATTERNS 는 JWT 없이 통과.
+    - 내부 키 경로: INTERNAL_KEY_PATTERNS 에 해당하고, X-Internal-Service-Key 가 AURA_INTERNAL_API_KEY 와 일치하면
+      사용자 세션 없이 시스템 권한 사용자로 통과 (401 없음). 가급적 내부 네트워크에서만 사용.
+    - 그 외: Authorization Bearer JWT 필수.
     """
     
     # 인증이 필요 없는 경로
@@ -50,6 +53,19 @@ class AuthMiddleware(BaseHTTPMiddleware):
         "/aura/test/stream",  # 테스트/데모용 스트림 (OptionalUser로 처리, 토큰 없이 호출 가능)
     ]
     
+    # 내부 서비스 API Key 인증 허용 경로 (X-Internal-Service-Key 일치 시 JWT 없이 internal-service 권한으로 통과)
+    # BE 배치/비동기 호출: 케이스 분석·스크리닝·RAG·에이전트. 게이트웨이(/api/aura/...) 경로 포함.
+    INTERNAL_KEY_PATTERNS = [
+        "/aura/cases/",           # 분석 실행·결과 조회 전체
+        "/api/aura/cases/",
+        "/aura/detect/screen",     # 단건 스크리닝 + screen-batch
+        "/api/aura/detect/screen",
+        "/aura/rag/",             # 벡터화 관련
+        "/api/aura/rag/",
+        "/aura/agents/",           # 에이전트 설정 리프레시 (EXEMPT에도 있어 무인증 통과 가능)
+        "/api/aura/agents/",
+    ]
+    
     async def dispatch(
         self,
         request: Request,
@@ -68,6 +84,33 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if is_exempt:
             logger.debug(f"Path {path} is exempt from authentication")
             return await call_next(request)
+        
+        # 내부 서비스(S2S) API Key 인증: 해당 경로이고 키가 설정된 경우
+        # 보안: AURA_INTERNAL_API_KEY가 None/빈문자열/공백일 때는 내부 키 인증 비활성 (의도치 않은 통과 방지)
+        configured_key = (settings.aura_internal_api_key or "").strip()
+        is_internal_key_path = any(path.startswith(p) for p in self.INTERNAL_KEY_PATTERNS)
+
+        if is_internal_key_path and not configured_key:
+            logger.warning(
+                "Internal API Key is not configured. S2S authentication skipped. "
+                "Set AURA_INTERNAL_API_KEY in .env to use X-Internal-Service-Key for path=%s",
+                path,
+            )
+
+        if configured_key and is_internal_key_path:
+            internal_key = request.headers.get("X-Internal-Service-Key")
+            if internal_key is not None and internal_key.strip():
+                if hmac.compare_digest(internal_key.strip(), configured_key):
+                    # X-Tenant-ID 우선 사용, 없으면 기본값 "1"
+                    tenant_id = (request.headers.get("X-Tenant-ID") or "").strip() or "1"
+                    request.state.user = get_internal_service_user(tenant_id)
+                    request.state.tenant_id = tenant_id
+                    logger.debug(
+                        "Internal service auth: path=%s tenant_id=%s",
+                        path,
+                        tenant_id,
+                    )
+                    return await call_next(request)
         
         # 개발 모드에서 인증 비활성화 옵션
         if not settings.require_auth:

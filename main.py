@@ -21,6 +21,8 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+# httpx 요청마다 INFO 로그 방지 (실제 요청 데이터는 필요 시 DEBUG로 확인)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 @asynccontextmanager
@@ -77,6 +79,7 @@ from api.routes.finance_agent import router as finance_agent_router
 from api.routes.triggers import router as triggers_router
 from api.routes.aura_internal import router as aura_internal_router
 from api.routes.aura_rag import router as aura_rag_router
+from api.routes.aura_detect import router as aura_detect_router
 
 # BaseHTTPMiddleware 미경유 스트림 전용 앱 (스트림 취소 방지)
 # CORS 미들웨어 제거 — CORSMiddleware도 BaseHTTPMiddleware라 스트림을 취소함. BE→Aura는 서버 간 호출이라 CORS 불필요.
@@ -112,6 +115,7 @@ app.include_router(finance_agent_router)  # Finance 도메인
 app.include_router(triggers_router)  # Phase B: case-updated 웹훅
 app.include_router(aura_internal_router)  # Phase3: internal trigger
 app.include_router(aura_rag_router)  # Phase 6: RAG vector ingest
+app.include_router(aura_detect_router)  # Pre-Analysis Screening: POST /aura/detect/screen
 
 
 @app.get("/")

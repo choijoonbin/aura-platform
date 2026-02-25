@@ -123,6 +123,17 @@ def reload_yaml_prompts() -> None:
     _yaml_prompt_cache.clear()
     logger.info("YAML prompt cache cleared")
 
+
+def get_screening_prompt() -> str:
+    """
+    Pre-Analysis Screening 시스템 프롬프트 반환.
+    core/llm/prompts/screening.yaml 의 system 키를 사용하고, 없으면 빈 문자열.
+    """
+    data = _load_yaml_prompt("screening.yaml")
+    if data and isinstance(data.get("system"), str):
+        return (data["system"] or "").strip()
+    return ""
+
 # ==================== Base System Prompt ====================
 BASE_SYSTEM_PROMPT = """
 You are Aura, an intelligent AI assistant for DWP (Digital Workplace Platform).

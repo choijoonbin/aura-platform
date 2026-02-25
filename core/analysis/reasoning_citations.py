@@ -112,7 +112,7 @@ def build_citation_reasoning(
 ) -> str:
     """
     검색 결과에서 regulation_article, regulation_clause를 추출하여 인용형 reasoning 문장 생성.
-    예: "사내 경비 규정 제5조 2항(주말 식대 제한)에 의거하여, 본 야간 결제 건은 리스크 수준 'HIGH'로 분류됨."
+    RAG 검색 결과(doc_list)의 location, title, excerpt만 사용하며 고정 문구는 사용하지 않음.
 
     Args:
         doc_list: RAG 검색 결과 (regulation_article, regulation_clause, location, title 포함 가능).
@@ -132,12 +132,8 @@ def build_citation_reasoning(
     clause = doc.get("regulation_clause") or doc.get("regulationClause")
     if not location and (article or clause):
         location = f"규정 {article or ''} {clause or ''}".strip()
-    title_short = (doc.get("title") or "")[:30]
-    if title_short and "식대" in title_short:
-        title_short = "주말 식대 제한"
-    elif title_short and "시간" in title_short:
-        title_short = "심야 시간대 제한"
-    elif not title_short and location:
-        title_short = location.replace("규정 ", "")[:20]
-    cite = f"{location}({title_short})" if title_short else location
-    return f"사내 경비 규정 {cite}에 의거하여, {default_subject}은(는) 리스크 수준 '{risk_level}'로 분류됨."
+    title_short = (doc.get("title") or doc.get("excerpt") or doc.get("content") or "").strip()[:50]
+    if not title_short and location:
+        title_short = location.replace("규정 ", "")[:30]
+    cite = f"{location}({title_short})" if title_short else (location or "규정")
+    return f"수집된 규정 {cite}에 의거하여, {default_subject}은(는) 리스크 수준 '{risk_level}'로 분류됨."

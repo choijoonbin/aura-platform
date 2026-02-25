@@ -268,6 +268,11 @@ class Settings(BaseSettings):
         default=True,
         description="JWT 인증 필수 여부 (개발 시 false 가능)"
     )
+    # S2S(서비스 간) 인증: BE 등 신뢰 서버가 X-Internal-Service-Key로 호출 시 JWT 없이 허용. 내부 네트워크에서만 사용 권장.
+    aura_internal_api_key: str | None = Field(
+        default=None,
+        description="내부 서비스 전용 API Key (X-Internal-Service-Key와 일치 시 인증 통과). 미설정 시 비활성.",
+    )
     
     # ==================== Logging Configuration ====================
     log_level: str = Field(
