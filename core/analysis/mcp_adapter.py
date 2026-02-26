@@ -150,6 +150,12 @@ def _tool_base_url() -> str | None:
 
 
 def _tool_path(base: str, path: str) -> str:
+    if base.endswith("/mcp/tools/v2"):
+        return f"{base}{path}"
+    if base.endswith("/api/mcp/tools/v2"):
+        return f"{base}{path}"
+    if base.endswith("/api/synapse/mcp/tools/v2"):
+        return f"{base}{path}"
     if base.endswith("/mcp/tools"):
         return f"{base}{path}"
     if base.endswith("/api/mcp/tools"):
@@ -238,6 +244,15 @@ async def resolve_fact_context(
         or request_ctx.get("user_id")
     )
     user_id_str = str(user_id).strip() if user_id is not None else None
+    # dwp-mcp-server가 userId를 numeric으로 파싱하므로 비숫자 user_id는 시스템 계정 0으로 정규화
+    if user_id_str and not user_id_str.isdigit():
+        logger.info(
+            "mcp_adapter normalize non-numeric X-User-ID to system id: stage=%s case_id=%s original=%s normalized=0",
+            stage,
+            case_id,
+            user_id_str,
+        )
+        user_id_str = "0"
     trace_id = str(default_headers.get("X-Trace-ID") or request_ctx.get("trace_id") or "").strip() or None
     effective_headers = {}
     if tenant_id:

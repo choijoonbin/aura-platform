@@ -1,0 +1,266 @@
+
+##휴무일케이스 우선 1건 실행
+2026-02-27 05:49:44,764 - api.middleware - INFO - [10241575-e983-4dde-af33-309bd9e913b1] POST /aura/detect/screen-batch - Client: 127.0.0.1
+2026-02-27 05:49:45,621 - api.routes.aura_detect - INFO - Aura detect_screen_batch called: n=1 case_ids=[''] (BE가 이 로그가 보이면 실제로 Aura를 호출한 것)
+2026-02-27 05:49:45,628 - core.analysis.mcp_adapter - INFO - mcp_adapter normalize non-numeric X-User-ID to system id: stage=screening case_id= original=internal-service normalized=0
+2026-02-27 05:49:49,186 - core.analysis.mcp_adapter - INFO - mcp_adapter tool result error path=/master-data trace=trace-screen-batch-1 code=FORBIDDEN msg=권한이 없습니다.
+2026-02-27 05:49:49,187 - core.analysis.mcp_adapter - INFO - mcp_adapter resolved stage=screening case_id= mode=hybrid occurredAt=2026-02-07T00:16:32+09:00 user_id=0 calls_ok=1
+2026-02-27 05:49:49,193 - core.analysis.precheck_pipeline - INFO - Screening batch input: n=1 case_ids=[''] (판단 기준: 금액+시각+업종, 6종 caseType)
+2026-02-27 05:49:49,193 - core.analysis.precheck_pipeline - INFO - Screening batch context summary: vouchers_with_occurredAt=1 vouchers_with_hrStatus=1 vouchers_with_mcc=1 vouchers_with_budgetExceeded=1 mcp_input_partial=1 (of n=1)
+2026-02-27 05:49:49,228 - core.llm.prompts - INFO - Loaded YAML prompt: screening.yaml (version: 4.1.0)
+2026-02-27 05:49:49,230 - core.llm.client - INFO - LLM ainvoke: model=gpt-4o-mini (실제 호출 모델)
+2026-02-27 05:49:50,745 - core.llm.client - INFO - LLM invoke: model=gpt-4o-mini (실제 호출 모델)
+2026-02-27 05:49:52,594 - core.analysis.precheck_pipeline - INFO - Screening result(raw): caseId=(n/a) caseType=PRIVATE_USE_RISK severity=MEDIUM score=40 reasonText=발생 시각: **2026-02-07T00:16:32+09:00**, 근태 상태: **휴무/휴가**, 업종: **일반음식점 (LOW)**, 공휴일...
+2026-02-27 05:49:52,594 - core.analysis.precheck_pipeline - INFO - Screening caseType aligned by deterministic signals(batch): case_id= before=PRIVATE_USE_RISK after=HOLIDAY_USAGE reason=holiday_leave_signal_promoted_to_holiday_usage
+2026-02-27 05:49:52,595 - core.analysis.precheck_pipeline - INFO - Screening reasonText normalized(caseType=HOLIDAY_USAGE): before=발생 시각: **2026-02-07T00:16:32+09:00**, 근태 상태: **휴무/휴가**, 업종: **일반음식점 (LOW)**, 공휴일: **True (WEEKEND)** after=2026-02-07는 토요일이며, 근태 상태(휴무/휴가)와 결합해 휴일 사용 위험으로 분류함.
+2026-02-27 05:49:52,595 - api.routes.aura_detect - INFO - Aura detect_screen_batch response: n=1 caseTypes=['HOLIDAY_USAGE'] (Aura는 caseType DEFAULT를 반환하지 않음)
+INFO:     127.0.0.1:56139 - "POST /aura/detect/screen-batch HTTP/1.1" 200 OK
+2026-02-27 05:49:52,597 - api.middleware - INFO - [10241575-e983-4dde-af33-309bd9e913b1] POST /aura/detect/screen-batch - Status: 200 - Duration: 7.839s
+2026-02-27 05:49:53,624 - api.middleware - INFO - [be04df7b-0775-4fa8-9c81-ed3fefd75816] POST /aura/cases/173/analysis-runs - Client: 127.0.0.1
+2026-02-27 05:49:53,664 - api.routes.aura_cases - INFO - shadow_run scheduled: case_id=173 run_id=103efed3-4a03-421f-bc24-50a95d874a11 primary=finance_aura_v2_agentic sample_ratio=1.00 case_type=HOLIDAY_USAGE
+2026-02-27 05:49:53,665 - api.routes.aura_cases - INFO - analysis_background agentic_v2 primary enabled: case_id=173 run_id=103efed3-4a03-421f-bc24-50a95d874a11 selected_agent=finance_aura_v2_agentic
+INFO:     127.0.0.1:56139 - "POST /aura/cases/173/analysis-runs HTTP/1.1" 202 Accepted
+2026-02-27 05:49:53,874 - api.middleware - INFO - [be04df7b-0775-4fa8-9c81-ed3fefd75816] POST /aura/cases/173/analysis-runs - Status: 202 - Duration: 0.250s
+2026-02-27 05:49:54,070 - core.analysis.agent_factory - INFO - [AgentConfig] docIds 파싱 완료: 2개 문서 할당됨 (doc_ids=[26, 23])
+2026-02-27 05:49:54,070 - core.stores.config_store - INFO - [AgentConfigStore] Cached config for 1:finance_aura (ttl=300.0s, docIds=2개)
+2026-02-27 05:49:54,072 - core.analysis.analysis_pipeline - INFO - audit_analysis start case_id=173 run_id=103efed3-4a03-421f-bc24-50a95d874a11-shadow body_evidence_keys=['evidence', 'ragRefs', 'doc_id', 'voucher_key', 'item_id', 'voucher_item_no', 'case_type', 'screening_reason_text', 'occurredAt', 'expenseType', 'merchantName', 'amount', 'hrStatus', 'mccCode', 'budgetExceeded', 'intended_risk_type', 'expenseTypeName', 'hrStatusRaw', 'isHoliday', 'mccName', 'risk_category', 'is_weekend_allowed', 'document', 'voucher', 'partyIds', 'openItems', 'lineage', 'policies']
+2026-02-27 05:49:54,149 - core.analysis.analysis_pipeline - INFO - audit_analysis payload-first case_id=173 fields=['amount', 'belnr', 'budgetExceeded', 'bukrs', 'buzei', 'case_type', 'doc_id', 'expenseType', 'expenseTypeName', 'gjahr', 'hrStatus', 'hrStatusRaw', 'isHoliday', 'item_id', 'mccCode', 'mccCodeRaw', 'mccName', 'merchantName', 'occurredAt', 'screening_reason_text'] case_type=HOLIDAY_USAGE occurredAt=2026-02-07T00:16:32+09:00 amount=18705.0 mccCode=5812 hrStatus=LEAVE hrStatusRaw=LEAVE isHoliday=True mcc_related_article=None
+2026-02-27 05:49:54,150 - core.analysis.analysis_pipeline - INFO - audit_analysis skip get_case fallback case_id=173 reason=payload_sufficient has_amount=True has_occurredAt=True has_case_type=True has_doc_keys=True
+2026-02-27 05:49:54,305 - core.analysis.agent_factory - INFO - fetch_agent_config: agent not found (404), agent_key=finance_aura_v2_agentic, tenant_id=1, using default
+2026-02-27 05:49:54,313 - api.routes.aura_cases - INFO - case_analysis_stream: start consuming run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173
+2026-02-27 05:49:54,313 - core.stores.config_store - INFO - [AgentConfigStore] Cached config for 1:finance_aura_v2_agentic (ttl=300.0s, docIds=없음)
+2026-02-27 05:49:54,314 - api.routes.aura_cases - WARNING - analysis_background agentic_v2 fallback to legacy: case_id=173 run_id=103efed3-4a03-421f-bc24-50a95d874a11 reason=v2_config_missing_or_docids_empty v2=finance_aura_v2_agentic legacy=finance_aura
+2026-02-27 05:49:54,314 - core.analysis.analysis_pipeline - INFO - audit_analysis start case_id=173 run_id=103efed3-4a03-421f-bc24-50a95d874a11 body_evidence_keys=['evidence', 'ragRefs', 'doc_id', 'voucher_key', 'item_id', 'voucher_item_no', 'case_type', 'screening_reason_text', 'occurredAt', 'expenseType', 'merchantName', 'amount', 'hrStatus', 'mccCode', 'budgetExceeded', 'intended_risk_type', 'expenseTypeName', 'hrStatusRaw', 'isHoliday', 'mccName', 'risk_category', 'is_weekend_allowed', 'document', 'voucher', 'partyIds', 'openItems', 'lineage', 'policies']
+2026-02-27 05:49:54,315 - api.routes.aura_cases - INFO - analysis_background event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=step payload={'label': 'INPUT_NORM', 'percent': 10}
+2026-02-27 05:49:54,315 - core.analysis.analysis_pipeline - INFO - audit_analysis payload-first case_id=173 fields=['amount', 'belnr', 'budgetExceeded', 'bukrs', 'buzei', 'case_type', 'doc_id', 'expenseType', 'expenseTypeName', 'gjahr', 'hrStatus', 'hrStatusRaw', 'isHoliday', 'item_id', 'mccCode', 'mccCodeRaw', 'mccName', 'merchantName', 'occurredAt', 'screening_reason_text'] case_type=HOLIDAY_USAGE occurredAt=2026-02-07T00:16:32+09:00 amount=18705.0 mccCode=5812 hrStatus=LEAVE hrStatusRaw=LEAVE isHoliday=True mcc_related_article=None
+2026-02-27 05:49:54,315 - core.analysis.analysis_pipeline - INFO - audit_analysis skip get_case fallback case_id=173 reason=payload_sufficient has_amount=True has_occurredAt=True has_case_type=True has_doc_keys=True
+2026-02-27 05:49:54,315 - api.routes.aura_cases - INFO - analysis_background agent_event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=tool_call payload={}
+INFO:     127.0.0.1:56245 - "GET /aura/cases/173/analysis/stream?runId=103efed3-4a03-421f-bc24-50a95d874a11 HTTP/1.1" 200 OK
+2026-02-27 05:49:54,420 - api.routes.aura_cases - INFO - case_analysis_stream: first chunk sent run_id=103efed3-4a03-421f-bc24-50a95d874a11
+2026-02-27 05:49:54,869 - core.analysis.mcp_adapter - INFO - mcp_adapter resolved stage=analysis case_id=173 mode=hybrid occurredAt=2026-02-07T00:16:32+09:00 user_id=1 calls_ok=2
+2026-02-27 05:49:54,871 - api.routes.aura_cases - INFO - analysis_background agent_event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=tool_result payload={}
+2026-02-27 05:49:54,872 - core.analysis.analysis_pipeline - INFO - audit_analysis normalized_input: case_id=173 has_caseType=True caseType=HOLIDAY_USAGE has_reasonText=True mccCode=5812 mccName=일반음식점 mcc_related_article=None reasonText_preview=2026-02-07는 토요일이며, 근태 상태(휴무/휴가)와 결합해 휴일 사용 위험으로 분류함.
+2026-02-27 05:49:54,872 - core.analysis.analysis_pipeline - INFO - audit_analysis mcp_fact_context: case_id=173 mode=hybrid input_partial=False missing_fields=[] isHoliday=True holidayType=WEEKEND weekday=토
+2026-02-27 05:49:54,872 - core.analysis.analysis_pipeline - WARNING - audit_analysis mcc_related_article missing: case_id=173 mccCode=5812 mccName=일반음식점 (payload did not provide related article hint)
+2026-02-27 05:49:54,872 - core.analysis.analysis_pipeline - INFO - audit_analysis body_evidence: case_id=173 evidence_caseType=HOLIDAY_USAGE has_reasonText=True case_type=HOLIDAY_USAGE mccCode=5812 mccName=일반음식점 mcc_related_article=None evidence_keys=['evidence', 'ragRefs', 'doc_id', 'voucher_key', 'item_id', 'voucher_item_no', 'case_type', 'screening_reason_text', 'occurredAt', 'expenseType', 'merchantName', 'amount', 'hrStatus', 'mccCode', 'budgetExceeded', 'intended_risk_type', 'expenseTypeName', 'hrStatusRaw', 'isHoliday', 'mccName']
+2026-02-27 05:49:54,872 - core.analysis.analysis_pipeline - INFO - audit_analysis input_snapshot case_id=173 belnr=DAB8CE7 documentNumber=None amount=18705.0 totalAmount=None
+2026-02-27 05:49:54,872 - core.analysis.analysis_pipeline - INFO - audit_analysis case_identifiers case_id=173 belnr_or_docNo=DAB8CE7 amount_used=18705.0
+2026-02-27 05:49:54,874 - core.llm.client - INFO - LLM ainvoke: model=gpt-4o-mini (실제 호출 모델)
+2026-02-27 05:49:54,874 - core.llm.client - INFO - LLM invoke: model=gpt-4o-mini (실제 호출 모델)
+2026-02-27 05:49:54,878 - core.analysis.mcp_adapter - INFO - mcp_adapter resolved stage=analysis case_id=173 mode=hybrid occurredAt=2026-02-07T00:16:32+09:00 user_id=1 calls_ok=2
+2026-02-27 05:49:54,878 - core.analysis.analysis_pipeline - INFO - audit_analysis normalized_input: case_id=173 has_caseType=True caseType=HOLIDAY_USAGE has_reasonText=True mccCode=5812 mccName=일반음식점 mcc_related_article=None reasonText_preview=2026-02-07는 토요일이며, 근태 상태(휴무/휴가)와 결합해 휴일 사용 위험으로 분류함.
+2026-02-27 05:49:54,879 - core.analysis.analysis_pipeline - INFO - audit_analysis mcp_fact_context: case_id=173 mode=hybrid input_partial=False missing_fields=[] isHoliday=True holidayType=WEEKEND weekday=토
+2026-02-27 05:49:54,879 - core.analysis.analysis_pipeline - WARNING - audit_analysis mcc_related_article missing: case_id=173 mccCode=5812 mccName=일반음식점 (payload did not provide related article hint)
+2026-02-27 05:49:54,879 - core.analysis.analysis_pipeline - INFO - audit_analysis body_evidence: case_id=173 evidence_caseType=HOLIDAY_USAGE has_reasonText=True case_type=HOLIDAY_USAGE mccCode=5812 mccName=일반음식점 mcc_related_article=None evidence_keys=['evidence', 'ragRefs', 'doc_id', 'voucher_key', 'item_id', 'voucher_item_no', 'case_type', 'screening_reason_text', 'occurredAt', 'expenseType', 'merchantName', 'amount', 'hrStatus', 'mccCode', 'budgetExceeded', 'intended_risk_type', 'expenseTypeName', 'hrStatusRaw', 'isHoliday', 'mccName']
+2026-02-27 05:49:54,879 - core.analysis.analysis_pipeline - INFO - audit_analysis input_snapshot case_id=173 belnr=DAB8CE7 documentNumber=None amount=18705.0 totalAmount=None
+2026-02-27 05:49:54,879 - core.analysis.analysis_pipeline - INFO - audit_analysis case_identifiers case_id=173 belnr_or_docNo=DAB8CE7 amount_used=18705.0
+2026-02-27 05:49:54,879 - core.llm.client - INFO - LLM ainvoke: model=gpt-4o-mini (실제 호출 모델)
+2026-02-27 05:49:54,879 - core.llm.client - INFO - LLM invoke: model=gpt-4o-mini (실제 호출 모델)
+2026-02-27 05:49:54,933 - api.routes.aura_cases - INFO - case_analysis_stream SSE event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=step payload={'label': 'INPUT_NORM', 'percent': 10}
+2026-02-27 05:49:55,950 - api.routes.aura_cases - INFO - analysis_background event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=AGENT_STREAM payload={'text_preview': '**18,705원** 2026년 02월 07일 근태 휴무/휴가 관련 규정 조항 매칭을 진행 중이며, 조항 근거가 확인되면 상세 판단을 제시하겠습니다.'}
+2026-02-27 05:49:55,950 - api.routes.aura_cases - INFO - agent_activity_log enqueue: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=AGENT_STREAM message=**18,705원** 2026년 02월 07일 근태 휴무/휴가 관련 규정 조항 매칭을 진행 중이며, 조항 근거가 확인되면 상세 판단을 제시하겠습니다.
+2026-02-27 05:49:55,968 - api.routes.aura_cases - INFO - analysis_background event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=step payload={'label': 'EVIDENCE_GATHER', 'percent': 25}
+2026-02-27 05:49:55,968 - api.routes.aura_cases - INFO - analysis_background agent_event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=tool_call payload={}
+2026-02-27 05:49:56,249 - api.routes.aura_cases - INFO - case_analysis_stream SSE event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=AGENT_STREAM payload={'text_preview': '**18,705원** 2026년 02월 07일 근태 휴무/휴가 관련 규정 조항 매칭을 진행 중이며, 조항 근거가 확인되면 상세 판단을 제시하겠습니다.'}
+2026-02-27 05:49:56,401 - api.routes.aura_cases - INFO - case_analysis_stream SSE event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=step payload={'label': 'EVIDENCE_GATHER', 'percent': 25}
+2026-02-27 05:49:56,678 - api.routes.aura_cases - INFO - analysis_background agent_event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=tool_result payload={}
+2026-02-27 05:49:56,679 - core.llm.client - INFO - LLM ainvoke: model=gpt-4o-mini (실제 호출 모델)
+2026-02-27 05:49:56,679 - core.llm.client - INFO - LLM invoke: model=gpt-4o-mini (실제 호출 모델)
+2026-02-27 05:49:57,365 - core.llm.client - INFO - LLM ainvoke: model=gpt-4o-mini (실제 호출 모델)
+2026-02-27 05:49:57,365 - core.llm.client - INFO - LLM invoke: model=gpt-4o-mini (실제 호출 모델)
+2026-02-27 05:49:57,677 - api.routes.aura_cases - INFO - analysis_background event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=step payload={'label': 'REGULATION_MATCH', 'percent': 35}
+2026-02-27 05:49:57,677 - core.analysis.rag_quality - INFO - rag_quality: article_constraints source=disabled mcc=5812 articles=[] related_article_hint_ignored=[]
+2026-02-27 05:49:57,680 - core.analysis.analysis_pipeline - INFO - analysis_pipeline: RAG query start case_id=173 query=법인카드 전표 규정 감사 준수 발생일 2026-02-07 휴일 주말 공휴일 휴무 휴가 업무연관성 일반음식점 심야 금액 18705.0 근태 LEAVE MCC 5812 tenant_id=1 doc_ids=[26, 23] metadata_filter=None
+2026-02-27 05:49:57,680 - core.analysis.analysis_pipeline - INFO - analysis_pipeline: RAG filter snapshot case_id=173 tenant_id=1 doc_ids=[26, 23] index_version=None
+2026-02-27 05:49:57,680 - core.analysis.analysis_pipeline - INFO - analysis_pipeline: RAG phase=query_filter_threshold case_id=173 query_len=91 has_articles=False has_keywords=False doc_ids_count=2 metadata_filter=False threshold_primary=0.75
+2026-02-27 05:49:59,417 - core.analysis.rag - INFO - [RAG Search] tenant: 1, doc_count: 2, threshold: 0.75
+2026-02-27 05:49:59,514 - core.analysis.rag - INFO - [RAG Search] SQL guardrails: is_active=true doc_ids=[26, 23] tenant_id=1 metadata_filter=False
+2026-02-27 05:49:59,624 - core.analysis.rag - INFO - [RAG Search] vector empty -> keyword fallback terms=['법인카드', '전표', '규정', '감사', '준수', '발생일', '휴일', '주말'] doc_ids=[26, 23] tenant=1
+2026-02-27 05:49:59,624 - core.analysis.rag - INFO - [RAG Search] keyword fallback guardrails: is_active=true doc_ids=[26, 23] tenant_id=1 metadata_filter=False terms=['법인카드', '전표', '규정', '감사', '준수', '발생일', '휴일', '주말']
+2026-02-27 05:49:59,655 - core.analysis.rag - INFO - [RAG Search] keyword fallback rows=5
+2026-02-27 05:49:59,656 - core.analysis.analysis_pipeline - INFO - analysis_pipeline: RAG raw_result case_id=173 count=5 max_score=0.570
+2026-02-27 05:49:59,656 - core.analysis.analysis_pipeline - INFO - analysis_pipeline: RAG constraints case_id=173 mcc=5812 articles=[] index_version=None
+2026-02-27 05:49:59,657 - core.analysis.analysis_pipeline - INFO - analysis_pipeline: RAG summary case_id=173 results=5 max_score=0.570 threshold=0.700 need_web_search=True reasons=['BELOW_THRESHOLD'] raw_count=5 raw_max=0.570 rule_filtered_count=5 retried_compact=False retried_ultra=False retry_thresholds=[] diag_unfiltered_count=0 diag_unfiltered_max=0.000
+2026-02-27 05:49:59,657 - api.routes.aura_cases - INFO - analysis_background event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=step payload={'label': 'WEB_SEARCH', 'percent': 38}
+2026-02-27 05:49:59,820 - core.analysis.analysis_pipeline - INFO - analysis_pipeline: web_search completed case_id=173 query=법인카드 경비 세무처리 국세청 가이드라인 회계기준 text_len=71 citations=0
+2026-02-27 05:49:59,821 - api.routes.aura_cases - INFO - analysis_background agent_event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=tool_call payload={}
+2026-02-27 05:49:59,822 - api.routes.aura_cases - INFO - case_analysis_stream SSE event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=step payload={'label': 'REGULATION_MATCH', 'percent': 35}
+2026-02-27 05:49:59,884 - core.analysis.rag_quality - INFO - rag_quality: article_constraints source=disabled mcc=5812 articles=[] related_article_hint_ignored=[]
+2026-02-27 05:49:59,885 - core.analysis.analysis_pipeline - INFO - analysis_pipeline: RAG query start case_id=173 query=법인카드 전표 규정 감사 준수 발생일 2026-02-07 휴일 주말 공휴일 휴무 휴가 업무연관성 일반음식점 심야 금액 18705.0 근태 LEAVE MCC 5812 tenant_id=1 doc_ids=[26, 23] metadata_filter=None
+2026-02-27 05:49:59,885 - core.analysis.analysis_pipeline - INFO - analysis_pipeline: RAG filter snapshot case_id=173 tenant_id=1 doc_ids=[26, 23] index_version=None
+2026-02-27 05:49:59,885 - core.analysis.analysis_pipeline - INFO - analysis_pipeline: RAG phase=query_filter_threshold case_id=173 query_len=91 has_articles=False has_keywords=False doc_ids_count=2 metadata_filter=False threshold_primary=0.75
+2026-02-27 05:50:00,118 - core.analysis.rag - INFO - [RAG Search] tenant: 1, doc_count: 2, threshold: 0.75
+2026-02-27 05:50:00,118 - core.analysis.rag - INFO - [RAG Search] SQL guardrails: is_active=true doc_ids=[26, 23] tenant_id=1 metadata_filter=False
+2026-02-27 05:50:00,135 - core.analysis.rag - INFO - [RAG Search] vector empty -> keyword fallback terms=['법인카드', '전표', '규정', '감사', '준수', '발생일', '휴일', '주말'] doc_ids=[26, 23] tenant=1
+2026-02-27 05:50:00,136 - core.analysis.rag - INFO - [RAG Search] keyword fallback guardrails: is_active=true doc_ids=[26, 23] tenant_id=1 metadata_filter=False terms=['법인카드', '전표', '규정', '감사', '준수', '발생일', '휴일', '주말']
+2026-02-27 05:50:00,173 - core.analysis.rag - INFO - [RAG Search] keyword fallback rows=5
+2026-02-27 05:50:00,175 - core.analysis.analysis_pipeline - INFO - analysis_pipeline: RAG raw_result case_id=173 count=5 max_score=0.570
+2026-02-27 05:50:00,175 - core.analysis.analysis_pipeline - INFO - analysis_pipeline: RAG constraints case_id=173 mcc=5812 articles=[] index_version=None
+2026-02-27 05:50:00,175 - core.analysis.analysis_pipeline - INFO - analysis_pipeline: RAG summary case_id=173 results=5 max_score=0.570 threshold=0.700 need_web_search=True reasons=['BELOW_THRESHOLD'] raw_count=5 raw_max=0.570 rule_filtered_count=5 retried_compact=False retried_ultra=False retry_thresholds=[] diag_unfiltered_count=0 diag_unfiltered_max=0.000
+2026-02-27 05:50:00,176 - core.analysis.analysis_pipeline - INFO - analysis_pipeline: web_search completed case_id=173 query=법인카드 경비 세무처리 국세청 가이드라인 회계기준 text_len=71 citations=0
+2026-02-27 05:50:00,243 - api.routes.aura_cases - INFO - analysis_background agent_event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=tool_result payload={}
+2026-02-27 05:50:00,244 - api.routes.aura_cases - INFO - analysis_background agent_event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=tool_call payload={}
+2026-02-27 05:50:00,418 - api.routes.aura_cases - INFO - analysis_background agent_event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=tool_result payload={}
+2026-02-27 05:50:00,418 - core.llm.client - INFO - LLM ainvoke: model=gpt-4o-mini (실제 호출 모델)
+2026-02-27 05:50:00,419 - core.llm.client - INFO - LLM invoke: model=gpt-4o-mini (실제 호출 모델)
+2026-02-27 05:50:00,421 - api.routes.aura_cases - INFO - case_analysis_stream SSE event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=step payload={'label': 'WEB_SEARCH', 'percent': 38}
+2026-02-27 05:50:00,474 - core.llm.client - INFO - LLM ainvoke: model=gpt-4o-mini (실제 호출 모델)
+2026-02-27 05:50:00,474 - core.llm.client - INFO - LLM invoke: model=gpt-4o-mini (실제 호출 모델)
+2026-02-27 05:50:01,599 - core.llm.client - INFO - LLM ainvoke: model=gpt-4o-mini (실제 호출 모델)
+2026-02-27 05:50:01,599 - core.llm.client - INFO - LLM invoke: model=gpt-4o-mini (실제 호출 모델)
+2026-02-27 05:50:01,601 - core.analysis.thought_stream - INFO - thought_stream downgraded: reason=clause_mismatch mentioned_clauses=['제1항']
+2026-02-27 05:50:01,602 - core.llm.client - INFO - LLM ainvoke: model=gpt-4o-mini (실제 호출 모델)
+2026-02-27 05:50:01,602 - core.llm.client - INFO - LLM invoke: model=gpt-4o-mini (실제 호출 모델)
+2026-02-27 05:50:02,472 - core.llm.client - INFO - LLM ainvoke: model=gpt-4o-mini (실제 호출 모델)
+2026-02-27 05:50:02,473 - core.llm.client - INFO - LLM invoke: model=gpt-4o-mini (실제 호출 모델)
+2026-02-27 05:50:02,894 - api.routes.aura_cases - INFO - analysis_background event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=step payload={'label': 'RULE_SCORING', 'percent': 45}
+2026-02-27 05:50:02,894 - core.llm.client - INFO - LLM ainvoke: model=gpt-4o-mini (실제 호출 모델)
+2026-02-27 05:50:02,894 - core.llm.client - INFO - LLM invoke: model=gpt-4o-mini (실제 호출 모델)
+2026-02-27 05:50:02,895 - api.routes.aura_cases - INFO - case_analysis_stream SSE event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=step payload={'label': 'RULE_SCORING', 'percent': 45}
+2026-02-27 05:50:03,556 - core.analysis.analysis_pipeline - INFO - audit_analysis: extracted screening caseType case_id=173 caseType=HOLIDAY_USAGE source=case_data
+2026-02-27 05:50:03,556 - core.analysis.analysis_pipeline - INFO - audit_analysis LLM reasonText input: case_id=173 risk_type=HOLIDAY_USAGE screening_case_type=HOLIDAY_USAGE has_screening_reason_text=True prompt_guide=intended_risk=True screening_type=True reason_only=False
+2026-02-27 05:50:03,557 - core.llm.client - INFO - LLM ainvoke: model=gpt-4o (실제 호출 모델)
+2026-02-27 05:50:03,671 - core.llm.client - INFO - LLM invoke: model=gpt-4o (실제 호출 모델)
+2026-02-27 05:50:04,288 - api.routes.aura_cases - INFO - analysis_background event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=step payload={'label': 'LLM_REASONING', 'percent': 65}
+2026-02-27 05:50:04,288 - core.analysis.analysis_pipeline - INFO - audit_analysis: extracted screening caseType case_id=173 caseType=HOLIDAY_USAGE source=case_data
+2026-02-27 05:50:04,288 - core.analysis.analysis_pipeline - INFO - audit_analysis LLM reasonText input: case_id=173 risk_type=HOLIDAY_USAGE screening_case_type=HOLIDAY_USAGE has_screening_reason_text=True prompt_guide=intended_risk=True screening_type=True reason_only=False
+2026-02-27 05:50:04,288 - core.llm.client - INFO - LLM ainvoke: model=gpt-4o (실제 호출 모델)
+2026-02-27 05:50:04,288 - core.llm.client - INFO - LLM invoke: model=gpt-4o (실제 호출 모델)
+2026-02-27 05:50:04,288 - api.routes.aura_cases - INFO - case_analysis_stream SSE event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=step payload={'label': 'LLM_REASONING', 'percent': 65}
+2026-02-27 05:50:09,551 - core.analysis.analysis_pipeline - INFO - audit_analysis reasonText resolved: case_id=173 preview=이번 분석 결과, 해당 전표는 휴일(야간)에 경비 지출이 발생하였으며, 이는 [내부규정: v2.0 p.1] 제13장 제2조의 취지와 충돌할 가능성이 있어 추가 소명이 필요합니다. 본 전표는 시행일 이후 확정된 건으로…
+2026-02-27 05:50:09,552 - core.analysis.analysis_pipeline - INFO - audit_analysis quality_gate case_id=173 codes=['OK'] policy_signals=['holiday_usage', 'leave_status', 'leave_general']
+2026-02-27 05:50:09,552 - core.analysis.analysis_pipeline - INFO - audit_analysis citations_preview: case_id=173 doc_list=1 external_citations=0 citations_preview=1 sample_ids=['C1'] sample_refs=['제2조 v2.0 > 제13장 감사, 보관 및 보고 > 제2조 (경과조치)']
+2026-02-27 05:50:09,553 - core.analysis.analysis_pipeline - INFO - audit_analysis risk-article mismatch gate: case_id=173 risk_type=HOLIDAY_USAGE citations_preview=1
+2026-02-27 05:50:09,554 - core.analysis.analysis_pipeline - INFO - audit_analysis sentence_citation_map summary: case_id=173 rows=2 grounded=2 ungrounded=0 sample=[{'idx': 1, 'grounded': True, 'citation_ids': ['C1']}, {'idx': 2, 'grounded': True, 'citation_ids': ['C1']}]
+2026-02-27 05:50:09,554 - core.analysis.analysis_pipeline - INFO - audit_analysis SENTENCE_CITATION_MAP emitted: case_id=173 items=2
+2026-02-27 05:50:09,554 - core.analysis.analysis_pipeline - INFO - audit_analysis grounding coverage low: case_id=173 ratio=0.500 grounded=1 total=2 ungrounded=['위험유형에 맞는 규정 조항을 재매칭한 뒤 재평가가 필요합니다.']
+2026-02-27 05:50:09,555 - core.analysis.analysis_pipeline - INFO - audit_analysis citations_final: case_id=173 count=1 sample_ids=['C1']
+2026-02-27 05:50:09,555 - api.routes.aura_cases - INFO - shadow_compare summary: case_id=173 run_id=103efed3-4a03-421f-bc24-50a95d874a11 primary=finance_aura_v2_agentic shadow=finance_aura shadow_score=0.45 shadow_severity=LOW shadow_gate_codes=['RISK_ARTICLE_MISMATCH', 'EVIDENCE_COVERAGE_LOW']
+2026-02-27 05:50:10,258 - core.analysis.analysis_pipeline - INFO - audit_analysis reasonText resolved: case_id=173 preview=이번 분석 결과, 해당 전표는 휴일(야간) 사용으로 내부규정 제2조의 제한 취지와 충돌하며 추가 소명이 필요합니다. 발생 시각이 휴일 야간(2026-02-07 23:10)이고, 사용자가 휴가 상태로 확인되었으며, 내…
+2026-02-27 05:50:10,258 - core.analysis.analysis_pipeline - INFO - audit_analysis quality_gate case_id=173 codes=['OK'] policy_signals=['holiday_usage', 'leave_status', 'leave_general']
+2026-02-27 05:50:10,259 - api.routes.aura_cases - INFO - analysis_background agent_event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=gate payload={}
+2026-02-27 05:50:10,259 - core.analysis.analysis_pipeline - INFO - audit_analysis citations_preview: case_id=173 doc_list=1 external_citations=0 citations_preview=1 sample_ids=['C1'] sample_refs=['제2조 v2.0 > 제13장 감사, 보관 및 보고 > 제2조 (경과조치)']
+2026-02-27 05:50:10,259 - core.analysis.analysis_pipeline - INFO - audit_analysis risk-article mismatch gate: case_id=173 risk_type=HOLIDAY_USAGE citations_preview=1
+2026-02-27 05:50:10,260 - core.analysis.analysis_pipeline - INFO - audit_analysis sentence_citation_map summary: case_id=173 rows=2 grounded=2 ungrounded=0 sample=[{'idx': 1, 'grounded': True, 'citation_ids': ['C1']}, {'idx': 2, 'grounded': True, 'citation_ids': ['C1']}]
+2026-02-27 05:50:10,260 - api.routes.aura_cases - INFO - analysis_background event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=evidence payload={'text_preview': '[결론] 문장별 인용 근거 매핑을 완료했습니다.'}
+2026-02-27 05:50:10,260 - api.routes.aura_cases - INFO - agent_activity_log enqueue: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=evidence message=[결론] 문장별 인용 근거 매핑을 완료했습니다.
+2026-02-27 05:50:10,260 - core.analysis.analysis_pipeline - INFO - audit_analysis SENTENCE_CITATION_MAP emitted: case_id=173 items=2
+2026-02-27 05:50:10,260 - core.analysis.analysis_pipeline - INFO - audit_analysis grounding coverage low: case_id=173 ratio=0.500 grounded=1 total=2 ungrounded=['위험유형에 맞는 규정 조항을 재매칭한 뒤 재평가가 필요합니다.']
+2026-02-27 05:50:10,261 - api.routes.aura_cases - INFO - analysis_background event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=step payload={'label': 'PROPOSALS', 'percent': 85}
+2026-02-27 05:50:10,261 - core.analysis.analysis_pipeline - INFO - audit_analysis citations_final: case_id=173 count=1 sample_ids=['C1']
+2026-02-27 05:50:10,261 - api.routes.aura_cases - INFO - analysis_background event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=completed payload={'runId': '103efed3-4a03-421f-bc24-50a95d874a11', 'caseId': '173', 'severity': 'LOW', 'score': 0.45, 'status': 'completed', 'text_preview': '본 건은 **휴일 사용 의심** 신호로 분류되었으나, 발생 시각 **2026년 02월 07일 00:16:32 (토)**, 금액 **18,705원**, 근태 **휴무/휴가** 기준으로 현재 인용된 조항의 의미가 위험유형과 충분히 정합하지 않아 확정 판단을 보류합니다. 위험유형에 맞는 규정 조항을 재매칭한 뒤 재평가가 필요합…'}
+2026-02-27 05:50:10,261 - core.analysis.callback_client - INFO - Callback sending: url=http://localhost:8080/api/synapse/internal/aura/callback payload_keys=['runId', 'caseId', 'status', 'agent_id', 'version', 'is_sandbox', 'trace', 'finalResult'] summary={'runId': '103efed3-4a03-421f-bc24-50a95d874a11', 'caseId': '173', 'status': 'COMPLETED', 'agent_id': 'finance_aura', 'version': '6', 'is_sandbox': False, 'trace': {'auraTraceId': 'aura-103efed3-62446bfa'}, 'finalResult': '<dict>'}
+2026-02-27 05:50:10,615 - core.analysis.callback_client - INFO - Callback ok url=http://localhost:8080/api/synapse/internal/aura/callback status_code=200
+2026-02-27 05:50:10,664 - api.routes.aura_cases - INFO - case_analysis_stream SSE event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=evidence payload={'text_preview': '[결론] 문장별 인용 근거 매핑을 완료했습니다.'}
+2026-02-27 05:50:10,776 - core.analysis.callback - INFO - case status updated case_id=173 status=NEW
+2026-02-27 05:50:10,966 - api.routes.aura_cases - INFO - case_analysis_stream SSE event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=step payload={'label': 'PROPOSALS', 'percent': 85}
+2026-02-27 05:50:11,416 - api.routes.aura_cases - INFO - case_analysis_stream SSE event: run_id=103efed3-4a03-421f-bc24-50a95d874a11 case_id=173 event=completed payload={'runId': '103efed3-4a03-421f-bc24-50a95d874a11', 'caseId': '173', 'severity': 'LOW', 'score': 0.45, 'status': 'completed', 'text_preview': '본 건은 **휴일 사용 의심** 신호로 분류되었으나, 발생 시각 **2026년 02월 07일 00:16:32 (토)**, 금액 **18,705원**, 근태 **휴무/휴가** 기준으로 현재 인용된 조항의 의미가 위험유형과 충분히 정합하지 않아 확정 판단을 보류합니다. 위험유형에 맞는 규정 조항을 재매칭한 뒤 재평가가 필요합…'}
+2026-02-27 05:50:12,777 - core.analysis.run_store - INFO - run_store: queue removed run_id=103efed3-4a03-421f-bc24-50a95d874a11
+
+
+
+
+#검증 로그 수집
+##Aura 
+위의 로그 참고
+
+##BE
+2026-02-27T05:22:16.383+09:00  INFO 85502 --- [dwp-mcp-server] [nio-8086-exec-1] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring DispatcherServlet 'dispatcherServlet'
+2026-02-27T05:22:16.407+09:00  INFO 85502 --- [dwp-mcp-server] [nio-8086-exec-1] o.s.web.servlet.DispatcherServlet        : Initializing Servlet 'dispatcherServlet'
+2026-02-27T05:22:16.483+09:00  INFO 85502 --- [dwp-mcp-server] [nio-8086-exec-1] o.s.web.servlet.DispatcherServlet        : Completed initialization in 75 ms
+2026-02-27T05:22:16.992+09:00  INFO 85502 --- [dwp-mcp-server] [nio-8086-exec-1] c.d.s.mcp.controller.McpToolController   : MCP request summary: tool=business-calendar(v2) traceId=trace-screen-batch-1 tenantId=1 userId=null caseId=null runId=null
+2026-02-27T05:22:16.996+09:00  INFO 85502 --- [dwp-mcp-server] [nio-8086-exec-1] c.d.s.mcp.controller.McpToolController   : MCP response summary: tool=business-calendar(v2) traceId=trace-screen-batch-1 tenantId=1 userId=null caseId=null runId=null success=false decisionCode=INPUT_PARTIAL latency_ms=0 http_status=400
+2026-02-27T05:22:17.179+09:00  INFO 85502 --- [dwp-mcp-server] [nio-8086-exec-2] c.d.s.mcp.controller.McpToolController   : MCP request summary: tool=master-data(v2) traceId=trace-screen-batch-1 tenantId=1 userId=null caseId=null runId=null
+2026-02-27T05:22:17.180+09:00  INFO 85502 --- [dwp-mcp-server] [nio-8086-exec-2] c.d.s.mcp.controller.McpToolController   : MCP response summary: tool=master-data(v2) traceId=trace-screen-batch-1 tenantId=1 userId=null caseId=null runId=null success=false decisionCode=INPUT_PARTIAL latency_ms=0 http_status=400
+2026-02-27T05:22:17.271+09:00  INFO 85502 --- [dwp-mcp-server] [nio-8086-exec-3] c.d.s.mcp.controller.McpToolController   : MCP request summary: tool=policy-regulation(v2) traceId=trace-screen-batch-1 tenantId=1 userId=null caseId=null runId=null
+2026-02-27T05:22:17.271+09:00  INFO 85502 --- [dwp-mcp-server] [nio-8086-exec-3] c.d.s.mcp.controller.McpToolController   : MCP response summary: tool=policy-regulation(v2) traceId=trace-screen-batch-1 tenantId=1 userId=null caseId=null runId=null success=false decisionCode=INPUT_PARTIAL latency_ms=0 http_status=400
+
+##FE
+##이벤트스트림이 아니라 분석단계탭 아닌가요? 
+###첫번째
+AI 분석 신뢰도 지표
+분석 신뢰 신호
+근거 커버리지 낮음
+위험유형-조항 불일치
+규정 검색 실패율
+0.0%
+근거 부족률
+0.0%
+문장 근거 미연결률
+0.0%
+정책 재검토 적용률
+0.0%
+리스크 점수 분해
+정책점수 85
+근거점수 50
+최종점수 45
+스트림 타임라인
+이벤트 데이터 없음
+
+[디버그] runId: 103efed3-4a03-421f-bc24-50a95d874a11 · API응답: 0건 · dedupe후: 0건 · 최종렌더: 0건
+
+
+
+
+##근거맵
+위반전표아이템
+라인	계정	금액	거래처	적요	근거 사용
+001	0000601000	18,705 KRW	V00027	스피킹버블 주점	데이터 없음
+문장별 근거 연결
+#	문장	근거(citation)
+1	
+본 건은 **휴일 사용 의심** 신호로 분류되었으나, 발생 시각 **2026년 02월 07일 00:16:32 (토)**, 금액 **18,705원**, 근태 **휴무/휴가** 기준으로 현재 인용된 조항의 의미가 위험유형과 충분히 정합하지 않아 확정 판단을 보류합니다.
+
+2	
+위험유형에 맞는 규정 조항을 재매칭한 뒤 재평가가 필요합니다.
+
+Citation 근거 목록
+C1
+[ v2.0 > 제13장 감사, 보관 및 보고 > 제2조 (경과조치)] 문서 개요: 본 규정은 회사의 경비 지출, 지급 전표 및 관련 증빙의 적정성을 확보하기 위한 기준과 절차를 제시하며, 내부통제 및 재무 리스크 예방을 목적으로 한다. 제2조 (경과조치) ① 시행일 이전 발생한 지출이라도 시행일 이후 전표 확정되는 건에 대하여는 본 규정을 준용할 수 있다. ② 시스템 미구현 항목은 재무부서
+
+quality_report(raw)
+{}
+quality_gate_codes(raw)
+[
+  "RISK_ARTICLE_MISMATCH",
+  "EVIDENCE_COVERAGE_LOW"
+]
+analysis_quality_signals(raw)
+[
+  "근거 커버리지 낮음",
+  "위험유형-조항 불일치"
+]
+mismatch_reasons(raw)
+[]
+sentence_citation_map(raw)
+[
+  {
+    "grounded": true,
+    "sentence": "본 건은 **휴일 사용 의심** 신호로 분류되었으나, 발생 시각 **2026년 02월 07일 00:16:32 (토)**, 금액 **18,705원**, 근태 **휴무/휴가** 기준으로 현재 인용된 조항의 의미가 위험유형과 충분히 정합하지 않아 확정 판단을 보류합니다.",
+    "citation_ids": [
+      "C1"
+    ],
+    "sentence_index": 1
+  },
+  {
+    "grounded": true,
+    "sentence": "위험유형에 맞는 규정 조항을 재매칭한 뒤 재평가가 필요합니다.",
+    "citation_ids": [
+      "C1"
+    ],
+    "sentence_index": 2
+  }
+]
+
+
+##판단규정
+v2.0 > 제13장 감사, 보관 및 보고 > 제2조 (경과조치)
+재검토 필요
+최종 판단이 보류/재검토 상태여서 규정 상태를 재검토로 정렬
+
+##최종판단
+본 건은 **휴일 사용 의심** 신호로 분류되었으나, 발생 시각 **2026년 02월 07일 00:16:32 (토)**, 금액 **18,705원**, 근태 **휴무/휴가** 기준으로 현재 인용된 조항의 의미가 위험유형과 충분히 정합하지 않아 확정 판단을 보류합니다. 위험유형에 맞는 규정 조항을 재매칭한 뒤 재평가가 필요합니다.
+
+#에이전트스트림
+05:49:56
+18,705원 2026년 02월 07일 근태 휴무/휴가 관련 규정 조항 매칭을 진행 중이며, 조항 근거가 확인되면 상세 판단을 제시하겠습니다.

@@ -171,134 +171,64 @@ Aura 단독으로 먼저 가능한 시작점
 
 ## PM 진행 현황 (MCP 고도화 트랙)
 
-기준일: 2026-02-26
-용어 통일: 기존 "대시보드"는 모두 "통합워크벤치"로 표기
+기준일: 2026-02-27
 
-### 1) 시스템별 상태
-- AURA: 착수/진행 중
-  - 완료: MCP adapter(payload-first) 도입
-  - 완료: MCP hybrid 모드(dwp-mcp-server 실호출) 연동
-  - 완료: Screening/Analysis에 fact context 연결
-  - 완료: FACT_CONTEXT_PARTIAL 보수 게이트 추가
-  - 완료: MCP fact context 운영 로그 추가
-- BE: 착수(팀 진행 중)
-  - 대기: Policy/Calendar/Master MCP Tool 계약 확정
-  - 대기: sentence-citation 검증 API/저장 연동
-- FE: 착수(팀 진행 중)
-  - 대기: 기존 화면에 quality_gate_codes/sentence_citation_map/score_breakdown 위치 확정
+### 기준 원칙 (합의 고정)
+1. Agentic 중심: `finance_aura_v2_agentic` 신규 경로 완성 후 점진 스위칭
+2. 기존 안정성 유지: 기존 `analysis_pipeline`은 병행 유지
+3. 스트림 무가공 원칙: 실제 이벤트만 노출(임의 진행 문구 금지)
+4. 결정론 가드레일: 확정 위반은 근거/정책 검증 통과 시에만 허용
 
-### 2) Aura 이번 반영 상세
-- 파일: `core/analysis/mcp_adapter.py`
-  - payload 기반 표준 fact context 생성기 추가 (mode: payload_only)
-- 파일: `core/config.py`
-  - `mcp_enabled`, `mcp_mode`, `mcp_require_fact_for_violation` 추가
-- 파일: `core/analysis/precheck_pipeline.py`
-  - screening context에 `mcp_fact_context` 포함
-  - 단건/배치 로그에 mcp missing 필드 요약 추가
-- 파일: `core/analysis/analysis_pipeline.py`
-  - 입력 정규화 직후 mcp fact context 생성/누락필드 보강
-  - evidence에 `MCP_FACT_CONTEXT` 추가
-  - `FACT_CONTEXT_PARTIAL` 품질게이트(확정 위반 보류) 추가
+### 액션 4건 즉시 실행 상태
+1. PM 트래커 1:1 재정렬: 완료
+2. Aura `finance_aura_v2_agentic` 플래그 경로: 진행 중
+3. FE `agent-events` 우선 전환 체크: 진행 중
+4. Shadow Run(휴일 3건) 시작 준비: 진행 중
 
-### 3) 크로스시스템 의존성(진행 필요)
-1. BE에서 MCP Tool 응답 표준 필드 확정
-2. FE에서 보류코드/문장근거 맵 렌더 위치 반영
-3. 통합 E2E 테스트(동일 케이스 3회 재현성 + RAG_ZERO/POLICY_CONFLICT)
+### Phase A - Agentic 실행 기반 (현재)
+- [x] AGENT_EVENT 표준 스키마 적용 착수
+  - 스키마: `event_type,node,tool,input_hash,output_ref,evidence_ids,decision_code,timestamp`
+- [x] 이벤트 타입 정규화
+  - `NODE_START/NODE_END/TOOL_CALL/TOOL_RESULT/EVIDENCE_ADDED/GATE_APPLIED/COMPLETED/FAILED`
+- [x] Aura MCP payload-first + hybrid 병행
+- [x] 품질 보류 게이트 유지 (`RAG_ZERO`, `POLICY_CONFLICT`, `FACT_CONTEXT_PARTIAL` 등)
+- [ ] LangGraph v2 에이전트 실행 경로 본격 연결 (`finance_aura_v2_agentic`)
 
-### 4) 다음 점검 포인트
-- AURA 로그 확인 키워드
-  - `audit_analysis mcp_fact_context`
-  - `FACT_CONTEXT_PARTIAL`
-- 기대 동작
-  - 필수 fact 누락 시 확정 위반 문구 대신 보류 문구
-  - sentence-citation, quality_gate_codes와 충돌 없이 함께 내려감
+### Phase B - Shadow 비교/스위칭
+- [ ] Shadow Run 동시 실행
+  - 동일 입력에 대해 legacy vs v2를 병행 실행
+  - 비교 지표: 정확도, citation 연결률, 보류율, 지연시간, 재현성
+- [ ] Go/No-Go 기준 고정
+  - 예: 2주 연속 citation 누락률/오탐률 임계치 통과
+- [ ] feature flag 점진 전환
+  - 테넌트/케이스유형 단위 canary
 
-#프론트 작업결과 1차
-변경 사항
+### Phase C - MCP 고도화(빠짐없이 유지)
+1. Policy/Regulation MCP
+2. Business Calendar MCP
+3. Master Data MCP
+4. RAG Index MCP
+5. Case Context MCP
+6. Evidence Verification MCP
+7. Action Simulation MCP
+8. Audit Ledger MCP
+9. Evaluation MCP
+10. Access Control MCP
 
-통합 워크벤치(workbench-new) 반영
-quality_gate_codes 배지 표시(우선순위 정렬 포함)
-sentence_citation_map 표 렌더링 + 근거 미연결 경고
-citation 클릭 시 하단 citation 목록으로 점프/하이라이트
-score_breakdown(정책/근거/최종점수, 보류 사유) 카드 추가
-POLICY_CONFLICT/RAG_ZERO 시 보류 안내 문구 표시
-운영자 디버그 섹션 추가(raw quality_report, quality_gate_codes, mismatch_reasons, sentence_citation_map)
-파일: workbench-new-case-panel.tsx, index.tsx
-기존 관리자 분석 탭 디버그 확장
-운영자 디버그에 raw quality_report, mismatch_reasons 추가
-파일: case-analysis-tab.tsx
-검증
-
-yarn eslint 통과
-yarn tsc --noEmit 통과
-즉, “질문 없으면 바로 진행”으로 요청하신 작업은 이번에 반영 완료되었습니다.
-
----
-
-## MCP PM 트래커 (최신, 2026-02-26)
-
-### 현재 단계 요약
-- 현재 상태: `Phase 1 (P0)` 구현 완료, 통합 테스트 진행 중
-- 현재 우선순위: 휴일(HOLIDAY_USAGE) 케이스 정확도/근거 정합성 안정화
-- 진행 원칙: `Payload-first` 유지 + MCP fact/tool 보강 + 보수적 판정보류 게이트
-
-### 완료(확정)
-- [x] Aura MCP adapter 도입 (`payload_only` + `hybrid` 구조)
-- [x] Analysis/Screening에 fact context 연결
-- [x] 사실 컨텍스트 누락 시 보류 게이트(`FACT_CONTEXT_PARTIAL`)
-- [x] 문장-근거 매핑/분석 점수분해/신뢰신호(quality_gate_codes) 출력 강화
-- [x] 스트림 중복 문구 억제 및 문장 표현 보정
-- [x] Screening 점수/심각도 표준 가중치 로직 반영 (CRITICAL 포함)
-- [x] FE/BE 전달 프롬프트 1차 배포 완료
-
-### 진행 중(테스트/튜닝)
-- [ ] MCP 실제 호출 경로 실증(로그 기준 `mode=hybrid`, `calls_ok>0` 확인)
-  - 2026-02-26 반영: `X-Tenant-ID`/`X-User-ID` 누락 시 원격 MCP 호출을 스킵하고 `MCP_HEADERS_MISSING` 사유를 quality에 기록하도록 Aura 보강 완료
-- [ ] 휴일 케이스 1건 확정 통과
-  - 기준: caseType/score_breakdown/reasonText/근거매핑 정합
-  - 2026-02-26 반영: 휴일+휴무 신호(`isHoliday=true` + `LEAVE/OFF/VACATION`)일 때 `PRIVATE_USE_RISK/UNUSUAL_PATTERN/LIMIT_EXCEED`를 `HOLIDAY_USAGE`로 승격하는 정렬 규칙 추가
-- [ ] RAG 조항 정합(위험유형-조항 불일치 감소) 재검증
-- [ ] SSE/agent_activity_log 문구 품질 회귀 확인
-
-### Aura 즉시 반영(2026-02-26)
-- MCP adapter
-  - `X-User-ID` 누락 상태에서 `/master-data`를 호출해 400이 발생하던 흐름 제거
-  - 헤더 누락 시 `mcp_skip_reason=MCP_HEADERS_MISSING`, `mcp_missing_headers=[...]` 로그/quality로 추적 가능
-  - `business-calendar.userId`는 int 강제 캐스팅을 제거하고 문자열 그대로 전달
-- Screening
-  - 휴일/휴무 조합 케이스에서 `HOLIDAY_USAGE` 우선 승격 규칙 강화
-- Analysis
-  - Aura finalResult에 `analysis_quality_signals` 직접 포함(표시명 배열), BE fallback 의존도 축소
-
-### 잔여 작업 (Phase 2 / P1)
-- [ ] `Case Context MCP` 연계 강화
-  - `window_10m_txn_count`, 24h/30d 맥락, 유사케이스 통계 활용
-- [ ] `Evidence Verification MCP` 본격 적용
-  - citation_id ↔ article 검증툴 강제, 불일치 시 보류 전환 일관화
-- [ ] RAG/Policy 충돌 재평가 루프 표준화
-  - 1회 재검색 + 보류 코드화 + 운영 집계 연동
-
-### 잔여 작업 (Phase 3 / P2)
-- [ ] `Evaluation MCP` / replay gate 운영 연동
-  - 최신 eval-run 기반 배포 게이트(로컬/운영 공통 기준)
-- [ ] `Audit Ledger`(append-only) 정식 적용
-  - 판단 코드, 근거 해시, 모델/프롬프트 버전 추적
-- [ ] `Access Control` 강화
-  - tool-level RBAC/ABAC + tenant 경계 테스트 자동화
-
-### 시스템별 대기/의존
+### 시스템별 진행/의존
 - AURA
-  - [ ] MCP hybrid 실호출 안정화 로그 검증
-  - [ ] 분석 신뢰 신호 코드/표시명 계약 최종 반영
-- BE
-  - [ ] eval-run/latest 응답키 최종 고정 및 집계 API 정합성 확인
-  - [ ] case_analysis_result 신뢰신호 필드 저장/집계 검증
+  - [x] AGENT_EVENT 표준화/로깅
+  - [ ] v2 primary + shadow 실행 경로 고도화
+- BE (`dwp-mcp-server`)
+  - [ ] MCP v2 tool 응답/로그 표준 고정
+  - [ ] shadow 비교 집계 API 안정화
+- BE (`synapse`)
+  - [ ] agent-events 저장/조회와 case 상세 연계 최종화
 - FE
-  - [ ] `평가 데이터 없음` 상태 표기 통일
-  - [ ] 신뢰지표/신뢰신호 용어 반영 및 맵핑키 최종 고정
+  - [ ] 분석단계 타임라인 소스를 `agent-events` 우선으로 전환
+  - [ ] 새로고침 후에도 동일 이벤트 재현 보장
 
-### 다음 회의/테스트 때 확인할 로그 키워드
-- `mcp_adapter resolved stage=... mode=hybrid ... calls_ok=...`
-- `audit_analysis quality_gate ... codes=[...]`
-- `analysis_pipeline: RAG summary ...`
-- `SENTENCE_CITATION_MAP`
+### E2E 검증 기준 (휴일 3건)
+- [ ] 케이스별 `NODE_START→...→COMPLETED` 이벤트 체인 확인
+- [ ] 문장별 citation 연결 및 근거 목록 일치 확인
+- [ ] shadow 비교 로그(`shadow_compare summary`) 생성 확인

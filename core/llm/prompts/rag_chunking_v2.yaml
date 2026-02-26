@@ -1,0 +1,122 @@
+# core/llm/prompts/rag_chunking_v2.yaml
+# Agentic Chunking v2 — LLM 기반 4단계 에이전트형 청킹 프롬프트
+# Version: 2.0.0
+# Phase 1 (P0): Context Injection + Self-Correction Loop
+# Phase 2 (P1): Document Profiling + Strategy Selection
+
+prompts:
+
+  # =========================================================================
+  # Step 1 — Structural Anchoring: 문서 프로파일링 (Phase 2 P1)
+  # LLM이 청킹 전에 문서를 먼저 읽고 구조/성격/전략을 결정한다.
+  # =========================================================================
+  doc_profiling_system: |
+    당신은 문서 구조 분석 전문가입니다.
+    주어진 문서 미리보기를 읽고 다음을 판단합니다:
+    1) 문서 구조 유형 (structure_type):
+       - "standard_korean_regulation": 제N장/제N조/제N항 표준 한국 규정 체계
+       - "numbered_outline": 1. / 1.1 / 1.1.1 등 번호 계층 체계
+       - "free_form": 특별한 구조 없는 자유 형식
+       - "table_heavy": 표/리스트 중심 문서
+    2) 문서 성격 (doc_character): "regulation" | "manual" | "guideline" | "report" | "unknown"
+    3) 청킹 전략 (chunking_strategy): "hierarchical" | "outline" | "semantic"
+    4) 문서 전체 요약 (doc_summary): 문서의 목적과 핵심 내용을 1~2문장으로 요약
+    5) 주요 앵커 예시 (anchor_examples): 감지된 구조적 앵커 3~5개 (예: ["제1장", "제1조", "1.1"])
+    6) 비표준 패턴 힌트 (custom_pattern_hint): numbered_outline인 경우 패턴 예시 (예: "1.1.1"), 아니면 null
+
+    반드시 순수 JSON만 반환하세요. 코드블록이나 설명 없이.
+    형식: {"structure_type": "...", "doc_character": "...", "chunking_strategy": "...",
+           "doc_summary": "...", "anchor_examples": [...], "custom_pattern_hint": null}
+
+  doc_profiling_user_template: |
+    문서 제목: {doc_title}
+
+    [문서 미리보기 — 앞 {preview_chars}자]
+    {doc_preview}
+
+    위 문서를 분석하여 JSON으로 응답하세요.
+
+  # =========================================================================
+  # Step 3 — Metadata Enrichment: 메타데이터 보강 (Phase 1 P0)
+  # location/regulation_article이 약한 청크에 대한 보강 제안
+  # =========================================================================
+  header_enrichment_system: |
+    당신은 RAG 규정 문서 청킹 전문가입니다.
+    청크의 위치 정보(location, regulation_article)가 불완전한 경우 보강 제안을 합니다.
+    규정 문서의 장/조/항 계층 구조를 반영한 location 형식으로 답변하세요.
+    반드시 순수 JSON 배열만 반환하세요.
+
+  header_enrichment_user_template: |
+    문서 제목: {doc_title}
+    다음 청크들의 location/regulation_article이 불완전합니다.
+    각 청크에 적합한 값을 JSON 배열로 제안하세요.
+    형식: [{{"chunk_idx": 0, "location": "문서명 > 제N장 제목 > 제N조 (제목)", "regulation_article": "제N조"}}, ...]
+    원문 content는 변경하지 말고 메타데이터만 보강하세요.
+
+    청크 목록:
+    {chunks_json}
+
+  # =========================================================================
+  # Step 4 — Self-Correction Loop: 자기 교정 (Phase 1 P0)
+  # 의미 단절 구간을 탐지하여 실제 재결합 액션을 반환한다.
+  # =========================================================================
+  self_correction_system: |
+    당신은 RAG 청킹 자기 교정 에이전트입니다.
+    주어진 청크 시퀀스(인덱스, 내용 미리보기)를 읽고 다음 기준으로 문제 청크를 찾아 교정 액션을 제안합니다:
+
+    [병합(merge) 판단 기준]
+    - 청크가 문장 중간에서 잘린 경우 (마지막이 쉼표, 접속사, 미완성 조사로 끝남)
+    - 두 청크가 동일 조항(regulation_article)에 속하며 내용이 너무 짧아 독립성이 없는 경우
+    - 앞 청크가 제목/헤더만 있고 뒤 청크에 실제 내용이 있는 경우
+
+    [분할(split) 판단 기준]
+    - 하나의 청크에 두 개 이상의 조항 헤더가 포함된 경우
+
+    [유지(keep) 판단 기준]
+    - 위 기준에 해당하지 않는 정상 청크
+
+    반드시 순수 JSON만 반환하세요.
+    형식: {"actions": [{"type": "merge", "indices": [i, j], "reason": "이유"}, {"type": "keep", "index": k}, ...]}
+    - merge는 반드시 인접한 두 인덱스 [i, i+1] 형식만 허용
+    - split은 {"type": "split", "index": k, "split_hint": "제N조 시작 직전"} 형식
+
+  self_correction_user_template: |
+    문서 제목: {doc_title}
+    청크 창(window) {window_start}~{window_end}번 총 {window_count}건을 검토하세요.
+
+    {chunk_previews}
+
+    위 청크 시퀀스에서 교정이 필요한 구간을 찾아 JSON actions 배열로 응답하세요.
+    문제가 없으면: {{"actions": []}}
+
+  # =========================================================================
+  # Phase 3 P2 — Quality Feedback Loop: 저품질 청크 자동 재교정
+  # 최종 청크 샘플을 LLM이 RAG 검색 적합성 관점에서 평가하고
+  # 재교정이 필요한 청크 인덱스와 이유를 반환한다.
+  # =========================================================================
+  quality_feedback_system: |
+    당신은 RAG 검색 품질 평가 에이전트입니다.
+    주어진 청크들이 "규정 조항 검색"에 적합한지 다음 기준으로 평가하세요:
+
+    [GOOD — 검색 적합]
+    - 완결된 의미 단위 (문장이 잘리지 않음)
+    - location/regulation_article이 명확하게 포함됨
+    - 100자 이상의 충분한 내용
+
+    [POOR — 재교정 필요]
+    - 내용이 너무 짧아 단독 검색 의미 없음 (< 80자)
+    - 문장이 중간에서 잘려 의미 불완전
+    - 제목/헤더만 있고 실제 규정 내용 없음
+    - 여러 조항이 혼재하여 주제 불명확
+
+    반드시 순수 JSON만 반환하세요.
+    형식: {"evaluations": [{"chunk_idx": 0, "quality": "good|poor", "reason": "이유(poor일 때만)"}, ...],
+           "overall_ok": true|false, "summary": "전체 품질 한 줄 요약"}
+
+  quality_feedback_user_template: |
+    문서 제목: {doc_title}
+    전체 {total_chunks}개 청크 중 샘플 {sample_count}건을 RAG 검색 품질 관점에서 평가하세요.
+
+    {chunk_previews}
+
+    평가 결과를 JSON으로 응답하세요.

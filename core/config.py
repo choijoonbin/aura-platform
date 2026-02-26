@@ -146,6 +146,36 @@ class Settings(BaseSettings):
         default=True,
         description="사실(Fact) 컨텍스트가 부족하면 확정 위반 문구를 제한하는 보수 게이트.",
     )
+    agentic_v2_enabled: bool = Field(
+        default=False,
+        description="finance_aura_v2_agentic 경로 활성화 여부. true면 v2를 우선 선택.",
+    )
+    agentic_v2_primary_agent_key: str = Field(
+        default="finance_aura_v2_agentic",
+        description="Agentic v2 주 경로 agent key.",
+    )
+    agentic_v2_legacy_agent_key: str = Field(
+        default="finance_aura",
+        description="레거시 분석 파이프라인 agent key.",
+    )
+    agentic_shadow_run_enabled: bool = Field(
+        default=False,
+        description="Shadow Run 활성화 여부. true면 primary 실행과 함께 shadow 비교 실행.",
+    )
+    agentic_shadow_agent_key: str = Field(
+        default="finance_aura_v2_agentic",
+        description="Shadow Run 비교 실행용 agent key.",
+    )
+    agentic_shadow_sample_ratio: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="Shadow Run 샘플 비율(0.0~1.0).",
+    )
+    agentic_shadow_case_types: str = Field(
+        default="HOLIDAY_USAGE",
+        description="Shadow Run 대상 case_type 목록(쉼표 구분).",
+    )
     rag_quality_gate_enabled: bool = Field(
         default=True,
         description="RAG 청킹 품질 게이트 활성화(메타 필수값/노이즈 제거/중복 제거/검증 리포트).",
@@ -204,6 +234,63 @@ class Settings(BaseSettings):
         ge=20,
         le=400,
         description="계층형 2차 세분화 시 하위 청크 최소 길이.",
+    )
+    # Agentic 청킹 v2: 환경 변수로 v1/v2 전환 (RAG_CHUNKING_VERSION=v1|v2)
+    rag_chunking_version: str = Field(
+        default="v2",
+        description="RAG 청킹 버전: v1(기존 rule-based), v2(에이전트형 LLM 보강). 환경변수 RAG_CHUNKING_VERSION으로 전환.",
+    )
+    # ── Agentic Chunking v2: 단계별 기능 플래그 ──────────────────────────────
+    rag_chunking_v2_profiling_enabled: bool = Field(
+        default=True,
+        description="v2 Step 1: LLM 문서 프로파일링. 구조/성격/전략/커스텀 앵커 결정.",
+    )
+    rag_chunking_v2_layout_aware_enabled: bool = Field(
+        default=True,
+        description="v2 Step 2: Layout-Aware 전처리. 표/리스트 블록을 청킹 시 분리되지 않도록 보호.",
+    )
+    rag_chunking_v2_semantic_hybrid_enabled: bool = Field(
+        default=True,
+        description="v2 Step 2: Semantic Hybrid Sub-chunking. 계층형 대형 청크 내 임베딩 기반 경계 탐지.",
+    )
+    rag_chunking_v2_context_inject_enabled: bool = Field(
+        default=True,
+        description="v2 Step 3: doc_summary 텍스트 본문 주입 (Contextual Retrieval / Small-to-Big).",
+    )
+    rag_chunking_v2_llm_enrich_enabled: bool = Field(
+        default=True,
+        description="v2 Step 3: LLM 기반 약한 메타데이터 보강 (location/regulation_article).",
+    )
+    rag_chunking_v2_llm_verify_enabled: bool = Field(
+        default=True,
+        description="v2 Step 4: Self-Correction Loop. LLM 병합/분할 실제 적용.",
+    )
+    rag_chunking_v2_feedback_enabled: bool = Field(
+        default=True,
+        description="v2 Feedback: Quality Feedback Loop. 저품질 청크 자동 재교정 (Phase 3 P2).",
+    )
+    # ── RAG 자동 재청킹 (Auto Reindex) ────────────────────────────────────────
+    rag_reindex_auto_trigger_enabled: bool = Field(
+        default=True,
+        description="품질 게이트 미달 시 v2 재청킹 백그라운드 자동 트리거. v1 청킹 결과가 낮을 때 v2로 재시도.",
+    )
+    rag_reindex_article_coverage_min: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        description="자동 재청킹 트리거: article_coverage 이 값 미만이면 재청킹.",
+    )
+    rag_reindex_noise_rate_max: float = Field(
+        default=0.4,
+        ge=0.0,
+        le=1.0,
+        description="자동 재청킹 트리거: noise_rate 이 값 초과 시 재청킹.",
+    )
+    rag_reindex_short_chunk_rate_max: float = Field(
+        default=0.4,
+        ge=0.0,
+        le=1.0,
+        description="자동 재청킹 트리거: short_chunk_rate 이 값 초과 시 재청킹.",
     )
     # RAG 벡터화 응답: 청크 배치 크기 (20~50). 대용량 시 메모리·전송 부담 완화.
     rag_chunk_batch_size: int = Field(
@@ -327,7 +414,7 @@ class Settings(BaseSettings):
         default="HS256",
         description="JWT 알고리즘"
     )
-    
+
     @model_validator(mode="after")
     def validate_secret_key(self) -> "Settings":
         """

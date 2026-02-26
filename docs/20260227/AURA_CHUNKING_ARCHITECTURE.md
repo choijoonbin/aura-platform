@@ -135,8 +135,26 @@ RAG 성능은 모델보다 먼저 **청킹 품질**에서 결정된다.
 
 ---
 
-## 9. 참고 경로
+## 9. 에이전트형 청킹 v2 (2026-02)
+
+환경변수 `RAG_CHUNKING_VERSION=v2`로 전환 시 적용되는 4단계 워크플로우:
+
+| 단계 | 설명 |
+|------|------|
+| 1. Structural Anchoring | 기존 [장-조-항-호] 계층형 파싱 (rag.py 재사용) |
+| 2. Hybrid Chunking | 2차 세분화 (rag.py 재사용) |
+| 3. Metadata Enrichment | LLM 기반 헤더/위치 보강 (Header Injection) |
+| 4. Self-Correction | LLM 기반 품질 사후 검증 (Post-Verification) |
+
+- **기본값**: v1 (기존 rule-based). v2는 로컬/스테이징 테스트 후 전환.
+- **구현**: `core/analysis/rag_chunking_v2.py`, `core/llm/prompts/rag_chunking_v2.yaml`
+- **비용·지연**: LLM 호출 2회 추가(헤더 보강 최대 15건, 품질 검증 샘플 5건). 설정으로 비활성화 가능.
+
+---
+
+## 10. 참고 경로
 
 - 청킹/검색 구현: `core/analysis/rag.py`
+- 에이전트형 청킹 v2: `core/analysis/rag_chunking_v2.py`
 - 품질게이트/리포트 연계: RAG 처리 및 콜백 경로
 - 분석 단계 연동: `core/analysis/analysis_pipeline.py`

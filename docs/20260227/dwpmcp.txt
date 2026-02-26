@@ -115,3 +115,116 @@ P0 완료 기준
 - API 샘플 요청/응답 JSON
 - Shadow compare 샘플 응답 1건
 
+
+#dwp-mcp-server 결과
+완료했습니다. 이번 작업은 dwp-mcp-server 기준으로만 반영했고, 컴파일까지 통과했습니다.
+
+반영 내용
+
+공통 응답에 meta.latencyMs, decisionCode, evidenceRefs 포함 강화
+M​cpToolEnvelope.java
+
+v2 엄격 검증 엔드포인트 추가(헤더/입력 누락 시 HTTP 400 + INPUT_PARTIAL)
+M​cpToolController.java
+
+/mcp/tools/v2/policy-regulation
+/mcp/tools/v2/business-calendar
+/mcp/tools/v2/master-data
+/mcp/tools/v2/case-context
+/mcp/tools/v2/evidence-verification
+/mcp/tools/v2/rag-conflict-diagnostics
+Shadow Run 메타 저장/비교 API 추가
+M​cpMetricsController.java
+
+POST /mcp/metrics/shadow-runs
+GET /mcp/metrics/shadow-compare?from=&to=
+case-context 계산 보강 + Map.of(null) 리스크 제거
+M​cpToolService.java
+
+verification 로그에 trace 연계 강화
+M​cpToolService.java
+
+shadow 기본값 설정 추가
+application.yml
+
+mcp.shadow.default-agent-mode
+mcp.shadow.default-model-version
+mcp.shadow.default-policy-version
+Aura 전달용 URL
+
+MCP_BASE_URL=http://localhost:8080/api/mcp/tools
+Shadow 비교: GET http://localhost:8080/api/mcp/metrics/shadow-compare?from=...&to=...
+Shadow 메타 저장: POST http://localhost:8080/api/mcp/metrics/shadow-runs
+검증 결과
+
+빌드: ./gradlew :dwp-mcp-server:compileJava -x test 성공.
+
+
+
+#dwpmcp result1
+확인 결과입니다.
+
+v2 계약 확인
+X-User-ID 누락 시: HTTP 400 + errorCode=INPUT_PARTIAL 확인됨
+정상 시: 응답 data.meta.latencyMs, data.decisionCode, data.evidenceRefs 포함 확인됨
+게이트웨이 라우팅 확인
+POST /api/mcp/tools/v2/{tool} → mcp-server 라우트로 정상 매핑됨
+근거 로그: Route matched: mcp-server + localhost (line 8086)
+실증 호출 결과
+성공(정상):
+요청: POST /api/mcp/tools/v2/business-calendar
+traceId: mcp-v2-success-002
+HTTP: 200
+응답 내: decisionCode=OK, meta.latencyMs=17, evidenceRefs=[]
+실패(헤더 누락):
+요청: POST /api/mcp/tools/v2/master-data (X-User-ID 미포함)
+traceId: mcp-v2-fail-001
+HTTP: 400
+응답 내: errorCode=INPUT_PARTIAL, 메시지 X-User-ID 헤더가 필요합니다.
+요청하신 로그 1세트
+성공 로그 (MCP):
+MCP response summary: tool=business-calendar(v2) traceId=mcp-v2-success-002 ... success=true decisionCode=OK latency_ms=17
+실패 로그 (Gateway + 응답):
+Gateway: HTTP POST "/api/mcp/tools/v2/master-data" / Route matched: mcp-server / Completed 400 BAD_REQUEST
+Body: traceId=mcp-v2-fail-001, errorCode=INPUT_PARTIAL
+참고: 현재 v2의 헤더 누락 케이스는 컨트롤러 조기 반환이라 MCP의 request/response summary 한 쌍이 모두 찍히지 않고, Gateway + 응답 바디로 추적됩니다. 원하시면 v2 실패 케이스도 MCP summary 로그가 남도록 바로 보강하겠습니다.
+
+
+#Synapse결과
+완료했습니다. 요청하신 synapse 기준으로 AGENT_EVENT 표준 저장/조회 경로를 반영했습니다.
+
+반영 내용
+
+표준 이벤트 적재 + 중복 억제
+AGENT_EVENT 9종 인식/저장, resource_type='CASE', resource_id=caseId 저장
+중복 억제 키: tenant_id + run_id + event_type + node + input_hash 조회 후 skip
+파일: AgentEventPushService.java, AgentActivityLogRepository.java
+AGENT_EVENT 표준 조회 API 추가
+GET /api/synapse/cases/{caseId}/agent-events?runId=...
+runId 미지정 시 latestIfMissing=true 기본으로 최신 run 조회
+정렬: occurred_at ASC
+파일: CaseController.java, AgentEventQueryService.java, AgentEventDto.java
+수신 DTO 확장(표준 필드 수용)
+event_type/node/tool/decision_code/input_hash/output_ref/evidence_ids/run_id... 수용
+파일: AgentEventPushRequest.java
+운영 로그 표준 보강
+수신 요청/응답 요약 로그 추가 (traceId/tenantId/caseId/runId/event_type/decisionCode)
+타임라인 조회 요청/응답 로그 추가
+파일: AgentEventController.java, CaseController.java
+인덱스 추가(Flyway)
+(tenant_id, resource_type, resource_id, occurred_at)
+metadata_json->>'run_id', event_type, input_hash 경로 인덱스
+파일: V87__agent_event_indexes.sql
+검증
+
+컴파일 성공: ./gradlew :services:synapsex-service:compileJava -x test (BUILD SUCCESSFUL)
+다음 실행 필요
+
+synapse 서버 재기동(Flyway V87 적용)
+아래 1건으로 확인
+POST /api/synapse/agent/events
+GET /api/synapse/cases/{caseId}/agent-events?runId=...
+
+
+
+

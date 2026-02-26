@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Agentic Chunking v2 (Phase 1 P0 + Phase 2 P1 + Phase 3 P2)** (2026-02-20)
+  - **신규 모듈**: `core/analysis/rag_chunking_v2.py` — 에이전트형 청킹 완전 구현.
+  - **Step 1 Structural Anchoring (Phase 2 P1)**:
+    - LLM 문서 프로파일링: 문서 2000자 미리보기 → structure_type, doc_character, chunking_strategy, doc_summary 결정.
+    - 커스텀 앵커 동적 생성: anchor_examples → 이 문서 전용 정규식 생성 → 비표준 경계 보완 분할.
+  - **Step 2 Hybrid Chunking**:
+    - Layout-Aware 전처리: 표/리스트 블록 마커 감싸기, 청킹 시 분리 방지.
+    - 전략별 청킹: hierarchical / outline(번호형) / semantic(SemanticChunker).
+    - Semantic Hybrid Sub-chunking: 계층형 대형 청크 내 임베딩 유사도 기반 추가 분할.
+  - **Step 3 Metadata Enrichment**:
+    - Contextual Retrieval: doc_summary를 텍스트 본문에 직접 주입 (Small-to-Big).
+    - LLM 기반 약한 location/regulation_article 보강.
+  - **Step 4 Self-Correction Loop**:
+    - LLM 창(window) 단위 병합/분할 판단 → 실제 청크 병합·분할 적용 (split_hint로 위치 탐색).
+  - **Quality Feedback Loop (Phase 3 P2)**:
+    - 최종 청크 샘플 LLM 품질 평가 (good/poor) → POOR 청크 인접 병합으로 자동 재교정.
+  - **환경 변수**: `RAG_CHUNKING_VERSION=v1|v2` — v2 시 위 전체 파이프라인 사용.
+  - **설정 플래그** (단계별 on/off): `RAG_CHUNKING_V2_PROFILING_ENABLED`, `RAG_CHUNKING_V2_LAYOUT_AWARE_ENABLED`, `RAG_CHUNKING_V2_SEMANTIC_HYBRID_ENABLED`, `RAG_CHUNKING_V2_CONTEXT_INJECT_ENABLED`, `RAG_CHUNKING_V2_LLM_ENRICH_ENABLED`, `RAG_CHUNKING_V2_LLM_VERIFY_ENABLED`, `RAG_CHUNKING_V2_FEEDBACK_ENABLED`.
+  - **프롬프트**: `core/llm/prompts/rag_chunking_v2.yaml` — 프로파일링, 메타데이터 보강, 자기 교정, 품질 피드백용 프롬프트.
+  - **영향 없음**: 기존 rag.py 수정 없음, process_and_vectorize_v2()가 동일 입·출력 규격 유지.
 - **High-Performance RAG Pipeline Optimization** (2026-02-11)
   - **Semantic Chunking**: `RecursiveCharacterTextSplitter` 대신 `langchain_experimental.text_splitter.SemanticChunker` 도입. `OpenAIEmbeddings(text-embedding-3-small)` 기반 의미적 유사도로 청킹, `breakpoint_threshold_type="percentile"`로 분할 지점 자동 결정. 실패 시 RecursiveCharacterTextSplitter fallback.
   - **PDF Parsing**: `pypdf` 대신 **PyMuPDF (fitz)** 사용. 표(Table)는 `find_tables()` 추출 후 Markdown 스타일로 변환하여 본문에 포함. 페이지별 `[PAGE=n]` 마커로 청크 출처 페이지 추적.

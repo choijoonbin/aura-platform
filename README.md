@@ -263,8 +263,13 @@ alembic upgrade head
 
 Aura는 FE에서 전달된 `doc_type`을 기준으로 내부에서 청킹/검증을 수행합니다.
 
-- `HIERARCHICAL`: 조항 경계 파싱(1차) + 조항 내부 세분화(2차 하이브리드)
-- `REGULATION/GENERAL`: semantic/recursive 청킹 + 품질게이트
+- **v1 (기본)**: `HIERARCHICAL` → 조항 경계 파싱(1차) + 조항 내부 세분화(2차 하이브리드) / `REGULATION/GENERAL` → semantic/recursive 청킹
+- **v2 (에이전트형)**: `RAG_CHUNKING_VERSION=v2` 시 4단계 파이프라인 적용
+  1. Structural Anchoring: LLM 문서 프로파일링 → 전략·커스텀 앵커 결정
+  2. Hybrid Chunking: Layout-Aware(표/리스트 보호) + Semantic Hybrid(의미론적 경계 탐지)
+  3. Metadata Enrichment: doc_summary 본문 주입 + 약한 메타데이터 LLM 보강
+  4. Self-Correction: LLM 병합/분할 실제 적용
+  5. Quality Feedback: 저품질 청크 자동 재교정
 
 적용된 품질 KPI:
 
@@ -283,6 +288,8 @@ Aura는 FE에서 전달된 `doc_type`을 기준으로 내부에서 청킹/검증
 
 관련 설정(`.env`/`core.config.Settings`):
 
+- `RAG_CHUNKING_VERSION` (v1|v2) — v2 시 에이전트형 파이프라인
+- **v2 단계별 플래그**: `RAG_CHUNKING_V2_PROFILING_ENABLED`, `RAG_CHUNKING_V2_LAYOUT_AWARE_ENABLED`, `RAG_CHUNKING_V2_SEMANTIC_HYBRID_ENABLED`, `RAG_CHUNKING_V2_CONTEXT_INJECT_ENABLED`, `RAG_CHUNKING_V2_LLM_ENRICH_ENABLED`, `RAG_CHUNKING_V2_LLM_VERIFY_ENABLED`, `RAG_CHUNKING_V2_FEEDBACK_ENABLED`
 - `RAG_QUALITY_GATE_ENABLED`
 - `RAG_QUALITY_STRICT_MODE`
 - `RAG_CHUNK_MIN_CHARS`

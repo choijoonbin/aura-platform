@@ -1069,6 +1069,14 @@ def _build_compact_rag_query(case_data: dict[str, Any] | None, risk_type: str | 
     return " ".join(dedup)
 
 
+def _stable_hash(value: Any) -> str:
+    try:
+        raw = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        raw = str(value)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
 async def run_audit_analysis(
     case_id: str,
     *,
@@ -1176,12 +1184,39 @@ async def run_audit_analysis(
             )
         if _needs_get_case_fallback(case_data):
             incr("audit_analysis_get_case_fallback_total")
+            _get_case_input = {"caseId": case_id}
+            yield ("tool_call", _with_coords({
+                "node": "INPUT_NORM",
+                "tool": "get_case",
+                "decision_code": "REQUESTED",
+                "input_hash": _stable_hash(_get_case_input),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                **id_mapping,
+            }))
             try:
                 case_result = await get_case.ainvoke({"caseId": case_id})
                 case_fallback = json.loads(case_result) if isinstance(case_result, str) else case_result
+                yield ("tool_result", _with_coords({
+                    "node": "INPUT_NORM",
+                    "tool": "get_case",
+                    "decision_code": "OK",
+                    "input_hash": _stable_hash(_get_case_input),
+                    "output_ref": _stable_hash(case_fallback or {}),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    **id_mapping,
+                }))
             except Exception as e:
                 logger.warning(f"get_case fallback failed for {case_id}: {e}")
                 case_fallback = {}
+                yield ("tool_result", _with_coords({
+                    "node": "INPUT_NORM",
+                    "tool": "get_case",
+                    "decision_code": "ERROR",
+                    "input_hash": _stable_hash(_get_case_input),
+                    "output_ref": str(e)[:120],
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    **id_mapping,
+                }))
             if isinstance(case_fallback, dict) and "error" in case_fallback:
                 case_fallback = {}
             case_fallback = _normalize_get_case_response(case_fallback)
@@ -1207,11 +1242,34 @@ async def run_audit_analysis(
             )
 
         # [추적] payload/get_case 정규화 후 스크리닝 필드 유무
+        _mcp_input = {
+            "caseId": case_id,
+            "occurredAt": case_data.get("occurredAt") if isinstance(case_data, dict) else None,
+            "mccCode": case_data.get("mccCode") if isinstance(case_data, dict) else None,
+            "hrStatus": case_data.get("hrStatus") if isinstance(case_data, dict) else None,
+        }
+        yield ("tool_call", _with_coords({
+            "node": "INPUT_NORM",
+            "tool": "mcp_adapter.resolve_fact_context",
+            "decision_code": "REQUESTED",
+            "input_hash": _stable_hash(_mcp_input),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            **id_mapping,
+        }))
         mcp_fact_context: dict[str, Any] = await resolve_fact_context(
             case_data if isinstance(case_data, dict) else {},
             case_id=case_id,
             stage="analysis",
         )
+        yield ("tool_result", _with_coords({
+            "node": "INPUT_NORM",
+            "tool": "mcp_adapter.resolve_fact_context",
+            "decision_code": "OK",
+            "input_hash": _stable_hash(_mcp_input),
+            "output_ref": _stable_hash((mcp_fact_context or {}).get("quality", {})),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            **id_mapping,
+        }))
         if isinstance(case_data, dict) and case_data:
             facts = mcp_fact_context.get("facts") if isinstance(mcp_fact_context.get("facts"), dict) else {}
             # MCP fact context 값으로 누락 필드만 보강(payload-first 유지)
@@ -1373,9 +1431,27 @@ async def run_audit_analysis(
             })
 
         doc_list: list[dict[str, Any]] = []
+        _search_docs_input = {"filters": {"caseId": case_id, "topK": 5}}
+        yield ("tool_call", _with_coords({
+            "node": "EVIDENCE_GATHER",
+            "tool": "search_documents",
+            "decision_code": "REQUESTED",
+            "input_hash": _stable_hash(_search_docs_input),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            **id_mapping,
+        }))
         try:
             doc_result = await search_documents.ainvoke({"filters": {"caseId": case_id, "topK": 5}})
             docs = json.loads(doc_result) if isinstance(doc_result, str) else doc_result
+            yield ("tool_result", _with_coords({
+                "node": "EVIDENCE_GATHER",
+                "tool": "search_documents",
+                "decision_code": "OK",
+                "input_hash": _stable_hash(_search_docs_input),
+                "output_ref": _stable_hash(docs or {}),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                **id_mapping,
+            }))
             if isinstance(docs, dict):
                 doc_list = docs.get("documents", docs.get("items", [])) or []
             else:
@@ -1396,6 +1472,15 @@ async def run_audit_analysis(
                     })
         except Exception as e:
             logger.debug(f"search_documents failed: {e}")
+            yield ("tool_result", _with_coords({
+                "node": "EVIDENCE_GATHER",
+                "tool": "search_documents",
+                "decision_code": "ERROR",
+                "input_hash": _stable_hash(_search_docs_input),
+                "output_ref": str(e)[:120],
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                **id_mapping,
+            }))
 
         # 하이브리드 검색 — 사내 규정(Vector DB) 자동 로드
         yield ("thought_pending", _with_coords({"step_label": "REGULATION_MATCH", "message": THOUGHT_PENDING_MESSAGE, **id_mapping}))
@@ -1821,23 +1906,77 @@ async def run_audit_analysis(
             except Exception as e:
                 logger.debug(f"web_search in pipeline failed: {e}")
 
+        _open_items_input = {"filters": {"caseId": case_id}}
+        yield ("tool_call", _with_coords({
+            "node": "EVIDENCE_GATHER",
+            "tool": "get_open_items",
+            "decision_code": "REQUESTED",
+            "input_hash": _stable_hash(_open_items_input),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            **id_mapping,
+        }))
         try:
             oi_result = await get_open_items.ainvoke({"filters": {"caseId": case_id}})
             oi_data = json.loads(oi_result) if isinstance(oi_result, str) else oi_result
+            yield ("tool_result", _with_coords({
+                "node": "EVIDENCE_GATHER",
+                "tool": "get_open_items",
+                "decision_code": "OK",
+                "input_hash": _stable_hash(_open_items_input),
+                "output_ref": _stable_hash(oi_data or {}),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                **id_mapping,
+            }))
             items = oi_data.get("items", oi_data.get("openItems", [])) if isinstance(oi_data, dict) else []
             if items:
                 evidence_items.append({"type": "OPEN_ITEMS", "source": "get_open_items", "count": len(items)})
         except Exception as e:
             logger.debug(f"get_open_items failed: {e}")
+            yield ("tool_result", _with_coords({
+                "node": "EVIDENCE_GATHER",
+                "tool": "get_open_items",
+                "decision_code": "ERROR",
+                "input_hash": _stable_hash(_open_items_input),
+                "output_ref": str(e)[:120],
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                **id_mapping,
+            }))
 
+        _lineage_input = {"caseId": case_id}
+        yield ("tool_call", _with_coords({
+            "node": "EVIDENCE_GATHER",
+            "tool": "get_lineage",
+            "decision_code": "REQUESTED",
+            "input_hash": _stable_hash(_lineage_input),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            **id_mapping,
+        }))
         try:
             lineage_result = await get_lineage.ainvoke({"caseId": case_id})
             lineage_data = json.loads(lineage_result) if isinstance(lineage_result, str) else lineage_result
+            yield ("tool_result", _with_coords({
+                "node": "EVIDENCE_GATHER",
+                "tool": "get_lineage",
+                "decision_code": "OK",
+                "input_hash": _stable_hash(_lineage_input),
+                "output_ref": _stable_hash(lineage_data or {}),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                **id_mapping,
+            }))
             lineage = lineage_data.get("lineage", []) if isinstance(lineage_data, dict) and "error" not in lineage_data else []
             if lineage:
                 evidence_items.append({"type": "LINEAGE", "source": "get_lineage", "count": len(lineage)})
         except Exception as e:
             logger.debug(f"get_lineage failed: {e}")
+            yield ("tool_result", _with_coords({
+                "node": "EVIDENCE_GATHER",
+                "tool": "get_lineage",
+                "decision_code": "ERROR",
+                "input_hash": _stable_hash(_lineage_input),
+                "output_ref": str(e)[:120],
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                **id_mapping,
+            }))
 
         # C(폴백): fetch 실패로 evidence_items 비어 있으면 body.evidence 사용
         only_case_evidence = bool(evidence_items) and all((isinstance(e, dict) and e.get("type") == "CASE") for e in evidence_items)
@@ -2346,6 +2485,17 @@ async def run_audit_analysis(
             quality_gate_codes,
             policy_gate.get("signals", []) if isinstance(policy_gate, dict) else [],
         )
+        yield ("gate", _with_coords({
+            "node": "QUALITY_GATE",
+            "decision_code": "OK" if quality_gate_codes == ["OK"] else "HOLD_REVIEW",
+            "quality_gate_codes": quality_gate_codes,
+            "input_hash": _stable_hash({
+                "caseId": case_id,
+                "codes": quality_gate_codes,
+            }),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            **id_mapping,
+        }))
         output_overall = float(overall)
         if "RAG_ZERO" in quality_gate_codes:
             output_overall = min(output_overall, 0.35)
@@ -2388,6 +2538,15 @@ async def run_audit_analysis(
 
         # 문장별 근거 커버리지 점검: 결론 문장이 근거와 연결되지 않으면 보수적으로 강등
         citations_preview = _build_citations_payload(doc_list, external_citations)
+        logger.info(
+            "audit_analysis citations_preview: case_id=%s doc_list=%s external_citations=%s citations_preview=%s sample_ids=%s sample_refs=%s",
+            case_id,
+            len(doc_list or []),
+            len(external_citations or []),
+            len(citations_preview or []),
+            [c.get("citation_id") for c in (citations_preview or [])[:3] if isinstance(c, dict)],
+            [str(c.get("reference") or c.get("title") or "")[:80] for c in (citations_preview or [])[:3] if isinstance(c, dict)],
+        )
         # 위험유형-조항 의미 정합성 게이트
         if not _is_risk_article_semantically_aligned(risk_type=risk_type, citations=citations_preview):
             if "RISK_ARTICLE_MISMATCH" not in quality_gate_codes:
@@ -2417,6 +2576,24 @@ async def run_audit_analysis(
         sentence_citation_map = _build_sentence_citation_map(
             reason_text=reason_text,
             citations=citations_preview,
+        )
+        grounded_rows = sum(1 for r in (sentence_citation_map or []) if isinstance(r, dict) and bool(r.get("grounded")))
+        ungrounded_rows = sum(1 for r in (sentence_citation_map or []) if isinstance(r, dict) and not bool(r.get("grounded")))
+        logger.info(
+            "audit_analysis sentence_citation_map summary: case_id=%s rows=%s grounded=%s ungrounded=%s sample=%s",
+            case_id,
+            len(sentence_citation_map or []),
+            grounded_rows,
+            ungrounded_rows,
+            [
+                {
+                    "idx": r.get("sentence_index"),
+                    "grounded": r.get("grounded"),
+                    "citation_ids": r.get("citation_ids"),
+                }
+                for r in (sentence_citation_map or [])[:3]
+                if isinstance(r, dict)
+            ],
         )
         coverage_ratio = float(grounding.get("coverage_ratio") or 0.0)
         ungrounded_claim_count = 0
@@ -2448,6 +2625,11 @@ async def run_audit_analysis(
                 items=sentence_citation_map,
                 thought_stream="[결론] 문장별 인용 근거 매핑을 완료했습니다.",
             ).model_dump(),
+        )
+        logger.info(
+            "audit_analysis SENTENCE_CITATION_MAP emitted: case_id=%s items=%s",
+            case_id,
+            len(sentence_citation_map or []),
         )
         if ungrounded_claim_count > 0:
             if "SENTENCE_CITATION_MISSING" not in quality_gate_codes:
@@ -2578,6 +2760,12 @@ async def run_audit_analysis(
 
         # citations: 내부 규정(RAG) + 외부 검색 URL
         citations = _build_citations_payload(doc_list, external_citations)
+        logger.info(
+            "audit_analysis citations_final: case_id=%s count=%s sample_ids=%s",
+            case_id,
+            len(citations or []),
+            [c.get("citation_id") for c in (citations or [])[:5] if isinstance(c, dict)],
+        )
 
         # chunk_id: 분석에 사용된 핵심 규정 청크 ID (V65/agent_activity_log snake_case)
         chunk_id_ref: str | None = None

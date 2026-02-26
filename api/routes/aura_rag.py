@@ -5,6 +5,7 @@ Aura는 DB에 INSERT하지 않음. 문서 벡터화 연산(Chunk + Embedding) �
 저장은 백엔드에서 수행. 대용량 방지를 위해 청크를 20~50개 단위 배치로 분할 전송.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, File, Form, UploadFile, Query
+from fastapi import APIRouter, BackgroundTasks, Body, File, Form, Path as FPath, UploadFile, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -22,6 +23,7 @@ from core.analysis.rag import (
     validate_local_document_path,
     notify_synapse_rag_status,
 )
+from core.analysis.rag_chunking_v2 import process_and_vectorize_v2
 from core.config import get_settings
 from core.synapse_schema import DOC_TYPE_REGULATION, DOC_TYPE_HIERARCHICAL, DOC_TYPE_GENERAL
 
@@ -71,6 +73,119 @@ class VectorizeByPathBody(BaseModel):
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/aura/rag", tags=["aura-rag"])
+
+
+# =============================================================================
+# RAG 자동 재청킹 (Auto Reindex) — Phase 3 P2
+# =============================================================================
+
+def _quality_needs_reindex(quality_report: dict[str, Any]) -> tuple[bool, str]:
+    """
+    quality_report를 분석하여 자동 재청킹 트리거 여부를 판단.
+    반환: (재청킹_필요, 사유)
+    """
+    settings = get_settings()
+    if not bool(getattr(settings, "rag_reindex_auto_trigger_enabled", True)):
+        return False, ""
+
+    min_coverage = float(getattr(settings, "rag_reindex_article_coverage_min", 0.6))
+    max_noise = float(getattr(settings, "rag_reindex_noise_rate_max", 0.4))
+    max_short = float(getattr(settings, "rag_reindex_short_chunk_rate_max", 0.4))
+
+    reasons: list[str] = []
+
+    article_coverage = quality_report.get("article_coverage")
+    if article_coverage is not None and float(article_coverage) < min_coverage:
+        reasons.append(f"article_coverage={article_coverage:.2f} < {min_coverage}")
+
+    noise_rate = quality_report.get("noise_rate")
+    if noise_rate is not None and float(noise_rate) > max_noise:
+        reasons.append(f"noise_rate={noise_rate:.2f} > {max_noise}")
+
+    short_chunk_rate = quality_report.get("short_chunk_rate")
+    if short_chunk_rate is not None and float(short_chunk_rate) > max_short:
+        reasons.append(f"short_chunk_rate={short_chunk_rate:.2f} > {max_short}")
+
+    # v2 feedback 결과도 반영
+    v2_feedback = quality_report.get("v2_quality_feedback") or {}
+    if not v2_feedback.get("overall_ok", True) and v2_feedback.get("merged_poor", 0) > 2:
+        reasons.append(f"v2_feedback poor_merged={v2_feedback.get('merged_poor')}")
+
+    if reasons:
+        return True, ", ".join(reasons)
+    return False, ""
+
+
+async def _background_reindex(
+    file_path: str,
+    doc_id: str,
+    metadata: dict[str, Any],
+    doc_type: str,
+    save_url: str | None,
+    batch_size: int,
+    trigger_reason: str,
+) -> None:
+    """
+    자동 재청킹 백그라운드 태스크.
+    v2 파이프라인으로 재청킹 후 백엔드에 저장.
+    """
+    logger.info(
+        "RAG auto_reindex: start doc_id=%s reason='%s' file_path=%s",
+        doc_id, trigger_reason, file_path,
+    )
+    try:
+        # 짧은 지연 — 초기 응답이 먼저 BE에 도착하도록
+        await asyncio.sleep(2)
+
+        path = Path(file_path)
+        if not path.exists():
+            logger.warning("RAG auto_reindex: 파일 없음 doc_id=%s path=%s", doc_id, file_path)
+            return
+
+        result = process_and_vectorize_v2(path, doc_id, metadata or None, doc_type=doc_type)
+        if not result.get("ok"):
+            logger.warning(
+                "RAG auto_reindex: v2 재청킹 실패 doc_id=%s error=%s",
+                doc_id, result.get("error"),
+            )
+            await notify_synapse_rag_status(
+                "REINDEX_FAILED",
+                doc_id,
+                f"자동 재청킹 실패: {result.get('error')}",
+            )
+            return
+
+        chunks = result.get("chunks") or []
+        qr = result.get("quality_report") or {}
+        logger.info(
+            "RAG auto_reindex: v2 재청킹 완료 doc_id=%s chunks=%s article_coverage=%s",
+            doc_id, len(chunks), qr.get("article_coverage"),
+        )
+
+        if save_url and chunks:
+            batches = _batch_chunks(chunks, batch_size)
+            sent, total = _send_batches_to_backend(doc_id, batches, save_url)
+            logger.info(
+                "RAG auto_reindex: 백엔드 저장 완료 doc_id=%s total=%s sent=%s",
+                doc_id, total, sent,
+            )
+
+        await notify_synapse_rag_status(
+            "REINDEX_COMPLETED",
+            doc_id,
+            f"자동 재청킹(v2) 완료 — 원인: {trigger_reason}",
+            quality_report=qr,
+        )
+    except Exception as e:
+        logger.error("RAG auto_reindex: 예외 doc_id=%s err=%s", doc_id, e, exc_info=True)
+
+
+def _get_vectorize_fn():
+    """RAG_CHUNKING_VERSION 환경변수에 따라 process_and_vectorize 또는 process_and_vectorize_v2 반환."""
+    version = (get_settings().rag_chunking_version or "v1").strip().lower()
+    if version == "v2":
+        return process_and_vectorize_v2
+    return process_and_vectorize
 
 UPLOAD_TMP_DIR = Path(os.environ.get("AURA_RAG_UPLOAD_TMP", "./data/rag_upload_tmp"))
 _ALLOWED_EXTENSIONS = (".pdf", ".txt", ".md")
@@ -278,11 +393,13 @@ async def rag_documents_vectorize(
         doc_type=doc_type,
         title=(body.title or None),
     )
+    vectorize_fn = _get_vectorize_fn()
+    chunking_version = (get_settings().rag_chunking_version or "v1").strip().lower()
     logger.info(
-        "RAG vectorize start: doc_id=%s rag_document_id=%s document_path=%s batch_size=%s doc_type=%s tenantId=%s (raw: docType=%s, doc_type=%s)",
-        doc_id, rag_document_id, document_path, batch_size, doc_type, tenant_id, body.docType, body.doc_type,
+        "RAG vectorize start: doc_id=%s rag_document_id=%s document_path=%s batch_size=%s doc_type=%s tenantId=%s chunking=%s (raw: docType=%s, doc_type=%s)",
+        doc_id, rag_document_id, document_path, batch_size, doc_type, tenant_id, chunking_version, body.docType, body.doc_type,
     )
-    result = process_and_vectorize(valid_path, rag_document_id, metadata_dict or None, doc_type=doc_type)
+    result = vectorize_fn(valid_path, rag_document_id, metadata_dict or None, doc_type=doc_type)
     if not result.get("ok"):
         logger.warning("RAG vectorize failed: doc_id=%s error=%s", doc_id, result.get("error"))
         return JSONResponse(
@@ -291,23 +408,30 @@ async def rag_documents_vectorize(
         )
     chunks = result["chunks"]
     save_url = getattr(settings, "backend_rag_chunks_save_url", None) or None
+    quality_report = result.get("quality_report") or {}
     logger.info(
         "RAG vectorize chunks ready: doc_id=%s num_chunks=%s save_url_set=%s (BE expects response keys: rag_document_id, total_chunks|batches, batches_sent, batch_size)",
         doc_id, len(chunks), bool(save_url),
     )
     response = _build_vectorize_response(
-        rag_document_id,
-        chunks,
-        batch_size,
-        save_url,
-        quality_report=result.get("quality_report", {}),
+        rag_document_id, chunks, batch_size, save_url, quality_report=quality_report,
     )
     await notify_synapse_rag_status(
-        "COMPLETED",
-        rag_document_id,
-        "청킹·벡터화 완료",
-        quality_report=result.get("quality_report", {}),
+        "COMPLETED", rag_document_id, "청킹·벡터화 완료", quality_report=quality_report,
     )
+    # ── 자동 재청킹 트리거 (v1 청킹 품질 미달 시 백그라운드 v2 재시도) ─────────
+    if chunking_version == "v1":
+        needs, reason = _quality_needs_reindex(quality_report)
+        if needs:
+            logger.info(
+                "RAG auto_reindex: 트리거 doc_id=%s reason='%s'", rag_document_id, reason,
+            )
+            asyncio.ensure_future(
+                _background_reindex(
+                    str(valid_path), rag_document_id, metadata_dict or {},
+                    doc_type, save_url, batch_size, reason,
+                )
+            )
     return response
 
 
@@ -343,7 +467,9 @@ async def rag_ingest_from_path(body: IngestFromPathRequest) -> JSONResponse:
     metadata = _parse_metadata(body.metadata.strip() or None)
     doc_type = (body.doc_type or DOC_TYPE_REGULATION).strip()
     metadata = _ensure_rag_metadata(metadata, tenant_id=None, doc_type=doc_type, title=valid_path.stem)
-    result = process_and_vectorize(valid_path, doc_id, metadata or None, doc_type=doc_type)
+    vectorize_fn = _get_vectorize_fn()
+    chunking_version = (get_settings().rag_chunking_version or "v1").strip().lower()
+    result = vectorize_fn(valid_path, doc_id, metadata or None, doc_type=doc_type)
     if not result.get("ok"):
         return JSONResponse(
             status_code=422,
@@ -351,19 +477,23 @@ async def rag_ingest_from_path(body: IngestFromPathRequest) -> JSONResponse:
         )
     batch_size = getattr(settings, "rag_chunk_batch_size", 30)
     save_url = getattr(settings, "backend_rag_chunks_save_url", None) or None
+    quality_report = result.get("quality_report") or {}
     response = _build_vectorize_response(
-        result["rag_document_id"],
-        result["chunks"],
-        batch_size,
-        save_url,
-        quality_report=result.get("quality_report", {}),
+        result["rag_document_id"], result["chunks"], batch_size, save_url, quality_report=quality_report,
     )
     await notify_synapse_rag_status(
-        "COMPLETED",
-        doc_id,
-        "청킹·벡터화 완료",
-        quality_report=result.get("quality_report", {}),
+        "COMPLETED", doc_id, "청킹·벡터화 완료", quality_report=quality_report,
     )
+    if chunking_version == "v1":
+        needs, reason = _quality_needs_reindex(quality_report)
+        if needs:
+            logger.info("RAG auto_reindex: 트리거 doc_id=%s reason='%s'", doc_id, reason)
+            asyncio.ensure_future(
+                _background_reindex(
+                    str(valid_path), doc_id, metadata or {},
+                    doc_type, save_url, batch_size, reason,
+                )
+            )
     return response
 
 
@@ -402,7 +532,9 @@ async def rag_ingest(
         meta = _parse_metadata(metadata.strip() or None)
         doc_type_val = (doc_type or DOC_TYPE_REGULATION).strip()
         meta = _ensure_rag_metadata(meta, tenant_id=None, doc_type=doc_type_val, title=file.filename)
-        result = process_and_vectorize(tmp_path, doc_id, meta or None, doc_type=doc_type_val)
+        vectorize_fn = _get_vectorize_fn()
+        chunking_version = (get_settings().rag_chunking_version or "v1").strip().lower()
+        result = vectorize_fn(tmp_path, doc_id, meta or None, doc_type=doc_type_val)
         if not result.get("ok"):
             return JSONResponse(
                 status_code=422,
@@ -411,19 +543,22 @@ async def rag_ingest(
         settings = get_settings()
         batch_size = getattr(settings, "rag_chunk_batch_size", 30)
         save_url = getattr(settings, "backend_rag_chunks_save_url", None) or None
+        quality_report = result.get("quality_report") or {}
         response = _build_vectorize_response(
-            result["rag_document_id"],
-            result["chunks"],
-            batch_size,
-            save_url,
-            quality_report=result.get("quality_report", {}),
+            result["rag_document_id"], result["chunks"], batch_size, save_url, quality_report=quality_report,
         )
         await notify_synapse_rag_status(
-            "COMPLETED",
-            doc_id,
-            "청킹·벡터화 완료",
-            quality_report=result.get("quality_report", {}),
+            "COMPLETED", doc_id, "청킹·벡터화 완료", quality_report=quality_report,
         )
+        # tmp_path는 finally에서 삭제되므로 재청킹 불가 — 자동 트리거 스킵
+        if chunking_version == "v1":
+            needs, reason = _quality_needs_reindex(quality_report)
+            if needs:
+                logger.info(
+                    "RAG auto_reindex: 업로드 파일 품질 미달 (tmp 삭제 예정, 재청킹 불가) doc_id=%s reason='%s'",
+                    doc_id, reason,
+                )
+                quality_report["auto_reindex_skipped"] = f"업로드 임시파일 삭제 예정 — {reason}"
         return response
     finally:
         try:
@@ -431,3 +566,99 @@ async def rag_ingest(
                 tmp_path.unlink()
         except OSError as e:
             logger.warning("Failed to remove temp file %s: %s", tmp_path, e)
+
+
+# =============================================================================
+# RAG 수동 재청킹 엔드포인트 — FE "재청킹" 버튼용
+# =============================================================================
+
+class ReindexRequest(BaseModel):
+    """POST /documents/{doc_id}/reindex 요청 body."""
+    document_path: str = Field(..., description="로컬 절대 경로 (재청킹 대상 파일)")
+    doc_type: str = Field(default=DOC_TYPE_HIERARCHICAL, description=f"문서 타입: {DOC_TYPE_REGULATION}, {DOC_TYPE_HIERARCHICAL}, {DOC_TYPE_GENERAL}")
+    metadata: str = Field(default="", description='JSON 문자열. 예: {"title":"규정명","tenant_id":1}')
+
+
+@router.post(
+    "/documents/{doc_id}/reindex",
+    summary="RAG 문서 수동 재청킹 (FE 재청킹 버튼)",
+    description=(
+        "지정 문서를 v2 에이전트형 청킹으로 강제 재처리합니다. "
+        "품질 게이트 미달 문서를 화면에서 직접 재청킹할 때 사용합니다. "
+        "완료 후 Synapse에 REINDEX_COMPLETED 상태를 전달하고 quality_report를 반환합니다."
+    ),
+    tags=["aura-rag"],
+)
+async def rag_reindex(
+    doc_id: str = FPath(..., description="재청킹 대상 rag_document_id"),
+    body: ReindexRequest = Body(...),
+) -> JSONResponse:
+    """
+    수동 재청킹 엔드포인트. RAG_CHUNKING_VERSION 설정과 무관하게 항상 v2 사용.
+    FE에서 "재청킹" 버튼을 눌렀을 때 백엔드가 이 API를 호출한다.
+    """
+    document_path = (body.document_path or "").strip()
+    if not document_path:
+        return JSONResponse(status_code=400, content={"error": "document_path required"})
+
+    suffix = Path(document_path).suffix.lower()
+    if suffix not in _ALLOWED_EXTENSIONS:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Only {', '.join(_ALLOWED_EXTENSIONS)} are supported"},
+        )
+
+    settings = get_settings()
+    allowed_base = getattr(settings, "rag_allowed_document_base_path", None)
+    try:
+        valid_path = validate_local_document_path(
+            document_path,
+            allowed_base=Path(allowed_base) if allowed_base else None,
+        )
+    except FileNotFoundError as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+    except PermissionError as e:
+        return JSONResponse(status_code=403, content={"error": str(e)})
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+    metadata = _parse_metadata(body.metadata.strip() or None)
+    doc_type = (body.doc_type or DOC_TYPE_HIERARCHICAL).strip()
+    metadata = _ensure_rag_metadata(metadata, tenant_id=None, doc_type=doc_type, title=valid_path.stem)
+
+    logger.info(
+        "RAG reindex (manual): start doc_id=%s doc_type=%s path=%s",
+        doc_id, doc_type, valid_path,
+    )
+
+    # 항상 v2로 재청킹
+    result = process_and_vectorize_v2(valid_path, doc_id, metadata or None, doc_type=doc_type)
+    if not result.get("ok"):
+        logger.warning("RAG reindex failed: doc_id=%s error=%s", doc_id, result.get("error"))
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": result.get("error", "Reindex failed"),
+                "quality_report": result.get("quality_report", {}),
+            },
+        )
+
+    chunks = result.get("chunks") or []
+    quality_report = result.get("quality_report") or {}
+    batch_size = getattr(settings, "rag_chunk_batch_size", 30)
+    save_url = getattr(settings, "backend_rag_chunks_save_url", None) or None
+
+    response = _build_vectorize_response(
+        doc_id, chunks, batch_size, save_url, quality_report=quality_report,
+    )
+    await notify_synapse_rag_status(
+        "REINDEX_COMPLETED",
+        doc_id,
+        "수동 재청킹(v2) 완료",
+        quality_report=quality_report,
+    )
+    logger.info(
+        "RAG reindex (manual): 완료 doc_id=%s chunks=%s article_coverage=%s",
+        doc_id, len(chunks), quality_report.get("article_coverage"),
+    )
+    return response
