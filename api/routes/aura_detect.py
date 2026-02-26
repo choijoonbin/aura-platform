@@ -15,8 +15,8 @@ from pydantic import BaseModel, Field, field_validator
 
 from api.dependencies import CurrentUser, TenantId
 from core.context import set_request_context
-from core.analysis.screening import run_screen, run_screen_batch, pick_briefing_priority, generate_briefing_insight
-from core.analysis.audit_analysis_pipeline import _normalize_get_case_response
+from core.analysis.precheck_pipeline import run_screen, run_screen_batch, pick_briefing_priority, generate_briefing_insight
+from core.analysis.analysis_pipeline import _normalize_get_case_response
 from tools.synapse_finance_tool import get_case
 
 logger = logging.getLogger(__name__)
@@ -51,11 +51,27 @@ class ScreenRequest(BaseModel):
     occurredAt: str | None = Field(default=None, description="발생 시각 (선택)")
     expenseType: str | None = Field(default=None, description="경비 유형 (선택)")
     merchantName: str | None = Field(default=None, description="가맹점명 (선택)")
-    riskTypeKey: str | None = Field(default=None, description="백엔드 위험 유형 키 (선택)")
+    caseType: str | None = Field(default=None, description="백엔드 분류 유형 (camelCase, 선택)")
+    case_type: str | None = Field(default=None, description="백엔드 분류 유형 (snake_case, 선택)")
     hrStatus: str | None = Field(default=None, description="근태 상태: WORKING, VACATION, OFF 등 (v3.0)")
+    hrStatusRaw: str | None = Field(default=None, description="근태 원본 상태: OFF, VACATION, WORKING 등")
     mccCode: str | None = Field(default=None, description="가맹점 업종 코드 (v3.0)")
+    mccCodeRaw: str | None = Field(default=None, description="가맹점 업종 코드 원본")
     mccName: str | None = Field(default=None, description="가맹점 업종명 (v3.0)")
+    mccRiskCategory: str | None = Field(default=None, description="MCC 위험도 분류: LOW|MEDIUM|HIGH|UNKNOWN")
     budgetExceeded: str | None = Field(default=None, description="예산 초과 여부 Y/N (v3.0). BE가 boolean으로 보낼 수 있음: true→Y, false→N")
+    budgetExceededFlag: str | None = Field(default=None, description="예산 초과 플래그 Y/N")
+    isHoliday: bool | None = Field(default=None, description="휴일 여부 boolean")
+    holidayType: str | None = Field(default=None, description="휴일 유형: WEEKEND|PUBLIC_HOLIDAY|NONE")
+    isWeekendAllowed: str | None = Field(default=None, description="주말 사용 허용 여부 Y/N")
+    expenseTypeName: str | None = Field(default=None, description="경비유형 표시명")
+    relatedArticleHint: list[str] = Field(default_factory=list, description="조항 힌트(참고용, 항상 배열)")
+    relatedArticleHintUsage: str | None = Field(default=None, description="HINT_ONLY 고정")
+    sourceSystem: str | None = Field(default=None, description="출처 시스템")
+    sourceTimestamp: str | None = Field(default=None, description="출처 생성시각")
+    schemaVersion: str | None = Field(default=None, description="payload 스키마 버전")
+    normalizationFlags: dict[str, Any] | None = Field(default=None, description="정규화 메타")
+    dataQuality: dict[str, Any] | None = Field(default=None, description="입력 품질 메타")
 
     @field_validator("budgetExceeded", mode="before")
     @classmethod
@@ -73,15 +89,40 @@ class ScreenRequest(BaseModel):
 class ScreenBatchItem(BaseModel):
     """배치 스크리닝 1건. BE 필드 정확히 파싱. v3.0: hrStatus, mccCode, mccName, budgetExceeded 지원."""
     caseId: str | None = Field(default=None, description="케이스 ID (응답 매핑용 권장)")
+    tenantId: int | None = Field(default=None, description="테넌트 ID")
+    voucherKey: str | None = Field(default=None, description="전표키(bukrs-belnr-gjahr)")
+    bukrs: str | None = Field(default=None, description="회사코드")
+    belnr: str | None = Field(default=None, description="전표번호")
+    gjahr: str | None = Field(default=None, description="회계연도")
+    buzei: str | None = Field(default=None, description="전표행")
     amount: float | None = Field(default=None, description="전표 금액 (숫자 또는 숫자 문자열)")
+    currency: str | None = Field(default=None, description="통화코드")
     occurredAt: str | None = Field(default=None, description="발생 시각 (ISO_DATE_TIME)")
+    timezone: str | None = Field(default=None, description="타임존")
     expenseType: str | None = Field(default=None, description="경비 유형")
+    expenseTypeName: str | None = Field(default=None, description="경비 유형명")
     merchantName: str | None = Field(default=None, description="가맹점명")
-    riskTypeKey: str | None = Field(default=None, description="백엔드 위험 유형 키")
+    merchantId: str | None = Field(default=None, description="가맹점 ID")
+    caseType: str | None = Field(default=None, description="백엔드 분류 유형 (camelCase)")
+    case_type: str | None = Field(default=None, description="백엔드 분류 유형 (snake_case)")
     hrStatus: str | None = Field(default=None, description="근태 상태: WORKING, VACATION, OFF 등 (v3.0)")
+    hrStatusRaw: str | None = Field(default=None, description="근태 원본 상태")
     mccCode: str | None = Field(default=None, description="가맹점 업종 코드 (v3.0)")
+    mccCodeRaw: str | None = Field(default=None, description="가맹점 업종 코드 원본")
     mccName: str | None = Field(default=None, description="가맹점 업종명 (v3.0)")
+    mccRiskCategory: str | None = Field(default=None, description="MCC 위험도")
     budgetExceeded: str | None = Field(default=None, description="예산 초과 여부 Y/N (v3.0). BE가 boolean으로 보낼 수 있음: true→Y, false→N")
+    budgetExceededFlag: str | None = Field(default=None, description="예산 초과 플래그 Y/N")
+    isHoliday: bool | None = Field(default=None, description="휴일 여부")
+    holidayType: str | None = Field(default=None, description="휴일 유형")
+    isWeekendAllowed: str | None = Field(default=None, description="주말 허용 여부 Y/N")
+    relatedArticleHint: list[str] = Field(default_factory=list, description="조항 힌트 배열(항상 배열)")
+    relatedArticleHintUsage: str | None = Field(default=None, description="HINT_ONLY")
+    sourceSystem: str | None = Field(default=None, description="출처 시스템")
+    sourceTimestamp: str | None = Field(default=None, description="출처 생성시각")
+    schemaVersion: str | None = Field(default=None, description="스키마 버전")
+    normalizationFlags: dict[str, Any] | None = Field(default=None, description="정규화 메타")
+    dataQuality: dict[str, Any] | None = Field(default=None, description="입력 품질 메타")
 
     @field_validator("budgetExceeded", mode="before")
     @classmethod
@@ -111,6 +152,26 @@ class ScreenBatchItem(BaseModel):
             except ValueError:
                 return None
         return None
+
+    @field_validator("relatedArticleHint", mode="before")
+    @classmethod
+    def coerce_related_article_hint(cls, v: Any) -> list[str] | None:
+        if v is None:
+            return []
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if str(x).strip()]
+        s = str(v).strip()
+        return [s] if s else []
+
+    @field_validator("mccRiskCategory", mode="before")
+    @classmethod
+    def normalize_mcc_risk_category(cls, v: Any) -> str | None:
+        if v is None:
+            return "UNKNOWN"
+        s = str(v).strip().upper()
+        if s in {"LOW", "MEDIUM", "HIGH", "UNKNOWN"}:
+            return s
+        return "UNKNOWN"
 
 
 @router.post("/screen")
@@ -170,16 +231,46 @@ async def detect_screen(
         voucher["expenseType"] = body.expenseType
     if body.merchantName is not None:
         voucher["merchantName"] = body.merchantName
-    if body.riskTypeKey is not None:
-        voucher["riskTypeKey"] = body.riskTypeKey
+    if body.case_type is not None or body.caseType is not None:
+        voucher["case_type"] = body.case_type or body.caseType
     if body.hrStatus is not None:
         voucher["hrStatus"] = body.hrStatus
+    if body.hrStatusRaw is not None:
+        voucher["hrStatusRaw"] = body.hrStatusRaw
     if body.mccCode is not None:
         voucher["mccCode"] = body.mccCode
+    if body.mccCodeRaw is not None:
+        voucher["mccCodeRaw"] = body.mccCodeRaw
     if body.mccName is not None:
         voucher["mccName"] = body.mccName
+    if body.mccRiskCategory is not None:
+        voucher["mccRiskCategory"] = body.mccRiskCategory
     if body.budgetExceeded is not None:
         voucher["budgetExceeded"] = body.budgetExceeded
+    if body.budgetExceededFlag is not None:
+        voucher["budgetExceededFlag"] = body.budgetExceededFlag
+    if body.isHoliday is not None:
+        voucher["isHoliday"] = body.isHoliday
+    if body.holidayType is not None:
+        voucher["holidayType"] = body.holidayType
+    if body.isWeekendAllowed is not None:
+        voucher["isWeekendAllowed"] = body.isWeekendAllowed
+    if body.expenseTypeName is not None:
+        voucher["expenseTypeName"] = body.expenseTypeName
+    if body.relatedArticleHint is not None:
+        voucher["relatedArticleHint"] = body.relatedArticleHint
+    if body.relatedArticleHintUsage is not None:
+        voucher["relatedArticleHintUsage"] = body.relatedArticleHintUsage
+    if body.sourceSystem is not None:
+        voucher["sourceSystem"] = body.sourceSystem
+    if body.sourceTimestamp is not None:
+        voucher["sourceTimestamp"] = body.sourceTimestamp
+    if body.schemaVersion is not None:
+        voucher["schemaVersion"] = body.schemaVersion
+    if body.normalizationFlags is not None:
+        voucher["normalizationFlags"] = body.normalizationFlags
+    if body.dataQuality is not None:
+        voucher["dataQuality"] = body.dataQuality
 
     result = await run_screen(voucher, case_id)
     # BE 추적용: 응답의 caseType을 DB case_type에 반영했는지 확인할 때 이 로그와 매칭
@@ -239,24 +330,64 @@ async def detect_screen_batch(
         v: dict[str, Any] = {}
         if it.amount is not None:
             v["amount"] = v["totalAmount"] = it.amount
+        if it.currency is not None:
+            v["currency"] = it.currency
         if it.occurredAt is not None:
             if not _is_valid_iso_datetime(it.occurredAt):
                 indices_date_parse_error.add(idx)
             v["occurredAt"] = it.occurredAt
+        if it.timezone is not None:
+            v["timezone"] = it.timezone
         if it.expenseType is not None:
             v["expenseType"] = it.expenseType
+        if it.expenseTypeName is not None:
+            v["expenseTypeName"] = it.expenseTypeName
         if it.merchantName is not None:
             v["merchantName"] = str(it.merchantName).strip() or None
-        if it.riskTypeKey is not None:
-            v["riskTypeKey"] = it.riskTypeKey
+        if it.merchantId is not None:
+            v["merchantId"] = it.merchantId
+        if it.case_type is not None or it.caseType is not None:
+            v["case_type"] = it.case_type or it.caseType
         if it.hrStatus is not None:
             v["hrStatus"] = it.hrStatus
+        if it.hrStatusRaw is not None:
+            v["hrStatusRaw"] = it.hrStatusRaw
         if it.mccCode is not None:
             v["mccCode"] = it.mccCode
+        if it.mccCodeRaw is not None:
+            v["mccCodeRaw"] = it.mccCodeRaw
         if it.mccName is not None:
             v["mccName"] = it.mccName
+        if it.mccRiskCategory is not None:
+            v["mccRiskCategory"] = it.mccRiskCategory
         if it.budgetExceeded is not None:
             v["budgetExceeded"] = it.budgetExceeded
+        if it.budgetExceededFlag is not None:
+            v["budgetExceededFlag"] = it.budgetExceededFlag
+        if it.isHoliday is not None:
+            v["isHoliday"] = it.isHoliday
+        if it.holidayType is not None:
+            v["holidayType"] = it.holidayType
+        if it.isWeekendAllowed is not None:
+            v["isWeekendAllowed"] = it.isWeekendAllowed
+        if it.relatedArticleHint is not None:
+            v["relatedArticleHint"] = it.relatedArticleHint
+        if it.relatedArticleHintUsage is not None:
+            v["relatedArticleHintUsage"] = it.relatedArticleHintUsage
+        if it.sourceSystem is not None:
+            v["sourceSystem"] = it.sourceSystem
+        if it.sourceTimestamp is not None:
+            v["sourceTimestamp"] = it.sourceTimestamp
+        if it.schemaVersion is not None:
+            v["schemaVersion"] = it.schemaVersion
+        if it.normalizationFlags is not None:
+            v["normalizationFlags"] = it.normalizationFlags
+        if it.dataQuality is not None:
+            v["dataQuality"] = it.dataQuality
+        for k in ("tenantId", "voucherKey", "bukrs", "belnr", "gjahr", "buzei"):
+            val = getattr(it, k, None)
+            if val is not None:
+                v[k] = val
         vouchers.append(v)
         case_ids.append((it.caseId or "").strip())
 

@@ -6,7 +6,7 @@
 
 ## 1. 시연용 더미 데이터
 
-- **파일**: `data/rag_document_seed.json`
+- **파일**: (삭제됨) 과거 `data/rag_document_seed.json` 시드 방식은 사용하지 않습니다.
 - **내용**: 사내 경비 지출 규정 v1.0 (제3조, 제5조, 제7조, 제9조) 텍스트 및 메타데이터.
 - **적재**: 백엔드/Synapse에서 위 JSON을 `dwp_aura.rag_document` 테이블 또는 검색 API가 반환하는 문서 형식으로 적재하면 됨.
 

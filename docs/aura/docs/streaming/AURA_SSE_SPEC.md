@@ -302,7 +302,7 @@ curl -N -v -H "Accept: text/event-stream" \
 | 스트림 라우트 | `api/routes/aura_cases.py` — `GET /{case_id}/analysis/stream` |
 | SSE 헤더·포맷 | `api/sse_utils.py` — `SSE_HEADERS`, `format_sse_line()` |
 | 이벤트 스키마 | `core/analysis/audit_analysis_events.py` |
-| 파이프라인(이벤트 발생 순서) | `core/analysis/audit_analysis_pipeline.py` |
+| 파이프라인(이벤트 발생 순서) | `core/analysis/analysis_pipeline.py` |
 | 이벤트 큐 (runId별) | `core/analysis/run_store.py` — put_event, get_event, remove_queue |
 
 ---

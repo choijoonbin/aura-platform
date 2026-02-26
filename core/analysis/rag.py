@@ -16,10 +16,13 @@ import os
 import re
 import unicodedata
 import uuid
+from datetime import date
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
 from core.config import get_settings
+from core.observability import incr
 from core.synapse_schema import (
     DOC_TYPE_REGULATION,
     DOC_TYPE_HIERARCHICAL,
@@ -38,6 +41,11 @@ _PAGE_MARKER_PATTERN = re.compile(r"\[PAGE=(\d+)\]")
 
 # 제어문자·널 등 DB/임베딩 오염 방지 (공백으로 치환)
 _CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_UUID_LIKE_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+_HEADER_NOISE_PATTERN = re.compile(r"_{4,}|={6,}")
+_ARTICLE_TOKEN_PATTERN = re.compile(r"(제\s*\d+\s*조)")
+_CLAUSE_TOKEN_PATTERN = re.compile(r"(제\s*\d+\s*항|\d+\s*항)")
+_HEADING_ONLY_PATTERN = re.compile(r"^\s*(?:\[[^\]]+\]\s*)?(제\s*\d+\s*장[^\n]*)\s*$")
 
 # pgvector 상수
 PGVECTOR_SCHEMA = "dwp_aura"
@@ -216,6 +224,408 @@ def _extract_page_from_chunk(content: str) -> int:
     return int(m.group(1)) if m else 0
 
 
+def _sanitize_title(title: str | None) -> str:
+    t = (title or "").strip()
+    if not t:
+        return ""
+    t = _UUID_LIKE_PATTERN.sub(" ", t)
+    t = _HEADER_NOISE_PATTERN.sub(" ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def _sanitize_location(location: str | None, *, title_hint: str | None = None, article: str | None = None) -> str:
+    loc = (location or "").strip()
+    if loc:
+        loc = _UUID_LIKE_PATTERN.sub(" ", loc)
+        loc = _HEADER_NOISE_PATTERN.sub(" ", loc)
+        loc = re.sub(r"\s+", " ", loc).strip()
+        if loc:
+            return loc
+    if title_hint:
+        if article:
+            return f"{title_hint} > {article}"
+        return title_hint
+    return (article or "문서").strip()
+
+
+def _sanitize_chunk_content(content: str) -> str:
+    text = preprocess_document_text(content or "")
+    if not text:
+        return ""
+    text = _UUID_LIKE_PATTERN.sub(" ", text)
+    text = _HEADER_NOISE_PATTERN.sub(" ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text.strip()
+
+
+def _has_noise_pattern(text: str) -> bool:
+    if not text:
+        return False
+    if _UUID_LIKE_PATTERN.search(text):
+        return True
+    if _HEADER_NOISE_PATTERN.search(text):
+        return True
+    return False
+
+
+def _extract_document_standard_meta(
+    text_content: str,
+    base_meta: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    문서 전체 텍스트/메타에서 표준 필드(version, effective_from, effective_to)를 추출.
+    """
+    out: dict[str, Any] = {}
+    meta = base_meta or {}
+    version = (
+        meta.get("version")
+        or meta.get("doc_version")
+        or meta.get("policy_version")
+    )
+    if not version and isinstance(text_content, str):
+        mv = re.search(r"(문서버전|버전)\s*[:：]\s*([A-Za-z0-9._\-]+)", text_content)
+        if mv:
+            version = mv.group(2).strip()
+    if version:
+        out["version"] = str(version).strip()
+
+    eff_from = (
+        meta.get("effective_from")
+        or meta.get("effectiveFrom")
+        or meta.get("effective_date")
+        or meta.get("effectiveDate")
+    )
+    eff_to = meta.get("effective_to") or meta.get("effectiveTo")
+    if isinstance(text_content, str):
+        if not eff_from:
+            mf = re.search(r"(시행예정일|시행일|적용일)\s*[:：]\s*(\d{4}[-./]\d{2}[-./]\d{2})", text_content)
+            if mf:
+                eff_from = mf.group(2).replace(".", "-").replace("/", "-")
+        if not eff_to:
+            mt = re.search(r"(종료일|만료일)\s*[:：]\s*(\d{4}[-./]\d{2}[-./]\d{2})", text_content)
+            if mt:
+                eff_to = mt.group(2).replace(".", "-").replace("/", "-")
+    # 최소 유효성(YYYY-MM-DD)
+    for k, v in (("effective_from", eff_from), ("effective_to", eff_to)):
+        if not v:
+            continue
+        try:
+            parsed = date.fromisoformat(str(v)[:10])
+            out[k] = parsed.isoformat()
+        except Exception:
+            continue
+    return out
+
+
+def _split_text_balanced(
+    content: str,
+    *,
+    chunk_size: int,
+    overlap: int,
+) -> list[str]:
+    txt = (content or "").strip()
+    if not txt:
+        return []
+    try:
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=max(120, int(chunk_size)),
+            chunk_overlap=max(0, int(overlap)),
+            length_function=len,
+            separators=["\n\n", "\n", ". ", " "],
+        )
+        parts = [p.strip() for p in splitter.split_text(txt) if p and p.strip()]
+        return parts or [txt]
+    except Exception:
+        # 의존성/런타임 이슈 시 deterministic fallback
+        size = max(120, int(chunk_size))
+        ov = max(0, min(int(overlap), size // 3))
+        out: list[str] = []
+        i = 0
+        n = len(txt)
+        while i < n:
+            j = min(n, i + size)
+            out.append(txt[i:j].strip())
+            if j >= n:
+                break
+            i = max(i + 1, j - ov)
+        return [p for p in out if p]
+
+
+def _expand_hierarchical_with_subchunks(
+    hierarchical_chunks: list[tuple[str, dict[str, Any]]],
+    *,
+    doc_title: str,
+    sub_size: int,
+    sub_overlap: int,
+    min_chars: int,
+) -> list[tuple[str, dict[str, Any]]]:
+    """
+    2단 하이브리드 청킹:
+    - 1차: 조항 경계(hierarchical)
+    - 2차: 조항 내부 semantic/recursive 분할
+    parent-child 링크 메타를 부여한다.
+    """
+    out: list[tuple[str, dict[str, Any]]] = []
+    for idx, (content, meta) in enumerate(hierarchical_chunks):
+        raw = (content or "").strip()
+        if not raw:
+            continue
+        # prefix 분리: [path] 본문
+        prefix_match = re.match(r"^\s*(\[[^\]]+\])\s*(.*)$", raw, flags=re.S)
+        if prefix_match:
+            prefix = prefix_match.group(1).strip()
+            body = (prefix_match.group(2) or "").strip()
+        else:
+            prefix = f"[{doc_title}]"
+            body = raw
+        parent_id = f"p_{idx}_{abs(hash((prefix, (meta.get('regulation_article') or ''), body[:100]))) % 10_000_000}"
+        art = meta.get("regulation_article")
+        title_hint = ""
+        if art and prefix:
+            # [.. > 제23조 (식대)] 형태에서 제목 추출 시도
+            m = re.search(rf"{re.escape(str(art))}\s*\(([^)]+)\)", prefix)
+            if m:
+                title_hint = m.group(1).strip()
+
+        children = _split_text_balanced(body, chunk_size=sub_size, overlap=sub_overlap)
+        kept: list[str] = [c for c in children if len(c.strip()) >= min_chars]
+        if len(kept) <= 1:
+            m0 = dict(meta or {})
+            m0["chunk_level"] = "root"
+            m0["node_type"] = m0.get("node_type") or "ARTICLE_ROOT"
+            m0["parent_chunk_id"] = parent_id
+            m0["parent_article"] = art
+            if title_hint:
+                m0["parent_title"] = title_hint
+            out.append((f"{prefix} {body}".strip(), m0))
+            continue
+
+        for cidx, child in enumerate(kept):
+            m = dict(meta or {})
+            m["chunk_level"] = "child"
+            m["node_type"] = m.get("node_type") or "ARTICLE_CHILD"
+            m["parent_chunk_id"] = parent_id
+            m["parent_article"] = art
+            if title_hint:
+                m["parent_title"] = title_hint
+            m["child_index"] = cidx
+            out.append((f"{prefix} {child}".strip(), m))
+    return out
+
+
+def _extract_article_clause_from_text(content: str) -> tuple[str | None, str | None]:
+    text = content or ""
+    m_art = _ARTICLE_TOKEN_PATTERN.search(text)
+    m_clause = _CLAUSE_TOKEN_PATTERN.search(text)
+    article = re.sub(r"\s+", "", m_art.group(1)) if m_art else None
+    clause = re.sub(r"\s+", "", m_clause.group(1)) if m_clause else None
+    return article, clause
+
+
+def _extract_location_hint(content: str, title: str | None, article: str | None) -> str:
+    m = re.match(r"^\s*\[([^\]]+)\]", content or "")
+    if m:
+        loc = re.sub(r"\s+", " ", m.group(1)).strip()
+        if loc:
+            return loc
+    title_clean = _sanitize_title(title) or "문서"
+    if article:
+        return f"{title_clean} > {article}"
+    return title_clean
+
+
+def _content_fingerprint(text: str) -> str:
+    norm = re.sub(r"[^0-9A-Za-z가-힣]+", " ", (text or "").lower())
+    norm = re.sub(r"\s+", " ", norm).strip()
+    return norm
+
+
+def _is_heading_only(content: str, *, min_chars: int) -> bool:
+    c = (content or "").strip()
+    if not c:
+        return True
+    if len(c) >= min_chars:
+        return False
+    return bool(_HEADING_ONLY_PATTERN.match(c))
+
+
+def _run_chunk_quality_gate(
+    prepared_chunks: list[dict[str, Any]],
+    *,
+    rag_document_id: str,
+    base_meta: dict[str, Any],
+    doc_type: str,
+    settings_obj: Any,
+) -> dict[str, Any]:
+    incr("rag_chunk_quality_gate_runs_total")
+    report: dict[str, Any] = {
+        "enabled": True,
+        "doc_type": doc_type,
+        "input_chunks": len(prepared_chunks),
+        "removed_empty": 0,
+        "removed_heading_only": 0,
+        "removed_duplicate_exact": 0,
+        "removed_duplicate_near": 0,
+        "noise_rows_sanitized": 0,
+        "noise_rows_residual": 0,
+        "enriched_article": 0,
+        "enriched_location": 0,
+        "normalized_article": 0,
+        "noise_rate": 0.0,
+        "noise_sanitize_rate": 0.0,
+        "duplicate_rate": 0.0,
+        "short_chunk_rate": 0.0,
+        "removed_total_rate": 0.0,
+        "missing_required": [],
+        "final_chunks": 0,
+        "article_coverage": 0.0,
+        "errors": [],
+    }
+    min_chars = int(getattr(settings_obj, "rag_chunk_min_chars", 80))
+    strict_mode = bool(getattr(settings_obj, "rag_quality_strict_mode", True))
+    article_coverage_threshold = float(getattr(settings_obj, "rag_chunk_article_coverage_threshold", 0.8))
+    max_noise_rate = float(getattr(settings_obj, "rag_chunk_max_noise_rate", 0.35))
+    max_duplicate_rate = float(getattr(settings_obj, "rag_chunk_max_duplicate_rate", 0.20))
+    max_short_rate = float(getattr(settings_obj, "rag_chunk_max_short_chunk_rate", 0.20))
+    title_hint = _sanitize_title(
+        str(base_meta.get("title") or base_meta.get("file_name") or base_meta.get("doc_title") or "")
+    )
+    tenant_id_raw = (
+        base_meta.get("tenant_id")
+        if base_meta.get("tenant_id") is not None
+        else base_meta.get("tenantId")
+    )
+    tenant_id = int(tenant_id_raw) if tenant_id_raw is not None else 0
+
+    filtered: list[dict[str, Any]] = []
+    seen_exact: set[str] = set()
+    seen_fprints: list[str] = []
+
+    for row in prepared_chunks:
+        raw_content = str(row.get("content") or "")
+        sanitized = _sanitize_chunk_content(raw_content)
+        if sanitized != raw_content:
+            report["noise_rows_sanitized"] += 1
+        if not sanitized:
+            report["removed_empty"] += 1
+            continue
+        if _is_heading_only(sanitized, min_chars=min_chars):
+            report["removed_heading_only"] += 1
+            continue
+
+        exact_key = re.sub(r"\s+", " ", sanitized).strip()
+        if exact_key in seen_exact:
+            report["removed_duplicate_exact"] += 1
+            continue
+        seen_exact.add(exact_key)
+
+        fp = _content_fingerprint(sanitized)
+        near_dup = False
+        for prev in seen_fprints[-80:]:
+            if fp == prev:
+                near_dup = True
+                break
+            if len(fp) > 50 and len(prev) > 50 and SequenceMatcher(None, fp, prev).ratio() >= 0.97:
+                near_dup = True
+                break
+        if near_dup:
+            report["removed_duplicate_near"] += 1
+            continue
+        seen_fprints.append(fp)
+
+        meta = dict(row.get("metadata") or {})
+        meta["doc_id"] = str(rag_document_id)
+        meta["tenant_id"] = tenant_id
+        article = str(meta.get("regulation_article") or "").strip()
+        clause = str(meta.get("regulation_clause") or "").strip()
+        if article:
+            norm_article = re.sub(r"\s+", "", article)
+            if norm_article != article:
+                report["normalized_article"] += 1
+            article = norm_article
+        else:
+            infer_article, infer_clause = _extract_article_clause_from_text(sanitized)
+            if infer_article:
+                article = infer_article
+                report["enriched_article"] += 1
+            elif is_hierarchical(doc_type) or str(doc_type).upper() == DOC_TYPE_REGULATION:
+                article = "일반문서"
+                report["enriched_article"] += 1
+            if infer_clause and not clause:
+                clause = infer_clause
+        location = _sanitize_location(str(meta.get("location") or "").strip(), title_hint=title_hint, article=article)
+        if location:
+            if not meta.get("location"):
+                report["enriched_location"] += 1
+        else:
+            location = _extract_location_hint(sanitized, title_hint, article)
+            if location:
+                report["enriched_location"] += 1
+        meta["regulation_article"] = article or None
+        meta["regulation_clause"] = clause or None
+        meta["location"] = location or None
+        if meta.get("title"):
+            meta["title"] = _sanitize_title(str(meta.get("title")))
+        if _has_noise_pattern(sanitized) or _has_noise_pattern(str(meta.get("location") or "")):
+            report["noise_rows_residual"] += 1
+        filtered.append({"content": sanitized, "metadata": meta})
+
+    report["final_chunks"] = len(filtered)
+    with_article = sum(1 for c in filtered if (c.get("metadata") or {}).get("regulation_article"))
+    report["article_coverage"] = round((with_article / len(filtered)) if filtered else 0.0, 4)
+    input_chunks = max(int(report.get("input_chunks") or 0), 1)
+    removed_duplicates = int(report["removed_duplicate_exact"]) + int(report["removed_duplicate_near"])
+    # noise_rate는 운영 게이트 기준으로 "정제 후 잔존 노이즈율"을 사용한다.
+    report["noise_rate"] = round(float(report["noise_rows_residual"]) / input_chunks, 4)
+    report["noise_sanitize_rate"] = round(float(report["noise_rows_sanitized"]) / input_chunks, 4)
+    report["duplicate_rate"] = round(float(removed_duplicates) / input_chunks, 4)
+    report["short_chunk_rate"] = round(float(report["removed_heading_only"]) / input_chunks, 4)
+    removed_total = (
+        int(report["removed_empty"])
+        + int(report["removed_heading_only"])
+        + int(report["removed_duplicate_exact"])
+        + int(report["removed_duplicate_near"])
+    )
+    report["removed_total_rate"] = round(float(removed_total) / input_chunks, 4)
+
+    required_keys = ["doc_id", "tenant_id", "location"]
+    if is_hierarchical(doc_type) or str(doc_type).upper() == DOC_TYPE_REGULATION:
+        required_keys.append("regulation_article")
+    missing_required: list[str] = []
+    for key in required_keys:
+        if any((c.get("metadata") or {}).get(key) in (None, "", []) for c in filtered):
+            missing_required.append(key)
+    report["missing_required"] = missing_required
+
+    if not filtered:
+        report["errors"].append("NO_VALID_CHUNKS_AFTER_QUALITY_GATE")
+    if report["noise_rate"] > max_noise_rate:
+        report["errors"].append(f"NOISE_RATE_HIGH({report['noise_rate']:.2f}>{max_noise_rate:.2f})")
+    if report["duplicate_rate"] > max_duplicate_rate:
+        report["errors"].append(f"DUPLICATE_RATE_HIGH({report['duplicate_rate']:.2f}>{max_duplicate_rate:.2f})")
+    if report["short_chunk_rate"] > max_short_rate:
+        report["errors"].append(f"SHORT_CHUNK_RATE_HIGH({report['short_chunk_rate']:.2f}>{max_short_rate:.2f})")
+    if (is_hierarchical(doc_type) or str(doc_type).upper() == DOC_TYPE_REGULATION) and report["article_coverage"] < article_coverage_threshold:
+        report["errors"].append(
+            f"ARTICLE_COVERAGE_LOW({report['article_coverage']:.2f}<{article_coverage_threshold:.2f})"
+        )
+    if missing_required:
+        report["errors"].append("MISSING_REQUIRED_METADATA")
+
+    ok = True
+    if strict_mode and report["errors"]:
+        ok = False
+    if ok:
+        incr("rag_chunk_quality_gate_passed_total")
+    else:
+        incr("rag_chunk_quality_gate_failed_total")
+    return {"ok": ok, "chunks": filtered, "report": report}
+
+
 def _load_text_from_file(file_path: str | Path) -> str:
     """
     PDF 또는 텍스트 파일에서 본문 추출.
@@ -272,19 +682,46 @@ async def notify_synapse_rag_status(
     status: str,
     doc_id: str,
     message: str | None = None,
+    quality_report: dict[str, Any] | None = None,
 ) -> bool:
     """
     청킹·벡터화 완료 시 Synapse에 상태 전달 (진행 중은 백엔드에서 관리).
-    POST /api/synapse/rag/status — body: { status: "COMPLETED", doc_id, message? }.
+    POST /api/synapse/rag/status — body: { status: "COMPLETED", doc_id, message?, quality_report?, quality_gate_passed? }.
 
     청킹 종료 시점에만 status=COMPLETED로 1회 호출.
     """
     url = _get_synapse_rag_status_url()
     if not url or not doc_id:
+        logger.info(
+            "Synapse RAG status skip: has_url=%s doc_id=%s",
+            bool(url),
+            doc_id,
+        )
         return False
     payload: dict[str, Any] = {"status": status, "doc_id": str(doc_id)}
     if message:
         payload["message"] = message
+    if isinstance(quality_report, dict) and quality_report:
+        errors = quality_report.get("errors")
+        errors_list = errors if isinstance(errors, list) else []
+        quality_gate_passed = len(errors_list) == 0
+        qr = dict(quality_report)
+        # FE/BE 호환: quality_report 내부에도 pass/status를 명시해 해석 불일치 방지
+        qr.setdefault("pass", quality_gate_passed)
+        qr.setdefault("status", "PASS" if quality_gate_passed else "FAIL")
+        payload["quality_report"] = qr
+        # BE/FE 호환: snake_case + camelCase 동시 전달
+        payload["quality_gate_passed"] = quality_gate_passed
+        payload["qualityGatePassed"] = quality_gate_passed
+    logger.info(
+        "Synapse RAG status POST: url=%s doc_id=%s status=%s has_quality_report=%s quality_gate_passed=%s quality_errors=%s",
+        url,
+        doc_id,
+        status,
+        "quality_report" in payload,
+        payload.get("quality_gate_passed"),
+        (payload.get("quality_report", {}) or {}).get("errors"),
+    )
     try:
         import httpx
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -292,7 +729,12 @@ async def notify_synapse_rag_status(
             if r.status_code >= 400:
                 logger.warning("Synapse RAG status POST failed: %s %s", r.status_code, r.text)
                 return False
-            logger.debug("Synapse RAG status: %s doc_id=%s", status, doc_id)
+            logger.info(
+                "Synapse RAG status POST ok: status_code=%s doc_id=%s response_preview=%s",
+                r.status_code,
+                doc_id,
+                (r.text[:200] if isinstance(r.text, str) else ""),
+            )
             return True
     except Exception as e:
         logger.warning("Synapse RAG status POST error: %s", e)
@@ -354,7 +796,8 @@ def _pgvector_search(
                    metadata_json,
                    1 - (embedding <=> {_SQL_CAST_VECTOR}) AS score
             FROM {full_table}
-            WHERE (embedding <=> {_SQL_CAST_VECTOR}) <= :max_distance
+            WHERE is_active = true
+              AND (embedding <=> {_SQL_CAST_VECTOR}) <= :max_distance
         """
     params: dict[str, Any] = {"embedding": embedding, "k": k, "max_distance": max_distance}
     
@@ -386,10 +829,107 @@ def _pgvector_search(
     
     debug_params = {k: v for k, v in params.items() if k != "embedding"}
     logger.debug("[RAG Search] SQL params (excluding embedding): %s", debug_params)
+    logger.info(
+        "[RAG Search] SQL guardrails: is_active=true doc_ids=%s tenant_id=%s metadata_filter=%s",
+        doc_ids if doc_ids is not None else "all",
+        tenant_id if tenant_id is not None else "all",
+        bool(metadata_filter),
+    )
 
     results = list(session.execute(text(sql), params).fetchall())
     logger.debug("[RAG Search] Query returned %d rows", len(results))
     return results
+
+
+def _extract_query_keywords(query: str) -> list[str]:
+    """
+    pgvector 결과가 0건일 때 사용할 키워드 폴백용 토큰 추출.
+    - 한글 2글자 이상 토큰, 조항 토큰(제n조) 위주로 제한.
+    """
+    if not isinstance(query, str):
+        return []
+    tokens = re.split(r"\s+", query.strip())
+    out: list[str] = []
+    seen: set[str] = set()
+    for t in tokens:
+        tok = (t or "").strip()
+        if not tok:
+            continue
+        keep = False
+        if re.search(r"제\s*\d+\s*조", tok):
+            keep = True
+        elif re.search(r"[가-힣]{2,}", tok):
+            keep = True
+        if not keep:
+            continue
+        if tok in seen:
+            continue
+        seen.add(tok)
+        out.append(tok)
+    return out[:8]
+
+
+def _pg_keyword_fallback_search(
+    session: Any,
+    full_table: str,
+    *,
+    terms: list[str],
+    k: int,
+    metadata_filter: dict[str, Any] | None,
+    doc_ids: list[int] | None = None,
+    tenant_id: int | None = None,
+) -> list[Any]:
+    """
+    벡터 결과가 0건일 때 SQL 키워드 매칭으로 최소 근거를 확보하기 위한 폴백.
+    반환 컬럼 순서는 _pgvector_search와 동일하게 맞춘다.
+    """
+    if not terms:
+        return []
+    from sqlalchemy import text
+    score_parts: list[str] = []
+    or_parts: list[str] = []
+    params: dict[str, Any] = {"k": k}
+    for i, term in enumerate(terms):
+        key = f"t{i}"
+        params[key] = f"%{term}%"
+        score_parts.append(f"(CASE WHEN chunk_text ILIKE :{key} THEN 1 ELSE 0 END)")
+        or_parts.append(f"chunk_text ILIKE :{key}")
+    score_expr = " + ".join(score_parts) if score_parts else "0"
+    where_match = " OR ".join(or_parts) if or_parts else "FALSE"
+    sql = f"""
+        SELECT doc_id, chunk_index, chunk_text AS content,
+               metadata_json->>'regulation_article' AS regulation_article,
+               metadata_json->>'regulation_clause' AS regulation_clause,
+               metadata_json->>'location' AS location,
+               metadata_json->>'title' AS title,
+               metadata_json,
+               LEAST(0.59, 0.45 + (0.03 * ({score_expr}))) AS score
+        FROM {full_table}
+        WHERE is_active = true
+          AND ({where_match})
+    """
+    if doc_ids is not None:
+        if len(doc_ids) == 0:
+            return []
+        placeholders = ", ".join(f":doc_id_{i}" for i in range(len(doc_ids)))
+        sql += f" AND doc_id IN ({placeholders})"
+        for i, doc_id in enumerate(doc_ids):
+            params[f"doc_id_{i}"] = int(doc_id)
+    if tenant_id is not None and tenant_id > 0:
+        sql += " AND tenant_id = :tenant_id"
+        params["tenant_id"] = int(tenant_id)
+    if metadata_filter and isinstance(metadata_filter, dict):
+        sql += f" AND metadata_json @> {_SQL_CAST_JSONB_FILTER}"
+        params["filter_json"] = json.dumps(metadata_filter, ensure_ascii=False)
+    sql += f" ORDER BY ({score_expr}) DESC, chunk_index ASC LIMIT :k"
+    logger.info(
+        "[RAG Search] keyword fallback guardrails: is_active=true doc_ids=%s tenant_id=%s metadata_filter=%s terms=%s",
+        doc_ids if doc_ids is not None else "all",
+        tenant_id if tenant_id is not None else "all",
+        bool(metadata_filter),
+        terms,
+    )
+    return list(session.execute(text(sql), params).fetchall())
 
 
 def _hierarchical_chunk_text(
@@ -532,6 +1072,7 @@ def _compute_vectorization_result(
     - embedding: list[float] (1536차원, PostgreSQL 문법 없음).
     - metadata: 백엔드 rag_chunk 행 매핑용 (doc_id, regulation_article, violation_clause 등 포함).
     """
+    settings = get_settings()
     path = Path(file_path)
     emb = _get_embedding_client()
     if emb is None:
@@ -541,6 +1082,7 @@ def _compute_vectorization_result(
     except Exception as e:
         return {"ok": False, "error": str(e)}
     meta = dict(metadata or {})
+    meta.update(_extract_document_standard_meta(text_content, meta))
     doc_title = meta.get("title") or meta.get("file_name") or path.stem or "규정문서"
 
     if is_hierarchical(doc_type):
@@ -548,6 +1090,15 @@ def _compute_vectorization_result(
         hierarchical_chunks = _hierarchical_chunk_text(text_content, doc_title=doc_title, max_chunk_chars=chunk_size)
         if not hierarchical_chunks:
             return {"ok": True, "rag_document_id": rag_document_id, "chunks": []}
+        if bool(getattr(settings, "rag_hybrid_subchunk_enabled", True)):
+            hierarchical_chunks = _expand_hierarchical_with_subchunks(
+                hierarchical_chunks,
+                doc_title=str(doc_title),
+                sub_size=int(getattr(settings, "rag_hybrid_subchunk_size", 420)),
+                sub_overlap=int(getattr(settings, "rag_hybrid_subchunk_overlap", 80)),
+                min_chars=int(getattr(settings, "rag_hybrid_subchunk_min_chars", 140)),
+            )
+            incr("rag_chunk_hybrid_subchunk_runs_total")
         chunks_text = [c[0] for c in hierarchical_chunks]
         hierarchical_meta = [c[1] for c in hierarchical_chunks]
     else:
@@ -586,20 +1137,14 @@ def _compute_vectorization_result(
     file_path_str = str(path.resolve())
     is_pdf = path.suffix.lower() == ".pdf"
 
-    embeddings = emb.embed_documents(chunks_text)
-    if len(embeddings) != len(chunks_text):
-        return {"ok": False, "error": "Embedding count mismatch"}
-    if embeddings and len(embeddings[0]) != EMBEDDING_DIM:
-        return {"ok": False, "error": f"Embedding dim must be {EMBEDDING_DIM}"}
-
-    chunks_out: list[dict[str, Any]] = []
-    for i, (content, vec) in enumerate(zip(chunks_text, embeddings)):
+    prepared_chunks: list[dict[str, Any]] = []
+    for i, content in enumerate(chunks_text):
         page_number = _extract_page_from_chunk(content) if is_pdf else 1
         if is_hierarchical(doc_type) and i < len(hierarchical_meta):
             hm = hierarchical_meta[i]
             chunk_meta = {
                 **meta,
-                "doc_id": rag_document_id,
+                "doc_id": str(rag_document_id),
                 "chunk_index": i,
                 "page_number": page_number,
                 "file_path": file_path_str,
@@ -609,11 +1154,17 @@ def _compute_vectorization_result(
                 "title": title,
                 "doc_type": doc_type,
                 "violation_clause": hm.get("violation_clause"),
+                "parent_chunk_id": hm.get("parent_chunk_id"),
+                "parent_article": hm.get("parent_article"),
+                "parent_title": hm.get("parent_title"),
+                "child_index": hm.get("child_index"),
+                "chunk_level": hm.get("chunk_level"),
+                "node_type": hm.get("node_type"),
             }
         else:
             chunk_meta = {
                 **meta,
-                "doc_id": rag_document_id,
+                "doc_id": str(rag_document_id),
                 "chunk_index": i,
                 "page_number": page_number,
                 "file_path": file_path_str,
@@ -623,13 +1174,63 @@ def _compute_vectorization_result(
                 "title": title,
                 "doc_type": doc_type,
             }
+        prepared_chunks.append({"content": content, "metadata": chunk_meta})
+
+    quality_report: dict[str, Any] = {}
+    if bool(getattr(settings, "rag_quality_gate_enabled", True)):
+        quality = _run_chunk_quality_gate(
+            prepared_chunks,
+            rag_document_id=str(rag_document_id),
+            base_meta=meta,
+            doc_type=doc_type,
+            settings_obj=settings,
+        )
+        quality_report = quality.get("report") or {}
+        prepared_chunks = quality.get("chunks") or []
+        logger.info(
+            "RAG quality_gate result: doc_id=%s input=%s final=%s errors=%s article_coverage=%s noise_rate=%s duplicate_rate=%s short_chunk_rate=%s removed_heading_only=%s removed_duplicates=%s missing_required=%s",
+            rag_document_id,
+            quality_report.get("input_chunks"),
+            quality_report.get("final_chunks"),
+            quality_report.get("errors"),
+            quality_report.get("article_coverage"),
+            quality_report.get("noise_rate"),
+            quality_report.get("duplicate_rate"),
+            quality_report.get("short_chunk_rate"),
+            quality_report.get("removed_heading_only"),
+            quality_report.get("removed_duplicates"),
+            quality_report.get("missing_required"),
+        )
+        if not quality.get("ok"):
+            return {
+                "ok": False,
+                "error": "RAG quality gate failed",
+                "quality_report": quality_report,
+            }
+    if not prepared_chunks:
+        return {"ok": True, "rag_document_id": rag_document_id, "chunks": [], "quality_report": quality_report}
+
+    chunks_text_clean = [str(c.get("content") or "") for c in prepared_chunks]
+    embeddings = emb.embed_documents(chunks_text_clean)
+    if len(embeddings) != len(chunks_text_clean):
+        return {"ok": False, "error": "Embedding count mismatch"}
+    if embeddings and len(embeddings[0]) != EMBEDDING_DIM:
+        return {"ok": False, "error": f"Embedding dim must be {EMBEDDING_DIM}"}
+
+    chunks_out: list[dict[str, Any]] = []
+    for i, (prepared, vec) in enumerate(zip(prepared_chunks, embeddings)):
+        content = str(prepared.get("content") or "")
+        chunk_meta = dict(prepared.get("metadata") or {})
+        chunk_meta["chunk_index"] = i
+        if chunk_meta.get("page_number") is None:
+            chunk_meta["page_number"] = _extract_page_from_chunk(content) if is_pdf else 1
         chunks_out.append({
             "chunk_index": i,
             "content": content,
             "embedding": [float(x) for x in vec],
             "metadata": chunk_meta,
         })
-    return {"ok": True, "rag_document_id": rag_document_id, "chunks": chunks_out}
+    return {"ok": True, "rag_document_id": rag_document_id, "chunks": chunks_out, "quality_report": quality_report}
 
 
 def retrieve_rag_pgvector(
@@ -657,6 +1258,7 @@ def retrieve_rag_pgvector(
     # Secure by Default: doc_ids가 빈 리스트면 즉시 반환
     if doc_ids is not None and len(doc_ids) == 0:
         logger.warning("[RAG Search] 에이전트에게 할당된 지식(doc_ids)이 없습니다. 연결된 지식이 없으므로 RAG 검색 결과 0건 반환.")
+        incr("rag_retrieve_doc_scope_empty_total")
         return []
     
     emb = _get_embedding_client()
@@ -690,8 +1292,39 @@ def retrieve_rag_pgvector(
                 doc_ids=doc_ids,
                 tenant_id=tenant_id if tenant_id and tenant_id > 0 else None,
             )
+            if not rows:
+                incr("rag_retrieve_vector_zero_total")
+                kw_terms = _extract_query_keywords(query)
+                if kw_terms:
+                    logger.info(
+                        "[RAG Search] vector empty -> keyword fallback terms=%s doc_ids=%s tenant=%s",
+                        kw_terms,
+                        doc_ids if doc_ids is not None else "all",
+                        tenant_str,
+                    )
+                    rows = _pg_keyword_fallback_search(
+                        session,
+                        FULL_TABLE,
+                        terms=kw_terms,
+                        k=k,
+                        metadata_filter=metadata_filter,
+                        doc_ids=doc_ids,
+                        tenant_id=tenant_id if tenant_id and tenant_id > 0 else None,
+                    )
+                    logger.info("[RAG Search] keyword fallback rows=%s", len(rows))
+                    if rows:
+                        incr("rag_retrieve_keyword_fallback_hit_total")
+                    else:
+                        incr("rag_retrieve_keyword_fallback_zero_total")
+                else:
+                    logger.info(
+                        "[RAG Search] vector empty -> keyword fallback skipped reason=terms_empty query=%s",
+                        (query or "")[:180],
+                    )
+                    incr("rag_retrieve_keyword_fallback_skipped_total")
     except Exception as e:
         logger.warning("retrieve_rag_pgvector query failed: %s", e)
+        incr("rag_retrieve_exception_total")
         return []
     # SELECT 순서: doc_id(0), chunk_index(1), content(2), regulation_article(3), regulation_clause(4), location(5), title(6), metadata_json(7), score(8)
     out: list[dict[str, Any]] = []
@@ -756,6 +1389,10 @@ def retrieve_rag_pgvector(
             item["location"] = location or (f"규정 {regulation_article or ''} {regulation_clause or ''}".strip() or None)
             item["title"] = title
         out.append(item)
+    if out:
+        incr("rag_retrieve_nonzero_total")
+    else:
+        incr("rag_retrieve_zero_total")
     return out
 
 
@@ -796,7 +1433,7 @@ def hybrid_retrieve(
     tenant_id: int | None = None,
 ) -> list[dict[str, Any]]:
     """
-    하이브리드 검색. vector_store_type=pgvector 시 코사인 유사도(<=>) + 전표 맥락(bukrs, belnr) 반영.
+    하이브리드 검색. vector_store_type=pgvector 시 코사인 유사도(<=>) 기반 검색.
     검색 결과에 인용 정보(Article/Clause/location) 보존.
     
     doc_ids: 에이전트가 접근 가능한 문서 ID 목록. 빈 리스트면 결과 0건 (Secure by Default).
@@ -815,14 +1452,9 @@ def hybrid_retrieve(
     settings = get_settings()
     vs_type = (getattr(settings, "vector_store_type", "none") or "").strip().lower()
     if vs_type == "pgvector":
-        context_parts = [query]
-        if bukrs:
-            context_parts.append(f"bukrs {bukrs}")
-        if belnr:
-            context_parts.append(f"belnr {belnr}")
         sim_threshold = getattr(settings, "rag_similarity_threshold", 0.75)
         return retrieve_rag_pgvector(
-            " ".join(context_parts),
+            query,
             top_k,
             bukrs=bukrs,
             belnr=belnr,

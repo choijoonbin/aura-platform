@@ -88,6 +88,21 @@ def _parse_metadata(metadata_str: str | None) -> dict[str, Any]:
         return {}
 
 
+def _ensure_rag_metadata(
+    metadata: dict[str, Any] | None,
+    *,
+    tenant_id: int | None,
+    doc_type: str,
+    title: str | None = None,
+) -> dict[str, Any]:
+    out = dict(metadata or {})
+    out["tenant_id"] = int(tenant_id) if tenant_id is not None else int(out.get("tenant_id") or out.get("tenantId") or 0)
+    out["doc_type"] = doc_type
+    if title and not out.get("title"):
+        out["title"] = title
+    return out
+
+
 def _batch_chunks(chunks: list[dict[str, Any]], batch_size: int) -> list[list[dict[str, Any]]]:
     """청크 리스트를 batch_size 단위로 분할. batch_size는 20~50으로 클램프."""
     size = max(_BATCH_SIZE_MIN, min(_BATCH_SIZE_MAX, batch_size))
@@ -135,6 +150,7 @@ def _build_vectorize_response(
     chunks: list[dict[str, Any]],
     batch_size: int,
     save_url: str | None,
+    quality_report: dict[str, Any] | None = None,
 ) -> JSONResponse:
     """
     배치 단위로 응답 구성 또는 백엔드 저장 API 반복 호출.
@@ -150,10 +166,22 @@ def _build_vectorize_response(
                 "total_chunks": total,
                 "batches_sent": sent,
                 "batch_size": batch_size,
+                "quality_report": quality_report or {},
             }
             logger.info(
-                "RAG vectorize response (save_url used): rag_document_id=%s total_chunks=%s batches_sent=%s batch_size=%s keys=%s",
-                rag_document_id, total, sent, batch_size, list(payload.keys()),
+                "RAG vectorize response (save_url used): rag_document_id=%s total_chunks=%s batches_sent=%s batch_size=%s keys=%s quality_report_summary=%s",
+                rag_document_id,
+                total,
+                sent,
+                batch_size,
+                list(payload.keys()),
+                {
+                    "article_coverage": payload.get("quality_report", {}).get("article_coverage"),
+                    "noise_rate": payload.get("quality_report", {}).get("noise_rate"),
+                    "duplicate_rate": payload.get("quality_report", {}).get("duplicate_rate"),
+                    "short_chunk_rate": payload.get("quality_report", {}).get("short_chunk_rate"),
+                    "errors": payload.get("quality_report", {}).get("errors"),
+                },
             )
             return JSONResponse(status_code=200, content=payload)
         except Exception as e:
@@ -165,11 +193,23 @@ def _build_vectorize_response(
         "rag_document_id": rag_document_id,
         "batch_size": batch_size,
         "batches": batches,
+        "quality_report": quality_report or {},
     }
     first_chunk_keys = list(batches[0][0].keys()) if batches and batches[0] else []
     logger.info(
-        "RAG vectorize response (body): rag_document_id=%s batch_size=%s num_batches=%s first_chunk_keys=%s response_top_keys=%s",
-        rag_document_id, batch_size, len(batches), first_chunk_keys, list(payload.keys()),
+        "RAG vectorize response (body): rag_document_id=%s batch_size=%s num_batches=%s first_chunk_keys=%s response_top_keys=%s quality_report_summary=%s",
+        rag_document_id,
+        batch_size,
+        len(batches),
+        first_chunk_keys,
+        list(payload.keys()),
+        {
+            "article_coverage": payload.get("quality_report", {}).get("article_coverage"),
+            "noise_rate": payload.get("quality_report", {}).get("noise_rate"),
+            "duplicate_rate": payload.get("quality_report", {}).get("duplicate_rate"),
+            "short_chunk_rate": payload.get("quality_report", {}).get("short_chunk_rate"),
+            "errors": payload.get("quality_report", {}).get("errors"),
+        },
     )
     return JSONResponse(status_code=200, content=payload)
 
@@ -232,6 +272,12 @@ async def rag_documents_vectorize(
     # docType: camelCase 또는 snake_case 모두 지원 (BE 호환)
     doc_type = body.get_effective_doc_type()
     tenant_id = body.get_effective_tenant_id()
+    metadata_dict = _ensure_rag_metadata(
+        metadata_dict,
+        tenant_id=tenant_id,
+        doc_type=doc_type,
+        title=(body.title or None),
+    )
     logger.info(
         "RAG vectorize start: doc_id=%s rag_document_id=%s document_path=%s batch_size=%s doc_type=%s tenantId=%s (raw: docType=%s, doc_type=%s)",
         doc_id, rag_document_id, document_path, batch_size, doc_type, tenant_id, body.docType, body.doc_type,
@@ -241,7 +287,7 @@ async def rag_documents_vectorize(
         logger.warning("RAG vectorize failed: doc_id=%s error=%s", doc_id, result.get("error"))
         return JSONResponse(
             status_code=422,
-            content={"error": result.get("error", "Vectorization failed")},
+            content={"error": result.get("error", "Vectorization failed"), "quality_report": result.get("quality_report", {})},
         )
     chunks = result["chunks"]
     save_url = getattr(settings, "backend_rag_chunks_save_url", None) or None
@@ -249,8 +295,19 @@ async def rag_documents_vectorize(
         "RAG vectorize chunks ready: doc_id=%s num_chunks=%s save_url_set=%s (BE expects response keys: rag_document_id, total_chunks|batches, batches_sent, batch_size)",
         doc_id, len(chunks), bool(save_url),
     )
-    response = _build_vectorize_response(rag_document_id, chunks, batch_size, save_url)
-    await notify_synapse_rag_status("COMPLETED", rag_document_id, "청킹·벡터화 완료")
+    response = _build_vectorize_response(
+        rag_document_id,
+        chunks,
+        batch_size,
+        save_url,
+        quality_report=result.get("quality_report", {}),
+    )
+    await notify_synapse_rag_status(
+        "COMPLETED",
+        rag_document_id,
+        "청킹·벡터화 완료",
+        quality_report=result.get("quality_report", {}),
+    )
     return response
 
 
@@ -285,16 +342,28 @@ async def rag_ingest_from_path(body: IngestFromPathRequest) -> JSONResponse:
     doc_id = (body.rag_document_id or "").strip() or f"rag-{uuid.uuid4().hex[:12]}"
     metadata = _parse_metadata(body.metadata.strip() or None)
     doc_type = (body.doc_type or DOC_TYPE_REGULATION).strip()
+    metadata = _ensure_rag_metadata(metadata, tenant_id=None, doc_type=doc_type, title=valid_path.stem)
     result = process_and_vectorize(valid_path, doc_id, metadata or None, doc_type=doc_type)
     if not result.get("ok"):
         return JSONResponse(
             status_code=422,
-            content={"error": result.get("error", "Vectorization failed")},
+            content={"error": result.get("error", "Vectorization failed"), "quality_report": result.get("quality_report", {})},
         )
     batch_size = getattr(settings, "rag_chunk_batch_size", 30)
     save_url = getattr(settings, "backend_rag_chunks_save_url", None) or None
-    response = _build_vectorize_response(result["rag_document_id"], result["chunks"], batch_size, save_url)
-    await notify_synapse_rag_status("COMPLETED", doc_id, "청킹·벡터화 완료")
+    response = _build_vectorize_response(
+        result["rag_document_id"],
+        result["chunks"],
+        batch_size,
+        save_url,
+        quality_report=result.get("quality_report", {}),
+    )
+    await notify_synapse_rag_status(
+        "COMPLETED",
+        doc_id,
+        "청킹·벡터화 완료",
+        quality_report=result.get("quality_report", {}),
+    )
     return response
 
 
@@ -332,17 +401,29 @@ async def rag_ingest(
     try:
         meta = _parse_metadata(metadata.strip() or None)
         doc_type_val = (doc_type or DOC_TYPE_REGULATION).strip()
+        meta = _ensure_rag_metadata(meta, tenant_id=None, doc_type=doc_type_val, title=file.filename)
         result = process_and_vectorize(tmp_path, doc_id, meta or None, doc_type=doc_type_val)
         if not result.get("ok"):
             return JSONResponse(
                 status_code=422,
-                content={"error": result.get("error", "Vectorization failed")},
+                content={"error": result.get("error", "Vectorization failed"), "quality_report": result.get("quality_report", {})},
             )
         settings = get_settings()
         batch_size = getattr(settings, "rag_chunk_batch_size", 30)
         save_url = getattr(settings, "backend_rag_chunks_save_url", None) or None
-        response = _build_vectorize_response(result["rag_document_id"], result["chunks"], batch_size, save_url)
-        await notify_synapse_rag_status("COMPLETED", doc_id, "청킹·벡터화 완료")
+        response = _build_vectorize_response(
+            result["rag_document_id"],
+            result["chunks"],
+            batch_size,
+            save_url,
+            quality_report=result.get("quality_report", {}),
+        )
+        await notify_synapse_rag_status(
+            "COMPLETED",
+            doc_id,
+            "청킹·벡터화 완료",
+            quality_report=result.get("quality_report", {}),
+        )
         return response
     finally:
         try:

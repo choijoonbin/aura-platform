@@ -119,6 +119,69 @@ class Settings(BaseSettings):
         default=None,
         description="규정 효력일 강제값(YYYY-MM-DD). 미설정 시 case 발생일 기준",
     )
+    rag_diag_disable_doc_ids_once: bool = Field(
+        default=True,
+        description="RAG 0건 시 동일 run에서 doc_ids 필터를 1회 해제해 원인 진단 로그를 남김(결과 반영 없음, 로그 전용).",
+    )
+    rag_quality_gate_enabled: bool = Field(
+        default=True,
+        description="RAG 청킹 품질 게이트 활성화(메타 필수값/노이즈 제거/중복 제거/검증 리포트).",
+    )
+    rag_quality_strict_mode: bool = Field(
+        default=True,
+        description="품질 게이트 strict 모드. 필수 메타 누락/유효 청크 0건이면 실패 처리.",
+    )
+    rag_chunk_min_chars: int = Field(
+        default=80,
+        ge=1,
+        description="제목-only 제거를 위한 최소 청크 길이 기준.",
+    )
+    rag_chunk_article_coverage_threshold: float = Field(
+        default=0.8,
+        ge=0.0,
+        le=1.0,
+        description="REGULATION/HIERARCHICAL 문서의 regulation_article 최소 커버리지 기준.",
+    )
+    rag_chunk_max_noise_rate: float = Field(
+        default=0.35,
+        ge=0.0,
+        le=1.0,
+        description="청킹 품질게이트 최대 허용 노이즈 비율(원본 대비). 초과 시 실패.",
+    )
+    rag_chunk_max_duplicate_rate: float = Field(
+        default=0.20,
+        ge=0.0,
+        le=1.0,
+        description="청킹 품질게이트 최대 허용 중복 비율(원본 대비). 초과 시 실패.",
+    )
+    rag_chunk_max_short_chunk_rate: float = Field(
+        default=0.20,
+        ge=0.0,
+        le=1.0,
+        description="청킹 품질게이트 최대 허용 저정보(짧은/heading-only) 비율.",
+    )
+    rag_hybrid_subchunk_enabled: bool = Field(
+        default=True,
+        description="계층형 문서(HIERARCHICAL)에서 조항 내부 2차 세분화 청킹 활성화.",
+    )
+    rag_hybrid_subchunk_size: int = Field(
+        default=420,
+        ge=120,
+        le=1200,
+        description="계층형 2차 세분화 청킹 크기(char).",
+    )
+    rag_hybrid_subchunk_overlap: int = Field(
+        default=80,
+        ge=0,
+        le=300,
+        description="계층형 2차 세분화 청킹 overlap(char).",
+    )
+    rag_hybrid_subchunk_min_chars: int = Field(
+        default=140,
+        ge=20,
+        le=400,
+        description="계층형 2차 세분화 시 하위 청크 최소 길이.",
+    )
     # RAG 벡터화 응답: 청크 배치 크기 (20~50). 대용량 시 메모리·전송 부담 완화.
     rag_chunk_batch_size: int = Field(
         default=30,

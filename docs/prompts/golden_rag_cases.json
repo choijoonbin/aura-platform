@@ -1,0 +1,27 @@
+[
+  {
+    "id": "holiday_usage_weekend",
+    "query": "법인카드 휴일 주말 공휴일 지출 규정 조항",
+    "expected_articles": ["제39조", "제7조"]
+  },
+  {
+    "id": "night_time_usage",
+    "query": "심야시간 23:00 06:00 지출 검토 규정",
+    "expected_articles": ["제38조"]
+  },
+  {
+    "id": "split_payment",
+    "query": "분할결제 분할전표 한도 회피 금지 조항",
+    "expected_articles": ["제41조", "제13조"]
+  },
+  {
+    "id": "budget_limit",
+    "query": "누적한도 금액 제약 예산 초과 규정",
+    "expected_articles": ["제40조", "제19조"]
+  },
+  {
+    "id": "prohibited_mcc",
+    "query": "금지 업종 고위험 업종 지출 제한",
+    "expected_articles": ["제42조"]
+  }
+]

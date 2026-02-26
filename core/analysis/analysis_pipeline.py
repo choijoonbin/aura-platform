@@ -12,11 +12,10 @@ Step5: 결과 payload 구성 후 BE 콜백 (선택)
 
 import json
 import logging
+import hashlib
 import re
 import uuid
 from datetime import datetime, timezone
-from functools import lru_cache
-from pathlib import Path
 from typing import Any, AsyncGenerator
 
 from core.analysis.audit_analysis_events import (
@@ -37,7 +36,20 @@ from core.analysis.reasoning_citations import (
     build_citation_reasoning,
     get_violation_clause_evidence,
 )
-from core.analysis.rag import hybrid_retrieve
+from core.analysis.rag_quality import (
+    apply_rule_first_filter as _apply_rule_first_filter,
+    build_dynamic_rag_query as _build_dynamic_rag_query,
+    build_rule_first_constraints as _build_rule_first_constraints,
+    rerank_vector_results as _rerank_vector_results,
+    sanitize_external_reference_text as _sanitize_external_reference_text,
+)
+from core.analysis.rag import hybrid_retrieve, retrieve_rag_pgvector
+from core.analysis.policy_engine import (
+    evaluate_policy_gate,
+    normalize_hr_status,
+    normalize_mcc_code,
+    normalize_occurred_at,
+)
 from core.config import get_settings
 from core.llm import get_llm_client
 from core.observability import incr, start_timer, stop_timer
@@ -60,6 +72,43 @@ SCREENING_CASE_TYPES = frozenset({
     "LIMIT_EXCEED",
     "UNUSUAL_PATTERN",
 })
+
+_COMPACT_NOISE_TERMS = {
+    "sa",
+    "g/l account document",
+    "gl account document",
+    "document",
+    "account document",
+    "expense",
+}
+
+
+def _risk_type_to_semantic_terms(risk_type: str | None) -> list[str]:
+    ru = str(risk_type or "").strip().upper()
+    if "HOLIDAY" in ru:
+        return ["휴일", "주말", "심야"]
+    if "LIMIT" in ru:
+        return ["한도", "초과"]
+    if "PRIVATE" in ru:
+        return ["사적사용", "업무무관"]
+    if "SPLIT" in ru:
+        return ["분할결제", "반복결제"]
+    if "DUPLICATE" in ru:
+        return ["중복", "결제"]
+    return []
+
+_VIOLATION_TEXT_PATTERN = re.compile(r"(위반|정면으로\s*위반|명백한\s*규정\s*위반|판별됩니다)")
+_ARTICLE_IN_TEXT_PATTERN = re.compile(r"제\s*\d+\s*조(?:\s*제\s*\d+\s*항)?")
+
+CASE_TYPE_DISPLAY_NAME: dict[str, str] = {
+    "HOLIDAY_USAGE": "휴일 사용 의심",
+    "DUPLICATE_SUSPECT": "중복 결제 의심",
+    "SPLIT_PAYMENT": "분할 결제 의심",
+    "PRIVATE_USE_RISK": "사적 사용 위험",
+    "LIMIT_EXCEED": "한도 초과 의심",
+    "UNUSUAL_PATTERN": "이상 패턴",
+    "DEFAULT": "기본 분류",
+}
 
 # BE가 Aura와 다른 코드로 저장한 경우 매핑 (예: DUPLICATE_INVOICE → DUPLICATE_SUSPECT). DEFAULT는 매핑하지 않음.
 BE_CASE_TYPE_TO_SCREENING: dict[str, str] = {
@@ -92,18 +141,6 @@ _AGENT_STREAM_PLACEHOLDERS = frozenset({
     "처리 중입니다.",
 })
 
-_PROMPT_INJECTION_PATTERNS = (
-    "ignore previous",
-    "ignore all previous",
-    "system prompt",
-    "developer message",
-    "act as",
-    "jailbreak",
-    "do not follow",
-    "prompt injection",
-)
-
-
 def _is_agent_stream_insight(content: str | None) -> bool:
     """True면 AGENT_STREAM으로 발행. 플레이스홀더·기술 로그·빈 문자열이면 False."""
     if not content or not content.strip():
@@ -121,216 +158,6 @@ def _is_agent_stream_insight(content: str | None) -> bool:
     if "data analyzing" in lower or "data analysing" in lower:
         return False
     return True
-
-
-def _build_dynamic_rag_query(
-    case_data: dict[str, Any] | None,
-    *,
-    intended_risk_type: str | None = None,
-) -> str:
-    """
-    전표 속성 기반 동적 RAG 질의 생성.
-    고정 문구 대신 금액/시각/업종/거래처/위험유형을 결합해 규정 검색 정확도를 높인다.
-    """
-    tokens: list[str] = ["법인카드", "전표", "규정", "감사", "준수"]
-    if intended_risk_type and str(intended_risk_type).strip():
-        tokens.append(str(intended_risk_type).strip())
-    if not isinstance(case_data, dict):
-        return " ".join(tokens)
-    expense_type = case_data.get("expenseType") or case_data.get("expense_type")
-    merchant = case_data.get("merchantName") or case_data.get("merchant_name")
-    occurred = case_data.get("occurredAt") or case_data.get("occurred_at")
-    risk_key = case_data.get("riskTypeKey") or case_data.get("risk_type")
-    amount = case_data.get("amount") or case_data.get("totalAmount")
-    if expense_type:
-        tokens.append(str(expense_type))
-    if merchant:
-        tokens.append(str(merchant))
-    if occurred:
-        tokens.extend(["발생시각", str(occurred)])
-    if risk_key:
-        tokens.append(str(risk_key))
-    if amount is not None:
-        tokens.extend(["금액", str(amount)])
-    # 중복 제거 + 순서 유지
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for t in tokens:
-        key = t.strip()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        deduped.append(key)
-    return " ".join(deduped)
-
-
-@lru_cache(maxsize=1)
-def _load_mcc_rule_links() -> dict[str, dict[str, Any]]:
-    """
-    MCC -> regulation_article/exception_clause 매핑 로드.
-    Aura 단독 운영을 위해 로컬 JSON 기반으로 동작하며, 파일 누락 시 빈 매핑 반환.
-    """
-    path = Path(__file__).resolve().parents[2] / "data" / "mcc_rule_links.json"
-    try:
-        raw = path.read_text(encoding="utf-8")
-        data = json.loads(raw)
-        if isinstance(data, dict):
-            return data
-    except Exception as e:
-        logger.warning("mcc rule links load failed: %s", e)
-    return {}
-
-
-def _extract_mcc_code(case_data: dict[str, Any] | None) -> str | None:
-    if not isinstance(case_data, dict):
-        return None
-    raw = case_data.get("mccCode") or case_data.get("mcc_code")
-    if raw is None and isinstance(case_data.get("evidence"), dict):
-        raw = case_data["evidence"].get("mccCode") or case_data["evidence"].get("mcc_code")
-    if raw is None:
-        return None
-    code = str(raw).strip()
-    return code or None
-
-
-def _extract_case_occurred_date(case_data: dict[str, Any] | None) -> str | None:
-    if not isinstance(case_data, dict):
-        return None
-    raw = case_data.get("occurredAt") or case_data.get("occurred_at")
-    if not raw:
-        return None
-    s = str(raw).strip()
-    if not s:
-        return None
-    return s[:10]
-
-
-def _build_rule_first_constraints(
-    case_data: dict[str, Any] | None,
-    *,
-    settings_obj: Any,
-) -> dict[str, Any]:
-    """
-    룰 기반 1차 제약 생성:
-    - MCC 명시 매핑으로 우선 조항 후보 집합 생성
-    - index_version/effective_date를 검색 컨텍스트로 함께 전달
-    """
-    out: dict[str, Any] = {"articles": [], "index_version": None, "effective_date": None}
-    mcc_code = _extract_mcc_code(case_data)
-    links = _load_mcc_rule_links()
-    if mcc_code and mcc_code in links and isinstance(links[mcc_code], dict):
-        row = links[mcc_code]
-        out["mcc_code"] = mcc_code
-        out["articles"] = list(row.get("articles") or [])
-        out["exception_clauses"] = list(row.get("exception_clauses") or [])
-        out["keywords"] = list(row.get("keywords") or [])
-    idx_ver = getattr(settings_obj, "rag_index_version", None)
-    if idx_ver:
-        out["index_version"] = str(idx_ver).strip()
-    eff = getattr(settings_obj, "rag_effective_date_override", None) or _extract_case_occurred_date(case_data)
-    if eff:
-        out["effective_date"] = str(eff).strip()
-    return out
-
-
-def _apply_rule_first_filter(
-    results: list[dict[str, Any]],
-    *,
-    preferred_articles: list[str] | None = None,
-    effective_date: str | None = None,
-) -> list[dict[str, Any]]:
-    """
-    1차 룰 필터링(정확도) + 미스 시 유연성 보존:
-    - article가 있으면 우선 article 매칭 결과를 반환
-    - article 매칭이 전무하면 원결과 유지(벡터 유연성 유지)
-    - effective_date가 있으면 metadata_json의 유효기간과 대조
-    """
-    if not results:
-        return []
-    out = list(results)
-    if effective_date:
-        eff = []
-        for r in out:
-            meta = r.get("metadata_json") if isinstance(r.get("metadata_json"), dict) else {}
-            if not meta:
-                eff.append(r)
-                continue
-            eff_from = str(meta.get("effective_from") or meta.get("effectiveDateFrom") or "").strip()
-            eff_to = str(meta.get("effective_to") or meta.get("effectiveDateTo") or "").strip()
-            if eff_from and effective_date < eff_from:
-                continue
-            if eff_to and effective_date > eff_to:
-                continue
-            eff.append(r)
-        out = eff
-    articles = [str(a).replace(" ", "") for a in (preferred_articles or []) if str(a).strip()]
-    if not articles:
-        return out
-    filtered: list[dict[str, Any]] = []
-    for r in out:
-        article = str(r.get("regulation_article") or r.get("regulationArticle") or "").replace(" ", "")
-        location = str(r.get("location") or "").replace(" ", "")
-        if any(a and (a == article or a in location) for a in articles):
-            filtered.append(r)
-    return filtered if filtered else out
-
-
-def _sanitize_external_reference_text(text: str) -> str:
-    """외부 검색 결과에서 프롬프트 인젝션/지시문 패턴 제거."""
-    if not isinstance(text, str):
-        return ""
-    lines: list[str] = []
-    for line in text.splitlines():
-        low = line.lower()
-        if any(p in low for p in _PROMPT_INJECTION_PATTERNS):
-            continue
-        # 과도한 제어문자/코드블록 유도 제거
-        if re.search(r"`{3,}|<script|</script>", low):
-            continue
-        lines.append(line)
-    out = "\n".join(lines).strip()
-    if len(out) > 3500:
-        out = out[:3500]
-    return out
-
-
-def _rerank_vector_results(
-    results: list[dict[str, Any]],
-    *,
-    case_data: dict[str, Any] | None = None,
-    preferred_articles: list[str] | None = None,
-) -> list[dict[str, Any]]:
-    """
-    규정 조항/업무 문맥 우선 리랭킹.
-    - 벡터 score
-    - location/regulation 조항 존재 여부
-    - 경비유형 키워드 일치
-    """
-    if not results:
-        return []
-    expense = ""
-    if isinstance(case_data, dict):
-        expense = str(case_data.get("expenseType") or case_data.get("expense_type") or "").strip().lower()
-    preferred_set = {str(a).replace(" ", "") for a in (preferred_articles or []) if str(a).strip()}
-
-    def _rank(d: dict[str, Any]) -> tuple[float, float, float]:
-        score = float(d.get("score", 0) or 0)
-        has_rule = 1.0 if (d.get("location") or d.get("regulation_article") or d.get("regulationArticle")) else 0.0
-        article = str(d.get("regulation_article") or d.get("regulationArticle") or "").replace(" ", "")
-        location = str(d.get("location") or "").replace(" ", "")
-        rule_link_bonus = 1.0 if (preferred_set and any(a and (a == article or a in location) for a in preferred_set)) else 0.0
-        text = (
-            str(d.get("title") or "")
-            + " "
-            + str(d.get("location") or "")
-            + " "
-            + str(d.get("excerpt") or d.get("content") or "")
-        ).lower()
-        semantic_bonus = 1.0 if (expense and expense in text) else 0.0
-        weighted = (score * 0.5) + (has_rule * 0.25) + (semantic_bonus * 0.1) + (rule_link_bonus * 0.15)
-        return (weighted, has_rule, score)
-
-    return sorted(results, key=_rank, reverse=True)
 
 
 def _run_self_verification(
@@ -355,6 +182,246 @@ def _run_self_verification(
         issues.append("citation_missing")
     status = "pass" if not issues else "warn"
     return {"status": status, "issues": issues}
+
+
+def _split_reason_sentences(text: str) -> list[str]:
+    src = (text or "").strip()
+    if not src:
+        return []
+    parts = re.split(r"(?<=[\.\!\?]|다\.)\s+", src)
+    out = [p.strip() for p in parts if p and p.strip()]
+    return out
+
+
+def _tokens_for_overlap(text: str) -> set[str]:
+    toks = re.findall(r"[가-힣A-Za-z0-9]{2,}", text or "")
+    return {t.lower() for t in toks if len(t) >= 2}
+
+
+def _compute_reason_grounding_coverage(
+    *,
+    reason_text: str,
+    evidence_items: list[dict[str, Any]],
+    citations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    sentences = _split_reason_sentences(reason_text)
+    if not sentences:
+        return {
+            "total_sentences": 0,
+            "grounded_sentences": 0,
+            "coverage_ratio": 0.0,
+            "ungrounded_sentences": [],
+        }
+    corpus_chunks: list[str] = []
+    for e in evidence_items or []:
+        if not isinstance(e, dict):
+            continue
+        joined = " ".join(
+            str(e.get(k) or "")
+            for k in ("excerpt", "content", "location", "article", "clause", "regulation_article", "regulation_clause")
+        ).strip()
+        if joined:
+            corpus_chunks.append(joined)
+    for c in citations or []:
+        if not isinstance(c, dict):
+            continue
+        joined = " ".join(str(c.get(k) or "") for k in ("title", "reference", "excerpt")).strip()
+        if joined:
+            corpus_chunks.append(joined)
+    evidence_text = " ".join(corpus_chunks)
+    evidence_tokens = _tokens_for_overlap(evidence_text)
+
+    grounded = 0
+    ungrounded: list[str] = []
+    for s in sentences:
+        s_tokens = _tokens_for_overlap(s)
+        overlap = len(s_tokens & evidence_tokens) if s_tokens else 0
+        art_in_sentence = _ARTICLE_IN_TEXT_PATTERN.search(s or "")
+        article_grounded = False
+        if art_in_sentence and art_in_sentence.group(0):
+            art_norm = re.sub(r"\s+", "", art_in_sentence.group(0))
+            article_grounded = art_norm in re.sub(r"\s+", "", evidence_text)
+        if overlap >= 2 or article_grounded:
+            grounded += 1
+        else:
+            ungrounded.append(s[:160])
+    ratio = grounded / len(sentences) if sentences else 0.0
+    return {
+        "total_sentences": len(sentences),
+        "grounded_sentences": grounded,
+        "coverage_ratio": round(ratio, 3),
+        "ungrounded_sentences": ungrounded[:5],
+    }
+
+
+def _build_analysis_score_breakdown(
+    *,
+    anomaly_score: float,
+    pattern_match: float,
+    rule_compliance: float,
+    output_overall: float,
+    quality_gate_codes: list[str],
+    coverage_ratio: float | None = None,
+) -> dict[str, Any]:
+    weighted = [
+        {
+            "name": "anomaly_score",
+            "raw": round(float(anomaly_score), 4),
+            "weight": 0.4,
+            "weighted": round(float(anomaly_score) * 0.4, 4),
+        },
+        {
+            "name": "pattern_match",
+            "raw": round(float(pattern_match), 4),
+            "weight": 0.3,
+            "weighted": round(float(pattern_match) * 0.3, 4),
+        },
+        {
+            "name": "rule_compliance",
+            "raw": round(float(rule_compliance), 4),
+            "weight": 0.3,
+            "weighted": round(float(rule_compliance) * 0.3, 4),
+        },
+    ]
+    adjustments: list[dict[str, Any]] = []
+    for code in (quality_gate_codes or []):
+        if code in {"RAG_ZERO", "INPUT_PARTIAL", "EVIDENCE_COVERAGE_LOW"}:
+            adjustments.append({"code": code, "effect": "downward_cap_or_hold"})
+    if coverage_ratio is not None:
+        adjustments.append({"code": "EVIDENCE_COVERAGE", "value": round(float(coverage_ratio), 3)})
+    return {
+        "components": weighted,
+        "adjustments": adjustments,
+        "final_overall": round(float(output_overall), 4),
+        "final_risk_score": int(round(float(output_overall) * 100)),
+    }
+
+
+def _analysis_fewshot_by_risk(risk_type: str | None) -> str:
+    rt = str(risk_type or "").strip().upper()
+    if rt == "HOLIDAY_USAGE":
+        return (
+            "[예시]\n"
+            "입력: isHoliday=true, hrStatus=LEAVE, occurredAt=...23:10, RAG 조항 2건.\n"
+            "좋은 출력: '휴일(야간) 사용으로 제n조 제한 취지와 충돌하며, 근거 조항에 따라 추가 소명 필요.'\n"
+            "나쁜 출력: '3개월 대비 20% 증가' (입력/근거 없음).\n"
+        )
+    if rt == "LIMIT_EXCEED":
+        return (
+            "[예시]\n"
+            "입력: budgetExceeded=true, amount 고액, RAG 조항 1건.\n"
+            "좋은 출력: '예산/한도 초과 신호가 확인되며 조항 근거에 따라 위반 가능성이 높다.'\n"
+            "나쁜 출력: '제5조 위반 확정' (조항 근거 없는 확정 금지).\n"
+        )
+    if rt == "PRIVATE_USE_RISK":
+        return (
+            "[예시]\n"
+            "입력: mccCode=금지업종군, 업무연관성 근거 부족, RAG 조항 1건 이상.\n"
+            "좋은 출력: '업무 관련성 부족 및 금지업종 신호로 사적사용 의심.'\n"
+            "나쁜 출력: '무조건 횡령' (형사 단정 금지).\n"
+        )
+    if rt == "SPLIT_PAYMENT":
+        return (
+            "[예시]\n"
+            "입력: 분할 패턴 근거/반복 결제 증거 존재 시에만 분할결제 의심 문장 사용.\n"
+            "근거 없으면 UNUSUAL_PATTERN 또는 보류로 작성.\n"
+        )
+    if rt == "DUPLICATE_SUSPECT":
+        return (
+            "[예시]\n"
+            "입력: 중복 전표키/유사 금액·시각 증거가 있을 때만 중복 의심 사용.\n"
+            "근거 없으면 단정 금지.\n"
+        )
+    return (
+        "[예시]\n"
+        "입력 근거가 부족하면 '확정 판단 보류'로 마무리하고 추가 확인 항목을 제시.\n"
+    )
+
+
+def _has_rag_evidence_items(evidence_items: list[dict[str, Any]]) -> bool:
+    for e in evidence_items or []:
+        if not isinstance(e, dict):
+            continue
+        t = str(e.get("type") or "").upper()
+        if t in {"RAG_CHUNK", "REGULATION_CLAUSE"}:
+            return True
+        if e.get("chunk_id") or e.get("chunkId") or e.get("location") or e.get("article"):
+            return True
+    return False
+
+
+def _screening_case_summary(screening_case_type: str | None) -> str:
+    mapping = {
+        "HOLIDAY_USAGE": "휴무일 사용 가능 신호가 감지되었습니다.",
+        "DUPLICATE_SUSPECT": "중복 지출 가능 신호가 감지되었습니다.",
+        "SPLIT_PAYMENT": "분할 결제 가능 신호가 감지되었습니다.",
+        "PRIVATE_USE_RISK": "사적 사용 가능 신호가 감지되었습니다.",
+        "LIMIT_EXCEED": "한도 초과 가능 신호가 감지되었습니다.",
+        "UNUSUAL_PATTERN": "비정상 패턴 신호가 감지되었습니다.",
+    }
+    key = (screening_case_type or "").strip().upper()
+    return mapping.get(key, "스크리닝 신호가 감지되었습니다.")
+
+
+def _case_type_name(code: str | None) -> str:
+    key = (code or "").strip().upper()
+    return CASE_TYPE_DISPLAY_NAME.get(key, key or "미분류")
+
+
+def _replace_case_type_codes(text: str) -> str:
+    if not text:
+        return text
+    out = text
+    for code, name in CASE_TYPE_DISPLAY_NAME.items():
+        out = out.replace(code, name)
+    return out
+
+
+def _finalize_reason_text_with_grounding(
+    *,
+    reason_text: str,
+    case_data: dict[str, Any] | None,
+    evidence_items: list[dict[str, Any]],
+    screening_case_type: str | None,
+    screening_reason_text: str | None,
+) -> str:
+    """
+    최종 reasonText를 RAG 근거 중심으로 정제.
+    - No-RAG 상황에서는 조항/수치 단정을 제거
+    - 스크리닝 문구를 그대로 인용하지 않고 안전 요약으로 대체
+    """
+    grounded = enforce_grounded_public_thought(
+        reason_text,
+        case_data=case_data,
+        evidence_items=evidence_items,
+        require_rag_for_claims=True,
+    )
+    if grounded == reason_text:
+        return reason_text
+
+    if _has_rag_evidence_items(evidence_items):
+        return grounded
+
+    # No-RAG: 스크리닝 텍스트를 그대로 붙이지 않고, 유형 요약만 노출
+    if screening_case_type:
+        return (
+            f"{_screening_case_summary(screening_case_type)} "
+            "현재 규정 근거 매칭이 충분하지 않아 확정 판단은 보류합니다."
+        )
+
+    if screening_reason_text:
+        safe_screening = enforce_grounded_public_thought(
+            screening_reason_text,
+            case_data=case_data,
+            evidence_items=evidence_items,
+            require_rag_for_claims=True,
+        )
+        # 여전히 근거 단정 성격이면 일반 문구로 강등
+        if safe_screening != screening_reason_text:
+            return "스크리닝 신호가 감지되었으나 현재 규정 근거 매칭이 충분하지 않아 확정 판단은 보류합니다."
+        return f"{safe_screening} 현재 규정 근거 매칭이 충분하지 않아 확정 판단은 보류합니다."
+
+    return grounded
 
 
 def _coords_payload(id_mapping: dict[str, Any]) -> dict[str, Any]:
@@ -455,13 +522,16 @@ def _build_decision_reason(
     for c in (citations or [])[:10]:
         if not isinstance(c, dict):
             continue
+        excerpt = (c.get("excerpt") or c.get("content") or "")[:500]
         citations_payload.append({
+            "citation_id": c.get("citation_id"),
             "source": c.get("source", "내부규정"),
             "chunk_id": c.get("chunk_id") or c.get("chunkId"),
             "doc_id": c.get("doc_id") or c.get("docId"),
             "reference": c.get("title") or c.get("reference", ""),
-            "excerpt": (c.get("excerpt") or c.get("content") or "")[:500],
+            "excerpt": excerpt,
             "score": c.get("score"),
+            "evidence_hash": hashlib.sha256(excerpt.encode("utf-8")).hexdigest() if excerpt else None,
         })
     summary_verdict = (reason_text or "").strip()[:500]
     _full = (reason_text or "").strip()
@@ -481,6 +551,75 @@ def _build_decision_reason(
         "recommendations": recommended_action or "",
         "evidence_map_json": evidence_map_json,
     }
+
+
+def _build_citations_payload(
+    doc_list: list[dict[str, Any]],
+    external_citations: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    cid_seq = 0
+    for d in doc_list:
+        if not isinstance(d, dict):
+            continue
+        raw_title = (d.get("title") or d.get("file_name") or d.get("location") or "").strip()
+        title = raw_title
+        if ">" in title:
+            parts = [p.strip() for p in title.split(">") if p.strip()]
+            if parts:
+                title = parts[-1]
+        if len(title) > 60:
+            title = title[:60]
+        if not title or re.fullmatch(r"[0-9a-fA-F\-]{24,}", title or ""):
+            title = "내부 규정"
+        url = (d.get("s3_url") or d.get("url") or "").strip()
+        cid_seq += 1
+        out.append({"citation_id": f"C{cid_seq}", "title": title, "url": url, "source": "rag"})
+    for c in external_citations:
+        if isinstance(c, dict):
+            cid_seq += 1
+            out.append({**c, "citation_id": f"C{cid_seq}", "source": "web_search"})
+    return out
+
+
+def _build_sentence_citation_map(
+    *,
+    reason_text: str,
+    citations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    sentences = _split_reason_sentences(reason_text)
+    if not sentences:
+        return []
+    citation_rows = [c for c in (citations or []) if isinstance(c, dict)]
+    rows: list[dict[str, Any]] = []
+    for idx, sent in enumerate(sentences, start=1):
+        sent_norm = re.sub(r"\s+", "", sent)
+        sent_tokens = _tokens_for_overlap(sent)
+        matched_ids: list[str] = []
+        for c in citation_rows:
+            cid = str(c.get("citation_id") or "").strip()
+            if not cid:
+                continue
+            ref = " ".join(str(c.get(k) or "") for k in ("title", "url", "reference", "excerpt"))
+            ref_norm = re.sub(r"\s+", "", ref)
+            ref_tokens = _tokens_for_overlap(ref)
+            if _ARTICLE_IN_TEXT_PATTERN.search(sent or "") and _ARTICLE_IN_TEXT_PATTERN.search(ref or ""):
+                matched_ids.append(cid)
+                continue
+            if sent_tokens and len(sent_tokens & ref_tokens) >= 1:
+                matched_ids.append(cid)
+                continue
+            if sent_norm and sent_norm[:12] and sent_norm[:12] in ref_norm:
+                matched_ids.append(cid)
+        rows.append(
+            {
+                "sentence_index": idx,
+                "sentence": sent[:300],
+                "citation_ids": sorted(set(matched_ids)),
+                "grounded": bool(matched_ids),
+            }
+        )
+    return rows
 
 
 def _normalize_get_case_response(case_data: dict[str, Any] | None) -> dict[str, Any]:
@@ -568,6 +707,156 @@ def _normalize_body_evidence(body_evidence: dict[str, Any] | None) -> list[dict[
     return items[:30]  # BE 확장으로 상한 완화
 
 
+def _extract_payload_case_data(body_evidence: dict[str, Any] | None) -> dict[str, Any]:
+    """
+    analysis-runs payload(evidence)에서 분석에 필요한 핵심 필드를 우선 추출/정규화.
+    """
+    if not isinstance(body_evidence, dict):
+        return {}
+    nested = body_evidence.get("evidence")
+    nested = nested if isinstance(nested, dict) else {}
+    out: dict[str, Any] = {}
+    field_candidates: dict[str, tuple[str, ...]] = {
+        "amount": ("amount", "totalAmount"),
+        "occurredAt": ("occurredAt", "occurred_at"),
+        "case_type": ("case_type", "caseType"),
+        "screening_reason_text": ("screening_reason_text", "reasonText"),
+        "expenseType": ("expenseType", "expense_type"),
+        "expenseTypeName": ("expenseTypeName", "expense_type_name"),
+        "merchantName": ("merchantName", "merchant_name"),
+        "hrStatus": ("hrStatus", "hr_status"),
+        "hrStatusRaw": ("hrStatusRaw", "hr_status_raw"),
+        "isHoliday": ("isHoliday", "is_holiday"),
+        "mccCode": ("mccCode", "mcc_code"),
+        "mcc_related_article": ("mcc_related_article", "mccRelatedArticle"),
+        "mccName": ("mccName", "mcc_name"),
+        "budgetExceeded": ("budgetExceeded", "budget_exceeded", "budget_exceeded_flag"),
+        "doc_id": ("doc_id", "voucher_key"),
+        "item_id": ("item_id", "voucher_item_no"),
+    }
+    for target, keys in field_candidates.items():
+        for key in keys:
+            if body_evidence.get(key) is not None:
+                out[target] = body_evidence.get(key)
+                break
+        if target not in out:
+            for key in keys:
+                if nested.get(key) is not None:
+                    out[target] = nested.get(key)
+                    break
+    # nested keys(bukrs/belnr/gjahr/buzei)는 top-level로 승격
+    if isinstance(nested.get("keys"), dict):
+        for k in ("bukrs", "belnr", "gjahr", "buzei"):
+            if nested["keys"].get(k) is not None and out.get(k) is None:
+                out[k] = nested["keys"].get(k)
+    # occurredAt, hr/mcc 정규화
+    out["occurredAt"] = normalize_occurred_at(out.get("occurredAt"))
+    hr_norm, hr_raw = normalize_hr_status(out.get("hrStatus"))
+    if hr_norm:
+        out["hrStatus"] = hr_norm
+    if hr_raw:
+        out["hrStatusRaw"] = hr_raw
+    mcc_norm, mcc_raw = normalize_mcc_code(out.get("mccCode"))
+    if mcc_norm:
+        out["mccCode"] = mcc_norm
+    if mcc_raw:
+        out["mccCodeRaw"] = mcc_raw
+    if out.get("mccCode") == "unknown":
+        incr("audit_analysis_mcc_unknown_total")
+    if out.get("amount") is not None:
+        try:
+            out["amount"] = float(out["amount"])
+        except (TypeError, ValueError):
+            out["amount"] = None
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def _needs_get_case_fallback(case_data: dict[str, Any]) -> bool:
+    """
+    payload-first 처리 후 필수 맥락이 부족할 때만 get_case 호출.
+    """
+    if not case_data:
+        return True
+    has_core = any(case_data.get(k) is not None for k in ("amount", "occurredAt", "case_type", "merchantName"))
+    has_doc_keys = any(case_data.get(k) is not None for k in ("doc_id", "bukrs", "belnr", "gjahr"))
+    return not (has_core or has_doc_keys)
+
+
+def _build_quality_gate_codes(
+    *,
+    case_data: dict[str, Any] | None,
+    evidence_items: list[dict[str, Any]],
+    has_rag_evidence: bool,
+    policy_gate: dict[str, Any] | None,
+) -> list[str]:
+    """
+    판정보류/품질게이트 사유 코드 표준화.
+    """
+    codes: list[str] = []
+    if not evidence_items:
+        codes.append("EVIDENCE_MISSING")
+    if not has_rag_evidence:
+        codes.append("RAG_ZERO")
+    if isinstance(policy_gate, dict):
+        signals = set(policy_gate.get("signals") or [])
+        if {"holiday_usage", "work_status"} <= signals:
+            codes.append("POLICY_CONFLICT")
+    case_data = case_data or {}
+    required_fields = ("occurredAt", "amount", "case_type", "hrStatus", "mccCode")
+    if any(case_data.get(k) is None for k in required_fields):
+        codes.append("INPUT_PARTIAL")
+    if not codes:
+        codes.append("OK")
+    return codes
+
+
+def _build_compact_rag_query(case_data: dict[str, Any] | None, risk_type: str | None) -> str:
+    """
+    RAG 0건 재시도용 간결 쿼리(노이즈 토큰 제거).
+    """
+    base = ["법인카드", "전표", "규정"]
+    base.extend(_risk_type_to_semantic_terms(risk_type))
+    if not isinstance(case_data, dict):
+        return " ".join(base)
+    expense_name = case_data.get("expenseTypeName") or case_data.get("expense_type_name")
+    if expense_name:
+        exp = str(expense_name).strip()
+        if exp and exp.lower() not in _COMPACT_NOISE_TERMS:
+            base.append(exp)
+    occurred = str(case_data.get("occurredAt") or case_data.get("occurred_at") or "").strip()
+    if occurred:
+        base.append(occurred[:10])
+    hr_status = case_data.get("hrStatus") or case_data.get("hr_status")
+    if hr_status:
+        base.append(str(hr_status))
+        if str(hr_status).strip().upper() == "LEAVE":
+            base.append("휴무")
+    mcc_code = case_data.get("mccCode") or case_data.get("mcc_code")
+    if mcc_code:
+        base.append(f"MCC {mcc_code}")
+    mcc_name = case_data.get("mccName") or case_data.get("mcc_name")
+    if mcc_name:
+        mcc = str(mcc_name).strip()
+        if mcc and mcc.lower() not in _COMPACT_NOISE_TERMS:
+            base.append(mcc)
+    if case_data.get("isHoliday") is True:
+        base.append("휴일")
+    dedup: list[str] = []
+    seen: set[str] = set()
+    for t in base:
+        tok = str(t).strip()
+        if not tok:
+            continue
+        low = tok.lower()
+        if low in _COMPACT_NOISE_TERMS:
+            continue
+        if tok in seen:
+            continue
+        seen.add(tok)
+        dedup.append(tok)
+    return " ".join(dedup)
+
+
 async def run_audit_analysis(
     case_id: str,
     *,
@@ -638,35 +927,103 @@ async def run_audit_analysis(
             thought_stream=None,
         ).model_dump(), **id_mapping}))
 
-        try:
-            case_result = await get_case.ainvoke({"caseId": case_id})
-            case_data = json.loads(case_result) if isinstance(case_result, str) else case_result
-        except Exception as e:
-            logger.warning(f"get_case failed for {case_id}: {e}")
-            case_data = {}
+        # payload-first: analysis-runs evidence를 1차 소스로 사용
+        case_data = _extract_payload_case_data(body_evidence if isinstance(body_evidence, dict) else {})
+        if case_data:
+            logger.info(
+                "audit_analysis payload-first case_id=%s fields=%s case_type=%s occurredAt=%s amount=%s mccCode=%s hrStatus=%s hrStatusRaw=%s isHoliday=%s mcc_related_article=%s",
+                case_id,
+                sorted(case_data.keys()),
+                case_data.get("case_type"),
+                case_data.get("occurredAt"),
+                case_data.get("amount"),
+                case_data.get("mccCode"),
+                case_data.get("hrStatus"),
+                case_data.get("hrStatusRaw"),
+                case_data.get("isHoliday"),
+                case_data.get("mcc_related_article"),
+            )
+        if _needs_get_case_fallback(case_data):
+            incr("audit_analysis_get_case_fallback_total")
+            try:
+                case_result = await get_case.ainvoke({"caseId": case_id})
+                case_fallback = json.loads(case_result) if isinstance(case_result, str) else case_result
+            except Exception as e:
+                logger.warning(f"get_case fallback failed for {case_id}: {e}")
+                case_fallback = {}
+            if isinstance(case_fallback, dict) and "error" in case_fallback:
+                case_fallback = {}
+            case_fallback = _normalize_get_case_response(case_fallback)
+            if case_fallback:
+                merged = dict(case_fallback)
+                merged.update({k: v for k, v in case_data.items() if v is not None})
+                case_data = merged
+                logger.info(
+                    "audit_analysis merged get_case fallback case_id=%s has_caseType=%s has_amount=%s has_occurredAt=%s",
+                    case_id,
+                    bool(case_data.get("case_type") or case_data.get("caseType")),
+                    case_data.get("amount") is not None,
+                    bool(case_data.get("occurredAt") or case_data.get("occurred_at")),
+                )
+        else:
+            logger.info(
+                "audit_analysis skip get_case fallback case_id=%s reason=payload_sufficient has_amount=%s has_occurredAt=%s has_case_type=%s has_doc_keys=%s",
+                case_id,
+                case_data.get("amount") is not None,
+                bool(case_data.get("occurredAt") or case_data.get("occurred_at")),
+                bool(case_data.get("case_type") or case_data.get("caseType")),
+                any(case_data.get(k) is not None for k in ("doc_id", "bukrs", "belnr", "gjahr")),
+            )
 
-        if isinstance(case_data, dict) and "error" in case_data:
-            case_data = {}
-        # 백엔드가 evidence.amount, keys.belnr, documentOrOpenItem 등 중첩으로 내려주면 최상위로 채움
-        case_data = _normalize_get_case_response(case_data)
-
-        # [추적] get_case 정규화 후 스크리닝 필드 유무 (BE CaseDetailDto caseType/reasonText)
+        # [추적] payload/get_case 정규화 후 스크리닝 필드 유무
         if isinstance(case_data, dict) and case_data:
             _ct = case_data.get("case_type") or case_data.get("caseType")
             _rt = case_data.get("reasonText") or case_data.get("screening_reason_text")
+            _mcc_code = case_data.get("mccCode") or case_data.get("mcc_code")
+            _mcc_name = case_data.get("mccName") or case_data.get("mcc_name")
+            _mcc_article = case_data.get("mcc_related_article") or case_data.get("mccRelatedArticle")
             logger.info(
-                "audit_analysis get_case after normalize: case_id=%s has_caseType=%s caseType=%s has_reasonText=%s reasonText_preview=%s",
+                "audit_analysis normalized_input: case_id=%s has_caseType=%s caseType=%s has_reasonText=%s mccCode=%s mccName=%s mcc_related_article=%s reasonText_preview=%s",
                 case_id,
                 _ct is not None,
                 _ct,
                 _rt is not None,
+                _mcc_code,
+                _mcc_name,
+                _mcc_article,
                 (_rt[:60] + "…") if _rt and len(_rt) > 60 else (_rt or ""),
             )
+            if _mcc_article is None:
+                logger.warning(
+                    "audit_analysis mcc_related_article missing: case_id=%s mccCode=%s mccName=%s (payload did not provide related article hint)",
+                    case_id,
+                    _mcc_code,
+                    _mcc_name,
+                )
         _be_preview = None
         if isinstance(body_evidence, dict) and body_evidence:
             _be_ct = body_evidence.get("caseType") or body_evidence.get("case_type")
             _be_rt = body_evidence.get("reasonText") or body_evidence.get("screening_reason_text")
-            _be_preview = f"evidence_caseType={_be_ct} has_reasonText={_be_rt is not None}"
+            _be_mcc_code = (
+                body_evidence.get("mccCode")
+                or body_evidence.get("mcc_code")
+                or ((body_evidence.get("evidence") or {}).get("mccCode") if isinstance(body_evidence.get("evidence"), dict) else None)
+            )
+            _be_mcc_name = (
+                body_evidence.get("mccName")
+                or body_evidence.get("mcc_name")
+                or ((body_evidence.get("evidence") or {}).get("mccName") if isinstance(body_evidence.get("evidence"), dict) else None)
+            )
+            _be_mcc_article = (
+                body_evidence.get("mcc_related_article")
+                or body_evidence.get("mccRelatedArticle")
+                or ((body_evidence.get("evidence") or {}).get("mcc_related_article") if isinstance(body_evidence.get("evidence"), dict) else None)
+            )
+            _be_risk_key = body_evidence.get("case_type") or body_evidence.get("caseType")
+            _be_preview = (
+                f"evidence_caseType={_be_ct} has_reasonText={_be_rt is not None} "
+                f"case_type={_be_risk_key} mccCode={_be_mcc_code} mccName={_be_mcc_name} mcc_related_article={_be_mcc_article}"
+            )
             logger.info(
                 "audit_analysis body_evidence: case_id=%s %s evidence_keys=%s",
                 case_id,
@@ -679,7 +1036,7 @@ async def run_audit_analysis(
             _belnr = case_data.get("belnr") or case_data.get("documentNumber")
             _amt = case_data.get("amount") or case_data.get("totalAmount")
             logger.info(
-                "get_case response case_id=%s belnr=%s documentNumber=%s amount=%s totalAmount=%s",
+                "audit_analysis input_snapshot case_id=%s belnr=%s documentNumber=%s amount=%s totalAmount=%s",
                 case_id,
                 case_data.get("belnr"),
                 case_data.get("documentNumber"),
@@ -695,7 +1052,7 @@ async def run_audit_analysis(
             if _amt is None and _belnr is None:
                 _top_keys = list(case_data.keys())[:30]
                 logger.info(
-                    "get_case response missing amount/belnr case_id=%s top_level_keys=%s (backend may use different field names or nest under another key)",
+                    "audit_analysis input_snapshot missing amount/belnr case_id=%s top_level_keys=%s (backend may use different field names or nest under another key)",
                     case_id, _top_keys,
                 )
 
@@ -812,12 +1169,21 @@ async def run_audit_analysis(
             thought_stream=_step_thought,
         ).model_dump(), **id_mapping}))
         vector_results: list[dict[str, Any]] = []
-        rag_constraints: dict[str, Any] = {"articles": [], "effective_date": None, "index_version": None}
+        rag_constraints: dict[str, Any] = {"articles": [], "index_version": None}
+        rag_query = ""
+        doc_ids: list[int] | None = None
+        raw_count = 0
+        raw_max = 0.0
+        rule_filtered_count = 0
+        retried_compact_query = False
+        retried_ultra_compact_query = False
+        retry_thresholds_used: list[float] = []
+        diag_unfiltered_count = 0
+        diag_unfiltered_max = 0.0
         try:
             bukrs = str(case_data.get("bukrs") or "") if isinstance(case_data, dict) else None
             belnr = str(case_data.get("belnr") or "") if isinstance(case_data, dict) else None
             # AgentConfig에서 doc_ids와 tenant_id 추출
-            doc_ids = None
             tenant_id_int = None
             if agent_config:
                 doc_ids = getattr(agent_config, "doc_ids", None)
@@ -843,7 +1209,7 @@ async def run_audit_analysis(
                     doc_ids = [raw_doc]
                 if doc_ids:
                     logger.info(
-                        "audit_analysis_pipeline: doc_ids fallback from body_evidence doc_id=%s",
+                        "analysis_pipeline: doc_ids fallback from body_evidence doc_id=%s",
                         raw_doc,
                     )
             
@@ -852,6 +1218,8 @@ async def run_audit_analysis(
                 case_data if isinstance(case_data, dict) else None,
                 settings_obj=settings,
             )
+            primary_similarity_threshold = float(getattr(settings, "rag_similarity_threshold", 0.75))
+            diag_disable_doc_ids_once = bool(getattr(settings, "rag_diag_disable_doc_ids_once", False))
             rag_query = _build_dynamic_rag_query(
                 case_data if isinstance(case_data, dict) else None,
                 intended_risk_type=intended_risk_type,
@@ -863,7 +1231,32 @@ async def run_audit_analysis(
             metadata_filter: dict[str, Any] | None = None
             if rag_constraints.get("index_version"):
                 metadata_filter = {"index_version": rag_constraints["index_version"]}
-            vector_results = hybrid_retrieve(
+            logger.info(
+                "analysis_pipeline: RAG query start case_id=%s query=%s tenant_id=%s doc_ids=%s metadata_filter=%s",
+                case_id,
+                rag_query[:500],
+                tenant_id_int,
+                doc_ids,
+                metadata_filter,
+            )
+            logger.info(
+                "analysis_pipeline: RAG filter snapshot case_id=%s tenant_id=%s doc_ids=%s index_version=%s",
+                case_id,
+                tenant_id_int,
+                doc_ids,
+                rag_constraints.get("index_version"),
+            )
+            logger.info(
+                "analysis_pipeline: RAG phase=query_filter_threshold case_id=%s query_len=%s has_articles=%s has_keywords=%s doc_ids_count=%s metadata_filter=%s threshold_primary=%.2f",
+                case_id,
+                len(rag_query or ""),
+                bool(rag_constraints.get("articles")),
+                bool(rag_constraints.get("keywords")),
+                len(doc_ids) if isinstance(doc_ids, list) else 0,
+                bool(metadata_filter),
+                primary_similarity_threshold,
+            )
+            raw_vector_results = hybrid_retrieve(
                 query=rag_query,
                 top_k=5,
                 include_article_clause=True,
@@ -873,23 +1266,181 @@ async def run_audit_analysis(
                 doc_ids=doc_ids,
                 tenant_id=tenant_id_int,
             )
-            vector_results = _apply_rule_first_filter(
-                vector_results,
-                preferred_articles=rag_constraints.get("articles"),
-                effective_date=rag_constraints.get("effective_date"),
+            raw_count = len(raw_vector_results or [])
+            raw_max = max((float(r.get("score", 0) or 0) for r in (raw_vector_results or []) if isinstance(r, dict)), default=0.0)
+            logger.info(
+                "analysis_pipeline: RAG raw_result case_id=%s count=%s max_score=%.3f",
+                case_id,
+                raw_count,
+                raw_max,
             )
+            vector_results = _apply_rule_first_filter(
+                raw_vector_results,
+                preferred_articles=rag_constraints.get("articles"),
+                effective_date=None,
+            )
+            rule_filtered_count = len(vector_results or [])
+            if raw_count and not rule_filtered_count:
+                logger.info(
+                    "analysis_pipeline: RAG rule_filter_drop_all case_id=%s preferred_articles=%s",
+                    case_id,
+                    rag_constraints.get("articles"),
+                )
             vector_results = _rerank_vector_results(
                 vector_results,
                 case_data=case_data if isinstance(case_data, dict) else None,
                 preferred_articles=rag_constraints.get("articles"),
             )
+            # 룰 필터로 0건이 되면 동일 쿼리의 원본 결과를 재랭킹해 유효 근거를 최대한 확보
+            if not vector_results and raw_vector_results:
+                vector_results = _rerank_vector_results(
+                    raw_vector_results,
+                    case_data=case_data if isinstance(case_data, dict) else None,
+                    preferred_articles=None,
+                )
+                logger.info(
+                    "analysis_pipeline: RAG fallback to raw results case_id=%s raw_count=%s",
+                    case_id,
+                    len(raw_vector_results),
+                )
+            # 재시도 1/2: 간결 쿼리 + 낮은 threshold (pgvector 전용)
+            if not vector_results and tenant_id_int and doc_ids:
+                settings_local = get_settings()
+                if (getattr(settings_local, "vector_store_type", "none") or "").strip().lower() == "pgvector":
+                    compact_query = _build_compact_rag_query(
+                        case_data if isinstance(case_data, dict) else None,
+                        intended_risk_type or (case_data.get("case_type") if isinstance(case_data, dict) else None),
+                    )
+                    if compact_query and compact_query != rag_query:
+                        retried_compact_query = True
+                        retry_threshold_1 = 0.60
+                        retry_thresholds_used.append(retry_threshold_1)
+                        logger.info(
+                            "analysis_pipeline: RAG retry start case_id=%s mode=compact_query threshold=%.2f query=%s",
+                            case_id,
+                            retry_threshold_1,
+                            compact_query[:300],
+                        )
+                        retry_results = retrieve_rag_pgvector(
+                            compact_query,
+                            top_k=5,
+                            bukrs=bukrs or None,
+                            belnr=belnr or None,
+                            metadata_filter=metadata_filter,
+                            include_article_clause=True,
+                            similarity_threshold=retry_threshold_1,
+                            prioritize_chapters=("제5장", "제6장"),
+                            doc_ids=doc_ids,
+                            tenant_id=tenant_id_int if tenant_id_int > 0 else None,
+                        )
+                        if retry_results:
+                            vector_results = _rerank_vector_results(
+                                retry_results,
+                                case_data=case_data if isinstance(case_data, dict) else None,
+                                preferred_articles=rag_constraints.get("articles"),
+                            )
+                            logger.info(
+                                "analysis_pipeline: RAG retry success case_id=%s results=%s",
+                                case_id,
+                                len(vector_results),
+                            )
+                        else:
+                            logger.info(
+                                "analysis_pipeline: RAG retry empty case_id=%s",
+                                case_id,
+                            )
+                            retry_threshold_2 = 0.50
+                            retry_thresholds_used.append(retry_threshold_2)
+                            retried_ultra_compact_query = True
+                            ultra_semantic_terms: list[str] = []
+                            if intended_risk_type:
+                                ultra_semantic_terms = _risk_type_to_semantic_terms(intended_risk_type)
+                            elif isinstance(case_data, dict):
+                                ultra_semantic_terms = _risk_type_to_semantic_terms(str(case_data.get("case_type") or "").strip())
+                            ultra_query = " ".join(
+                                [
+                                    t
+                                    for t in [
+                                        " ".join(ultra_semantic_terms) if ultra_semantic_terms else "",
+                                        str(case_data.get("mccCode") if isinstance(case_data, dict) else "").strip(),
+                                        str(case_data.get("hrStatus") if isinstance(case_data, dict) else "").strip(),
+                                        str((case_data.get("occurredAt") or "")[:10] if isinstance(case_data, dict) else "").strip(),
+                                        "법인카드",
+                                        "전표",
+                                        "규정",
+                                    ]
+                                    if t
+                                ]
+                            )
+                            logger.info(
+                                "analysis_pipeline: RAG retry start case_id=%s mode=ultra_compact threshold=%.2f query=%s",
+                                case_id,
+                                retry_threshold_2,
+                                ultra_query[:220],
+                            )
+                            retry_results_2 = retrieve_rag_pgvector(
+                                ultra_query,
+                                top_k=5,
+                                bukrs=bukrs or None,
+                                belnr=belnr or None,
+                                metadata_filter=metadata_filter,
+                                include_article_clause=True,
+                                similarity_threshold=retry_threshold_2,
+                                prioritize_chapters=("제5장", "제6장"),
+                                doc_ids=doc_ids,
+                                tenant_id=tenant_id_int if tenant_id_int > 0 else None,
+                            )
+                            if retry_results_2:
+                                vector_results = _rerank_vector_results(
+                                    retry_results_2,
+                                    case_data=case_data if isinstance(case_data, dict) else None,
+                                    preferred_articles=rag_constraints.get("articles"),
+                                )
+                                logger.info(
+                                    "analysis_pipeline: RAG retry success case_id=%s mode=ultra_compact results=%s",
+                                    case_id,
+                                    len(vector_results),
+                                )
+                            else:
+                                logger.info(
+                                    "analysis_pipeline: RAG retry empty case_id=%s mode=ultra_compact",
+                                    case_id,
+                                )
+            # 진단 전용: 같은 run에서 doc_ids 제한 해제 시 결과가 생기는지 원인 분리
+            if (
+                not vector_results
+                and diag_disable_doc_ids_once
+                and tenant_id_int
+                and isinstance(doc_ids, list)
+                and len(doc_ids) > 0
+            ):
+                diag_results = hybrid_retrieve(
+                    query=rag_query,
+                    top_k=5,
+                    include_article_clause=True,
+                    bukrs=bukrs or None,
+                    belnr=belnr or None,
+                    metadata_filter=metadata_filter,
+                    doc_ids=None,
+                    tenant_id=tenant_id_int,
+                )
+                diag_unfiltered_count = len(diag_results or [])
+                diag_unfiltered_max = max(
+                    (float(r.get("score", 0) or 0) for r in (diag_results or []) if isinstance(r, dict)),
+                    default=0.0,
+                )
+                logger.info(
+                    "analysis_pipeline: RAG diagnosis case_id=%s mode=doc_ids_unfiltered count=%s max_score=%.3f",
+                    case_id,
+                    diag_unfiltered_count,
+                    diag_unfiltered_max,
+                )
             logger.info(
-                "audit_analysis_pipeline: RAG constraints case_id=%s mcc=%s articles=%s index_version=%s effective_date=%s",
+                "analysis_pipeline: RAG constraints case_id=%s mcc=%s articles=%s index_version=%s",
                 case_id,
                 rag_constraints.get("mcc_code"),
                 rag_constraints.get("articles"),
                 rag_constraints.get("index_version"),
-                rag_constraints.get("effective_date"),
             )
             if vector_results:
                 existing = {str((d.get("docKey") or d.get("id") or d.get("rag_document_id") or "")) for d in doc_list if isinstance(d, dict)}
@@ -907,6 +1458,9 @@ async def run_audit_analysis(
                         "source": "hybrid_retrieve",
                         "doc_id": v.get("doc_id") or v.get("rag_document_id"),
                         "docId": v.get("docId") or v.get("doc_id") or v.get("rag_document_id"),
+                        "regulation_article": v.get("regulation_article") or v.get("regulationArticle"),
+                        "regulation_clause": v.get("regulation_clause") or v.get("regulationClause"),
+                        "location": v.get("location"),
                         "chunk_id": v.get("chunk_id"),
                         "chunkId": v.get("chunkId") or v.get("chunk_id"),
                         "excerpt": (v.get("excerpt") or v.get("content") or "")[:300],
@@ -926,14 +1480,48 @@ async def run_audit_analysis(
         else:
             max_rag_score = 0.0
         need_web_search = not vector_results or max_rag_score < rag_threshold
+        rag_zero_reasons: list[str] = []
+        if not vector_results:
+            rag_zero_reasons.append("RAG_RESULT_EMPTY")
+            if not (rag_query or "").strip():
+                rag_zero_reasons.append("QUERY_EMPTY")
+            if not doc_ids:
+                rag_zero_reasons.append("DOC_IDS_MISSING")
+            if rag_constraints.get("articles") and raw_count > 0 and rule_filtered_count == 0:
+                rag_zero_reasons.append("ARTICLE_FILTER_APPLIED")
+            if retried_compact_query:
+                rag_zero_reasons.append("RETRY_COMPACT_QUERY_FAILED")
+            if retried_ultra_compact_query:
+                rag_zero_reasons.append("RETRY_ULTRA_COMPACT_QUERY_FAILED")
+            if diag_unfiltered_count > 0:
+                rag_zero_reasons.append("DOC_IDS_FILTER_TOO_NARROW")
+        elif max_rag_score < rag_threshold:
+            rag_zero_reasons.append("BELOW_THRESHOLD")
+            if retried_compact_query:
+                rag_zero_reasons.append("RETRY_COMPACT_QUERY_USED")
+            if retried_ultra_compact_query:
+                rag_zero_reasons.append("RETRY_ULTRA_COMPACT_QUERY_USED")
         logger.info(
-            "audit_analysis_pipeline: RAG summary case_id=%s results=%s max_score=%.3f threshold=%.3f need_web_search=%s",
+            "analysis_pipeline: RAG summary case_id=%s results=%s max_score=%.3f threshold=%.3f need_web_search=%s reasons=%s raw_count=%s raw_max=%.3f rule_filtered_count=%s retried_compact=%s retried_ultra=%s retry_thresholds=%s diag_unfiltered_count=%s diag_unfiltered_max=%.3f",
             case_id,
             len(vector_results) if isinstance(vector_results, list) else 0,
             max_rag_score,
             rag_threshold,
             need_web_search,
+            rag_zero_reasons,
+            raw_count,
+            raw_max,
+            rule_filtered_count,
+            retried_compact_query,
+            retried_ultra_compact_query,
+            retry_thresholds_used,
+            diag_unfiltered_count,
+            diag_unfiltered_max,
         )
+        if vector_results:
+            incr("audit_analysis_rag_nonzero_total")
+        else:
+            incr("audit_analysis_rag_zero_total")
         if need_web_search:
             yield ("step", _with_coords({**AnalysisStepEvent(
                 label="WEB_SEARCH",
@@ -942,7 +1530,17 @@ async def run_audit_analysis(
             ).model_dump(), **id_mapping}))
             try:
                 from tools.external_search_tool import run_web_search_for_pipeline
-                expense_type = (isinstance(case_data, dict) and (case_data.get("expenseType") or case_data.get("expense_type") or "")) or "경비"
+                expense_type = "경비"
+                if isinstance(case_data, dict):
+                    expense_type = (
+                        case_data.get("expenseTypeName")
+                        or case_data.get("expense_type_name")
+                        or case_data.get("expenseType")
+                        or case_data.get("expense_type")
+                        or "경비"
+                    )
+                    if str(expense_type).strip().lower() in _COMPACT_NOISE_TERMS:
+                        expense_type = "경비"
                 web_query = f"법인카드 {expense_type} 세무처리 국세청 가이드라인 회계기준"
                 web_result = await run_web_search_for_pipeline(web_query)
                 if isinstance(web_result, dict):
@@ -951,7 +1549,7 @@ async def run_audit_analysis(
                 else:
                     external_search_text = _sanitize_external_reference_text(str(web_result))
                 logger.info(
-                    "audit_analysis_pipeline: web_search completed case_id=%s query=%s text_len=%s citations=%s",
+                    "analysis_pipeline: web_search completed case_id=%s query=%s text_len=%s citations=%s",
                     case_id,
                     web_query,
                     len(external_search_text or ""),
@@ -985,11 +1583,20 @@ async def run_audit_analysis(
             logger.debug(f"get_lineage failed: {e}")
 
         # C(폴백): fetch 실패로 evidence_items 비어 있으면 body.evidence 사용
-        if not evidence_items and body_evidence:
+        only_case_evidence = bool(evidence_items) and all((isinstance(e, dict) and e.get("type") == "CASE") for e in evidence_items)
+        if (not evidence_items or only_case_evidence) and body_evidence:
             fallback_items = _normalize_body_evidence(body_evidence)
             if fallback_items:
-                evidence_items = fallback_items
-                logger.info(f"case={case_id} using body.evidence fallback ({len(evidence_items)} items)")
+                if only_case_evidence:
+                    evidence_items.extend(fallback_items)
+                else:
+                    evidence_items = fallback_items
+                logger.info(
+                    "case=%s using body.evidence fallback (%s items, only_case_evidence=%s)",
+                    case_id,
+                    len(fallback_items),
+                    only_case_evidence,
+                )
 
         # 백엔드에서 넘긴 doc_id / item_id (Evidence Binding: 해당 문서·항목 관련 규정을 최상단에 배치)
         # 백엔드 규격: doc_id/item_id는 String 또는 Number(int/float)로 전달될 수 있음 → 항상 str로 정규화
@@ -1134,82 +1741,139 @@ async def run_audit_analysis(
         ).model_dump(), **id_mapping}))
 
         # Step4: LLM reasonText (XAI: 규정 인용형 문장)
-        # 우선순위: intended_risk_type(요청) > case_type/caseType(스크리닝 결과, get_case/body_evidence) > riskTypeKey > 기본값
-        risk_type = "DUPLICATE_INVOICE"
+        # 우선순위: intended_risk_type(요청) > case_type/caseType(스크리닝 결과, get_case/body_evidence) > 기본값
+        risk_type = "UNUSUAL_PATTERN"
         screening_case_type: str | None = None
         screening_reason_text: str | None = None
         _be = body_evidence if isinstance(body_evidence, dict) else {}
-        if intended_risk_type and str(intended_risk_type).strip():
-            risk_type = str(intended_risk_type).strip()
-        else:
-            # 스크리닝에서 이미 분류된 case_type이 있으면 그에 맞춰 reasonText 작성 (엉뚱한 유형으로 덮어쓰기 방지)
+        # intended_risk_type 유무와 무관하게 screening_case_type은 항상 추출/로그한다.
+        for src in (case_data, _be):
+            if not isinstance(src, dict):
+                continue
+            ct_raw = src.get("case_type") or src.get("caseType")
+            if not ct_raw:
+                continue
+            ct = str(ct_raw).strip().upper()
+            # BE가 DEFAULT 또는 Aura 6종 외 코드(DUPLICATE_INVOICE 등)로 보낼 수 있음 → 매핑 후 사용
+            if ct == "DEFAULT":
+                logger.info(
+                    "audit_analysis: caseType from BE ignored (DEFAULT) case_id=%s source=%s",
+                    case_id,
+                    "case_data" if src is case_data else "body_evidence",
+                )
+                ct = None
+            elif ct not in SCREENING_CASE_TYPES and ct in BE_CASE_TYPE_TO_SCREENING:
+                ct = BE_CASE_TYPE_TO_SCREENING[ct]
+                logger.info(
+                    "audit_analysis: caseType mapped from BE case_id=%s raw=%s -> %s",
+                    case_id,
+                    str(ct_raw).strip().upper(),
+                    ct,
+                )
+            elif ct not in SCREENING_CASE_TYPES:
+                logger.info(
+                    "audit_analysis: caseType from BE not in allowed/mapping case_id=%s raw_caseType=%s (will not use for screening)",
+                    case_id,
+                    ct,
+                )
+                ct = None
+            if ct and ct in SCREENING_CASE_TYPES:
+                screening_case_type = ct
+                screening_reason_text = (
+                    (src.get("screening_reason_text") or src.get("reasonText") or "").strip() or None
+                )
+                logger.info(
+                    "audit_analysis: extracted screening caseType case_id=%s caseType=%s source=%s",
+                    case_id,
+                    screening_case_type,
+                    "case_data" if src is case_data else "body_evidence",
+                )
+                break
+        # caseType이 없거나 DEFAULT여도 reasonText만 있으면 LLM 가이드로 사용
+        if not screening_case_type and not screening_reason_text:
             for src in (case_data, _be):
                 if not isinstance(src, dict):
                     continue
-                ct_raw = src.get("case_type") or src.get("caseType")
-                if not ct_raw:
-                    continue
-                ct = str(ct_raw).strip().upper()
-                # BE가 DEFAULT 또는 Aura 6종 외 코드(DUPLICATE_INVOICE 등)로 보낼 수 있음 → 매핑 후 사용
-                if ct == "DEFAULT":
+                screening_reason_text = (
+                    (src.get("screening_reason_text") or src.get("reasonText") or "").strip() or None
+                )
+                if screening_reason_text:
                     logger.info(
-                        "audit_analysis: caseType from BE ignored (DEFAULT) case_id=%s source=%s",
+                        "audit_analysis: using screening reasonText only (no caseType) case_id=%s preview=%s",
                         case_id,
-                        "case_data" if src is case_data else "body_evidence",
-                    )
-                    ct = None
-                elif ct not in SCREENING_CASE_TYPES and ct in BE_CASE_TYPE_TO_SCREENING:
-                    ct = BE_CASE_TYPE_TO_SCREENING[ct]
-                    logger.info(
-                        "audit_analysis: caseType mapped from BE case_id=%s raw=%s -> %s",
-                        case_id,
-                        str(ct_raw).strip().upper(),
-                        ct,
-                    )
-                elif ct not in SCREENING_CASE_TYPES:
-                    logger.info(
-                        "audit_analysis: caseType from BE not in allowed/mapping case_id=%s raw_caseType=%s (will not use for screening)",
-                        case_id,
-                        ct,
-                    )
-                    ct = None
-                if ct and ct in SCREENING_CASE_TYPES:
-                    screening_case_type = ct
-                    risk_type = screening_case_type
-                    screening_reason_text = (
-                        (src.get("screening_reason_text") or src.get("reasonText") or "").strip() or None
-                    )
-                    logger.info(
-                        "audit_analysis: using screening caseType from get_case/evidence case_id=%s caseType=%s",
-                        case_id,
-                        screening_case_type,
+                        screening_reason_text[:80],
                     )
                     break
-            # caseType이 없거나 DEFAULT여도 reasonText만 있으면 LLM 가이드로 사용 (휴일 전표가 중복으로 덮어쓰이는 것 방지)
-            if not screening_case_type and not screening_reason_text:
-                for src in (case_data, _be):
-                    if not isinstance(src, dict):
-                        continue
-                    screening_reason_text = (
-                        (src.get("screening_reason_text") or src.get("reasonText") or "").strip() or None
-                    )
-                    if screening_reason_text:
-                        logger.info(
-                            "audit_analysis: using screening reasonText only (no caseType) case_id=%s preview=%s",
-                            case_id,
-                            screening_reason_text[:80],
-                        )
-                        break
-            if not screening_case_type and isinstance(case_data, dict):
-                risk_type = case_data.get("riskTypeKey", case_data.get("risk_type", risk_type))
-                if isinstance(risk_type, str):
-                    risk_type = risk_type.strip() or "DUPLICATE_INVOICE"
-                else:
-                    risk_type = "DUPLICATE_INVOICE"
+
+        if intended_risk_type and str(intended_risk_type).strip():
+            risk_type = str(intended_risk_type).strip()
+        elif screening_case_type:
+            risk_type = screening_case_type
+        elif isinstance(case_data, dict):
+            risk_type = case_data.get("case_type") or case_data.get("caseType") or risk_type
+            if isinstance(risk_type, str):
+                risk_type = risk_type.strip() or "UNUSUAL_PATTERN"
+            else:
+                risk_type = "UNUSUAL_PATTERN"
+            logger.info(
+                "audit_analysis: risk_type from case_type fallback case_id=%s risk_type=%s (no screening_case_type)",
+                case_id,
+                risk_type,
+            )
+
+        has_rag_evidence = _has_rag_evidence_items(evidence_items)
+        policy_gate = evaluate_policy_gate(
+            case_data if isinstance(case_data, dict) else {},
+            has_rag_evidence=has_rag_evidence,
+        )
+        policy_case_type = policy_gate.get("recommended_case_type")
+        policy_conflict = False
+        policy_reeval_applied = False
+        if (not risk_type or str(risk_type).upper() == "DEFAULT") and isinstance(policy_case_type, str):
+            risk_type = policy_case_type
+            logger.info(
+                "audit_analysis: risk_type from policy_gate case_id=%s risk_type=%s signals=%s",
+                case_id,
+                risk_type,
+                policy_gate.get("signals"),
+            )
+        if (
+            isinstance(policy_case_type, str)
+            and isinstance(risk_type, str)
+            and policy_case_type.strip().upper() in SCREENING_CASE_TYPES
+            and risk_type.strip().upper() in SCREENING_CASE_TYPES
+            and policy_case_type.strip().upper() != risk_type.strip().upper()
+        ):
+            policy_conflict = True
+            if not has_rag_evidence:
+                old_risk_type = risk_type
+                risk_type = policy_case_type
+                policy_reeval_applied = True
                 logger.info(
-                    "audit_analysis: risk_type from case_data fallback case_id=%s risk_type=%s (no screening_case_type)",
+                    "audit_analysis: policy-llm conflict resolved by policy gate case_id=%s from=%s to=%s signals=%s has_rag_evidence=%s",
+                    case_id,
+                    old_risk_type,
+                    risk_type,
+                    policy_gate.get("signals"),
+                    has_rag_evidence,
+                )
+            else:
+                logger.info(
+                    "audit_analysis: policy-llm conflict observed (rag exists, keep llm risk_type) case_id=%s risk_type=%s policy_case_type=%s",
                     case_id,
                     risk_type,
+                    policy_case_type,
+                )
+        if isinstance(policy_gate.get("normalized"), dict):
+            norm = policy_gate["normalized"]
+            for k in ("hrStatus", "hrStatusRaw", "mccCode", "mccCodeRaw", "occurredAt", "isHoliday", "isHolidaySource"):
+                if norm.get(k) is not None:
+                    case_data[k] = norm.get(k)
+            if norm.get("mccCode") == "unknown":
+                logger.info(
+                    "audit_analysis: mcc normalized to unknown case_id=%s raw=%s",
+                    case_id,
+                    norm.get("mccCodeRaw"),
                 )
 
         logger.info(
@@ -1237,35 +1901,40 @@ async def run_audit_analysis(
         doc_id = doc_id_ref
         item_id = item_id_ref
 
-        reason_text = f"케이스 {case_id}: {risk_type} 위험 유형. "
+        reason_text = f"케이스 {case_id}: {_case_type_name(risk_type)}."
         try:
             llm = get_llm_client(model_name)
             prompt_parts = [
                 f"케이스 {case_id} 분석 결과를 한 문단으로 요약. ",
-                f"위험 유형: {risk_type}. 스코어: {overall:.2f}. ",
+                f"위험 유형: {_case_type_name(risk_type)}. 스코어: {overall:.2f}. ",
             ]
             if intended_risk_type and str(intended_risk_type).strip():
                 prompt_parts.append(
-                    f"[최우선 가이드] 사용자가 위험 유형을 '{intended_risk_type}'으로 지정했습니다. "
-                    "이 유형을 최우선 가이드로 삼아 판단하십시오. 사용자가 '사적유용'으로 정의한 건을 '중복청구' 등 다른 유형으로 제멋대로 바꾸지 마십시오. "
+                    f"[가이드] 사용자가 위험 유형을 '{_case_type_name(intended_risk_type)}'으로 지정했습니다. "
+                    "최종 결론은 반드시 아래 규정 근거와 일치할 때만 확정하십시오. "
                 )
             elif screening_case_type:
                 prompt_parts.append(
-                    f"[최우선 가이드] 이 케이스는 스크리닝에서 **{screening_case_type}**으로 분류되었습니다. "
-                    "RAG 검색 결과(아래 참조 규정)와 스크리닝 판단을 종합하여 reasonText를 작성하십시오. "
-                    "다른 위반 유형으로 결론을 바꾸거나 서술하지 마십시오. "
+                    f"[참고 힌트] 이 케이스는 스크리닝에서 **{_case_type_name(screening_case_type)}**으로 분류되었습니다. "
+                    "이 값은 힌트이며, 최종 결론은 반드시 RAG 근거 기준으로 작성하십시오. "
                 )
                 if screening_reason_text:
                     _ellip = "…" if len(screening_reason_text) > 400 else ""
                     prompt_parts.append(
-                        f"스크리닝 판단 요약: 「{screening_reason_text[:400]}{_ellip}」. 위 내용에 맞춰 상세 분석과 reasonText를 이어서 작성하십시오. "
+                        f"스크리닝 판단 요약: 「{screening_reason_text[:400]}{_ellip}」. "
+                        "해당 문구를 그대로 재사용하지 말고, 근거 검증 후 필요한 정보만 반영하십시오. "
                     )
             if screening_reason_text and not screening_case_type:
-                # caseType 없음(DEFAULT 등)이어도 reasonText만 있으면 스크리닝 판단에 맞춰 작성 (휴일→중복 덮어쓰기 방지)
+                # caseType 없음(DEFAULT 등)이어도 힌트로만 사용
                 _ellip = "…" if len(screening_reason_text) > 400 else ""
                 prompt_parts.append(
-                    f"[최우선 가이드] 스크리닝 판단 요약: 「{screening_reason_text[:400]}{_ellip}」. "
-                    "위 내용에 맞춰 reasonText를 작성하십시오. 스크리닝과 다른 위반 유형(예: 중복송장)으로 결론 내리지 마십시오. "
+                    f"[참고 힌트] 스크리닝 판단 요약: 「{screening_reason_text[:400]}{_ellip}」. "
+                    "근거가 없으면 조항/위반을 단정하지 마십시오. "
+                )
+            if policy_gate.get("signals"):
+                prompt_parts.append(
+                    f"결정론 정책 신호: {', '.join(policy_gate.get('signals') or [])}. "
+                    "신호는 보조 근거이며 규정 인용이 없으면 확정 결론으로 사용하지 마십시오. "
                 )
             if doc_id or item_id or target_buzei or item_no:
                 parts = [f"doc_id={doc_id or '미지정'}", f"item_id={item_id or '미지정'}"]
@@ -1284,6 +1953,11 @@ async def run_audit_analysis(
                     "evidence에는 해당 조항 원문을 바인딩할 수 있도록 조문 번호를 명시하고, "
                     "URL이 있으면 마크다운 [설명](URL)으로 작성하십시오."
                 )
+            else:
+                prompt_parts.append(
+                    "현재 내부 규정 인용 결과가 없습니다. 조항 번호를 임의 생성하지 말고, "
+                    "'근거 부족으로 확정 판단 보류' 형태로 작성하십시오."
+                )
             if external_search_text:
                 prompt_parts.append(
                     "\n\n외부 참조 (사내 규정에 없을 때 참고):\n" + (external_search_text[:3000] if len(external_search_text) > 3000 else external_search_text)
@@ -1291,11 +1965,14 @@ async def run_audit_analysis(
                 )
             if case_context:
                 prompt_parts.append(f"케이스 맥락: {case_context}. ")
+            prompt_parts.append(_analysis_fewshot_by_risk(risk_type))
             prompt_parts.append(
                 "한국어로 2~3문장으로 사람이 이해할 수 있는 이유(reasonText)를 작성. "
                 "**반드시 첫 문장에 이번 분석의 핵심 결론**(위반 여부·적용 조항·판단 요약)을 배치하고, 그 다음 문장부터 근거를 서술하십시오. "
                 "'데이터 분석 중' 같은 진행 로그는 금지합니다. "
-                "전문 용어는 최소화하고, 증거와 결론을 설명 가능한 문장으로 작성."
+                "전문 용어는 최소화하고, 증거와 결론을 설명 가능한 문장으로 작성. "
+                "근거 없는 과거비교(예: 3개월/20%) 및 근거 없는 조항 단정은 금지합니다. "
+                "주의: 내부 분류 코드 리터럴을 문장에 쓰지 말고 한국어 코드명으로 작성하십시오."
             )
             prompt = "".join(prompt_parts)
             resp_text = await llm.ainvoke(prompt)
@@ -1374,20 +2051,163 @@ async def run_audit_analysis(
             if "에 의거하여" in citation_sentence:
                 reason_text = citation_sentence + " " + reason_text
 
-        grounded_reason = enforce_grounded_public_thought(
-            reason_text,
+        reason_text = _finalize_reason_text_with_grounding(
+            reason_text=reason_text,
             case_data=case_data if isinstance(case_data, dict) else None,
             evidence_items=evidence_items,
-            require_rag_for_claims=True,
+            screening_case_type=screening_case_type,
+            screening_reason_text=screening_reason_text,
         )
-        if grounded_reason != reason_text:
-            if screening_reason_text:
-                reason_text = (
-                    f"{screening_reason_text} "
-                    "현재 규정 근거 매칭이 충분하지 않아 확정 판단은 보류합니다."
+        reason_text = _replace_case_type_codes(reason_text)
+        if policy_reeval_applied:
+            reason_text = (
+                f"정책 신호와 스크리닝 신호 충돌이 감지되어 **{_case_type_name(risk_type)}** 기준으로 재평가했습니다. "
+                + reason_text
+            )
+        if _VIOLATION_TEXT_PATTERN.search(reason_text) and risk_level == "LOW":
+            risk_level = "MEDIUM"
+            logger.info(
+                "audit_analysis severity gate applied: case_id=%s reason=violation_text_with_low uplifted_to=%s",
+                case_id,
+                risk_level,
+            )
+        has_rag_evidence = _has_rag_evidence_items(evidence_items)
+        quality_gate_codes = _build_quality_gate_codes(
+            case_data=case_data if isinstance(case_data, dict) else None,
+            evidence_items=evidence_items,
+            has_rag_evidence=has_rag_evidence,
+            policy_gate=policy_gate,
+        )
+        if policy_reeval_applied:
+            quality_gate_codes.append("POLICY_REEVAL_APPLIED")
+        elif policy_conflict:
+            quality_gate_codes.append("POLICY_CONFLICT_DETECTED")
+        if quality_gate_codes != ["OK"]:
+            incr("audit_analysis_degraded_total")
+        for code in quality_gate_codes:
+            incr(f"audit_analysis_quality_gate_{code.lower()}_total")
+        logger.info(
+            "audit_analysis quality_gate case_id=%s codes=%s policy_signals=%s",
+            case_id,
+            quality_gate_codes,
+            policy_gate.get("signals", []) if isinstance(policy_gate, dict) else [],
+        )
+        output_overall = float(overall)
+        if "RAG_ZERO" in quality_gate_codes:
+            output_overall = min(output_overall, 0.35)
+            logger.info(
+                "audit_analysis conservative scoring applied: case_id=%s reason=RAG_ZERO original=%.3f adjusted=%.3f",
+                case_id,
+                overall,
+                output_overall,
+            )
+        if "INPUT_PARTIAL" in quality_gate_codes:
+            old = output_overall
+            output_overall = min(output_overall, 0.45)
+            if output_overall != old:
+                logger.info(
+                    "audit_analysis conservative scoring applied: case_id=%s reason=INPUT_PARTIAL original=%.3f adjusted=%.3f",
+                    case_id,
+                    old,
+                    output_overall,
                 )
-            else:
-                reason_text = grounded_reason
+        evidence_items.append(
+            {
+                "type": "POLICY_GATE",
+                "source": "deterministic_policy_engine",
+                "signals": policy_gate.get("signals", []),
+                "recommended_case_type": policy_gate.get("recommended_case_type"),
+                "allow_strong_conclusion": policy_gate.get("allow_strong_conclusion"),
+                "needs_manual_review": policy_gate.get("needs_manual_review"),
+                "quality_gate_codes": quality_gate_codes,
+            }
+        )
+
+        # 문장별 근거 커버리지 점검: 결론 문장이 근거와 연결되지 않으면 보수적으로 강등
+        citations_preview = _build_citations_payload(doc_list, external_citations)
+        grounding = _compute_reason_grounding_coverage(
+            reason_text=reason_text,
+            evidence_items=evidence_items,
+            citations=citations_preview,
+        )
+        sentence_citation_map = _build_sentence_citation_map(
+            reason_text=reason_text,
+            citations=citations_preview,
+        )
+        coverage_ratio = float(grounding.get("coverage_ratio") or 0.0)
+        ungrounded_claim_count = 0
+        for row in sentence_citation_map:
+            if not isinstance(row, dict):
+                continue
+            sent = str(row.get("sentence") or "")
+            grounded_sent = bool(row.get("grounded"))
+            if grounded_sent:
+                continue
+            if _VIOLATION_TEXT_PATTERN.search(sent) or _ARTICLE_IN_TEXT_PATTERN.search(sent):
+                ungrounded_claim_count += 1
+        evidence_items.append(
+            {
+                "type": "GROUNDING_COVERAGE",
+                "source": "reason_grounding_gate",
+                "coverage_ratio": coverage_ratio,
+                "grounded_sentences": grounding.get("grounded_sentences"),
+                "total_sentences": grounding.get("total_sentences"),
+                "ungrounded_sentences": grounding.get("ungrounded_sentences", []),
+                "ungrounded_claim_sentences": ungrounded_claim_count,
+            }
+        )
+        # FE 실시간 검증용: 문장-인용 매핑을 SSE evidence 이벤트로 즉시 송출
+        yield (
+            "evidence",
+            AnalysisEvidenceEvent(
+                type="SENTENCE_CITATION_MAP",
+                items=sentence_citation_map,
+                thought_stream="결론 문장별 인용 근거 매핑을 완료했습니다.",
+            ).model_dump(),
+        )
+        if ungrounded_claim_count > 0:
+            if "SENTENCE_CITATION_MISSING" not in quality_gate_codes:
+                quality_gate_codes.append("SENTENCE_CITATION_MISSING")
+            logger.info(
+                "audit_analysis sentence-citation gate: case_id=%s ungrounded_claim_sentences=%s",
+                case_id,
+                ungrounded_claim_count,
+            )
+            reason_text = (
+                "일부 핵심 결론 문장이 인용 근거와 직접 연결되지 않아 확정 판단을 보류합니다. "
+                "근거 문장 매핑을 보강한 뒤 재평가가 필요합니다."
+            )
+            output_overall = min(output_overall, 0.4)
+            if risk_level == "HIGH":
+                risk_level = "MEDIUM"
+
+        if grounding.get("total_sentences", 0) >= 2 and coverage_ratio < 0.6:
+            if "EVIDENCE_COVERAGE_LOW" not in quality_gate_codes:
+                quality_gate_codes.append("EVIDENCE_COVERAGE_LOW")
+            logger.info(
+                "audit_analysis grounding coverage low: case_id=%s ratio=%.3f grounded=%s total=%s ungrounded=%s",
+                case_id,
+                coverage_ratio,
+                grounding.get("grounded_sentences"),
+                grounding.get("total_sentences"),
+                grounding.get("ungrounded_sentences"),
+            )
+            if _VIOLATION_TEXT_PATTERN.search(reason_text):
+                reason_text = (
+                    "현재 문장별 근거 연결률이 충분하지 않아 위반 확정 판단을 보류합니다. "
+                    "추가 규정 근거 확인 후 재평가가 필요합니다."
+                )
+                output_overall = min(output_overall, 0.45)
+                risk_level = "MEDIUM" if risk_level == "HIGH" else risk_level
+
+        analysis_score_breakdown = _build_analysis_score_breakdown(
+            anomaly_score=anomaly_score,
+            pattern_match=pattern_match,
+            rule_compliance=rule_compliance,
+            output_overall=output_overall,
+            quality_gate_codes=quality_gate_codes,
+            coverage_ratio=coverage_ratio,
+        )
 
         yield ("step", _with_coords({**AnalysisStepEvent(
             label="PROPOSALS",
@@ -1398,10 +2218,10 @@ async def run_audit_analysis(
         # Step5: Proposals
         now_iso = datetime.now(timezone.utc).isoformat()
         proposals: list[dict[str, Any]] = []
-        if overall >= 0.6:
+        if output_overall >= 0.6 and "RAG_ZERO" not in quality_gate_codes:
             proposals.append({
                 "type": "PAYMENT_BLOCK",
-                "riskLevel": "HIGH" if overall >= 0.8 else "MEDIUM",
+                "riskLevel": "HIGH" if output_overall >= 0.8 else "MEDIUM",
                 "rationale": "위험 점수에 따른 추가 검토 권고",
                 "requiresApproval": True,
                 "payload": {"caseId": case_id, "action": "block"},
@@ -1443,17 +2263,8 @@ async def run_audit_analysis(
         if proposals:
             recommended_action = "; ".join(p.get("rationale", "") for p in proposals if p.get("rationale"))
 
-        # citations: 내부 규정(RAG) + 외부 검색 URL — case_analysis_result / 답변 하단 노출용
-        internal_citations: list[dict[str, str]] = []
-        for d in doc_list:
-            if not isinstance(d, dict):
-                continue
-            title = (d.get("title") or d.get("file_name") or d.get("location") or "").strip() or "내부 규정"
-            url = (d.get("s3_url") or d.get("url") or "").strip()
-            internal_citations.append({"title": title, "url": url, "source": "rag"})
-        for c in external_citations:
-            internal_citations.append({**c, "source": "web_search"})
-        citations = internal_citations
+        # citations: 내부 규정(RAG) + 외부 검색 URL
+        citations = _build_citations_payload(doc_list, external_citations)
 
         # chunk_id: 분석에 사용된 핵심 규정 청크 ID (V65/agent_activity_log snake_case)
         chunk_id_ref: str | None = None
@@ -1478,6 +2289,9 @@ async def run_audit_analysis(
             recommended_action=recommended_action,
             item_no=item_no,
         )
+        decision_reason["quality_gate_codes"] = quality_gate_codes
+        decision_reason["analysis_score_breakdown"] = analysis_score_breakdown
+        decision_reason["sentence_citation_map"] = sentence_citation_map
         self_verify = _run_self_verification(
             reason_text=reason_text,
             evidence_items=evidence_items,
@@ -1498,7 +2312,15 @@ async def run_audit_analysis(
         # finalResult 저장 (콜백 전에 반드시 실행 — break 시 get_audit_analysis_result 사용)
         # 백엔드 case_analysis_result 테이블 규격: violation_clause, risk_score, reasoning_summary, recommended_action, citations[]
         # V65: doc_id, item_id, chunk_id, target_buzei 반드시 snake_case
-        severity = "HIGH" if overall >= 0.8 else "MEDIUM" if overall >= 0.6 else "LOW"
+        severity = "HIGH" if output_overall >= 0.8 else "MEDIUM" if output_overall >= 0.6 else "LOW"
+        # 정합성 게이트: 위반 결론 문구가 있으면 LOW로 내리지 않음
+        if isinstance(reason_text, str) and _VIOLATION_TEXT_PATTERN.search(reason_text):
+            if severity == "LOW":
+                logger.warning(
+                    "audit_analysis severity corrected: case_id=%s reason=violation_text_with_low severity_from=LOW severity_to=MEDIUM",
+                    case_id,
+                )
+                severity = "MEDIUM"
         from core.streaming.case_stream_store import set_audit_analysis_result
         set_audit_analysis_result(case_id, {
             "reasonText": reason_text,
@@ -1508,19 +2330,22 @@ async def run_audit_analysis(
                 "anomalyScore": anomaly_score,
                 "patternMatch": pattern_match,
                 "ruleCompliance": rule_compliance,
-                "overall": overall,
+                "overall": output_overall,
             },
+            "analysis_score_breakdown": analysis_score_breakdown,
+            "sentence_citation_map": sentence_citation_map,
             "evidence": evidence_items[:10],
             "ragRefs": evidence_items[:5],
             "similarCases": similar_cases,
-            "score": overall,
-            "risk_score": round(overall * 100),
+            "score": output_overall,
+            "risk_score": round(output_overall * 100),
             "severity": severity,
             "violation_clause": violation_clause_str,
             "violation_clauses": decision_reason.get("violation_clauses", violation_clauses),
             "recommended_action": recommended_action,
             "citations": citations,
             "decision_reason": decision_reason,
+            "quality_gate_codes": quality_gate_codes,
             "evidence_map_json": decision_reason.get("evidence_map_json", []),
             "doc_id": doc_id_ref,
             "item_id": item_id_ref,
@@ -1538,7 +2363,7 @@ async def run_audit_analysis(
                 channel = getattr(settings, "workbench_alert_channel", REDIS_CHANNEL_WORKBENCH_ALERT)
                 await publish_workbench_notification(
                     channel, NOTIFICATION_CATEGORY_AI_DETECT, "신규 이상 징후 탐지",
-                    case_id=case_id, score=overall, severity=severity,
+                    case_id=case_id, score=output_overall, severity=severity,
                 )
             except Exception as e:
                 logger.debug("AI_DETECT notification publish skipped: %s", e)
@@ -1549,12 +2374,13 @@ async def run_audit_analysis(
             runId=run_id,
             caseId=case_id,
             summary=reason_text[:500],
-            score=overall,
-            risk_score=round(overall * 100),
+            score=output_overall,
+            risk_score=round(output_overall * 100),
             severity=severity,
             score_type="final_risk_score",
             violation_clauses=decision_reason.get("violation_clauses", violation_clauses),
             evidence_map_json=decision_reason.get("evidence_map_json", []),
+            quality_gate_codes=quality_gate_codes,
         ).model_dump()
         yield ("completed", completed_payload)
         incr("audit_analysis_completed_total")

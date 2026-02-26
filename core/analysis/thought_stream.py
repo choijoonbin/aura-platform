@@ -74,7 +74,8 @@ _COT_SENSITIVE_PATTERNS = (
     "raw cot",
 )
 
-_ARTICLE_PATTERN = re.compile(r"제\s*\d+\s*조")
+_ARTICLE_PATTERN = re.compile(r"제\s*\d+\s*(?:조|항)")
+_ARTICLE_ONLY_PATTERN = re.compile(r"제\s*(\d+)\s*조")
 _UNSUPPORTED_QUANT_PATTERN = re.compile(r"\b\d+\s*%|\b\d+\s*개월")
 _SPECULATIVE_CLAIM_PATTERN = re.compile(
     r"(과거\s*승인|유사한\s*패턴|반복적(?:으로)?\s*발생|의혹|업무\s*연관성\s*(?:결여|부재)|재무\s*건전성.*리스크)"
@@ -82,6 +83,17 @@ _SPECULATIVE_CLAIM_PATTERN = re.compile(
 _RISK_ASSERTION_PATTERN = re.compile(
     r"(위반\s*가능성|위반(?:입니다|으로\s*판단)|리스크를\s*초래|점검이\s*필요|판단됩니다)"
 )
+_NO_RAG_STRONG_PATTERN = re.compile(
+    r"(업무\s*연관성.*(결여|부재|낮)|재무\s*건전성|직무\s*관련성.*(낮|부재)|위반|의심|상위\s*규정)"
+)
+_CASE_TYPE_CODE_MAP = {
+    "HOLIDAY_USAGE": "휴일 사용 의심",
+    "DUPLICATE_SUSPECT": "중복 결제 의심",
+    "SPLIT_PAYMENT": "분할 결제 의심",
+    "PRIVATE_USE_RISK": "사적 사용 위험",
+    "LIMIT_EXCEED": "한도 초과 의심",
+    "UNUSUAL_PATTERN": "이상 패턴",
+}
 
 
 def sanitize_public_thought(text: str) -> str:
@@ -99,6 +111,8 @@ def sanitize_public_thought(text: str) -> str:
             break
     if len(out) > 260:
         out = out[:257] + "..."
+    for code, name in _CASE_TYPE_CODE_MAP.items():
+        out = out.replace(code, name)
     return out
 
 
@@ -153,6 +167,34 @@ def _has_history_evidence(evidence_items: list[dict[str, Any]] | None) -> bool:
     return False
 
 
+def _extract_allowed_articles(evidence_items: list[dict[str, Any]] | None) -> set[str]:
+    out: set[str] = set()
+    if not evidence_items:
+        return out
+    for e in evidence_items:
+        if not isinstance(e, dict):
+            continue
+        for key in ("regulation_article", "regulationArticle", "article"):
+            val = e.get(key)
+            if val:
+                for m in _ARTICLE_ONLY_PATTERN.finditer(str(val)):
+                    out.add(f"제{m.group(1)}조")
+        loc = e.get("location")
+        if loc:
+            for m in _ARTICLE_ONLY_PATTERN.finditer(str(loc)):
+                out.add(f"제{m.group(1)}조")
+    return out
+
+
+def _extract_mentioned_articles(text: str) -> set[str]:
+    out: set[str] = set()
+    if not text:
+        return out
+    for m in _ARTICLE_ONLY_PATTERN.finditer(text):
+        out.add(f"제{m.group(1)}조")
+    return out
+
+
 def enforce_grounded_public_thought(
     text: str,
     *,
@@ -176,17 +218,38 @@ def enforce_grounded_public_thought(
     has_strong_claim = any(k in out for k in ("명백히 위반", "위반하고 있음", "위반입니다", "확인하였습니다", "판단됩니다"))
     has_speculative_claim = bool(_SPECULATIVE_CLAIM_PATTERN.search(out))
     has_risk_assertion = bool(_RISK_ASSERTION_PATTERN.search(out))
+    has_no_rag_strong = bool(_NO_RAG_STRONG_PATTERN.search(out))
+    mentioned_articles = _extract_mentioned_articles(out)
+    allowed_articles = _extract_allowed_articles(evidence_items)
 
     if has_unsupported_quant:
         return "수신 데이터와 규정 근거를 재대조 중입니다. 확정 수치는 검증 후 제시하겠습니다."
     if has_article_claim and not has_rag:
         return "규정 조항 매칭을 진행 중이며, 조항 근거가 확인되면 상세 판단을 제시하겠습니다."
+    if has_article_claim and has_rag and mentioned_articles:
+        if not allowed_articles:
+            logger.info("thought_stream downgraded: reason=article_without_allowed_set text=%s", (out[:140] + "…") if len(out) > 140 else out)
+            return "수집된 규정 근거를 기준으로 판단을 정교화하고 있습니다."
+        if not mentioned_articles.issubset(allowed_articles):
+            logger.info(
+                "thought_stream downgraded: reason=article_mismatch mentioned=%s allowed=%s",
+                sorted(mentioned_articles),
+                sorted(allowed_articles),
+            )
+            return "수집된 규정 근거를 기준으로 판단을 정교화하고 있습니다."
     if has_speculative_claim and not has_history:
         return "수신 전표와 수집 증거를 대조 중이며, 확인된 근거만으로 판단을 업데이트하겠습니다."
     if has_risk_assertion and not has_rag:
+        logger.info("thought_stream downgraded: reason=no_rag_risk_assertion text=%s", (out[:140] + "…") if len(out) > 140 else out)
         return "규정 근거가 확인된 항목부터 순차적으로 판단을 제시하겠습니다."
+    if require_rag_for_claims and has_no_rag_strong and not has_rag:
+        logger.info("thought_stream downgraded: reason=no_rag_strong_claim text=%s", (out[:140] + "…") if len(out) > 140 else out)
+        return "현재는 규정 근거가 충분하지 않아 사실 확인 범위를 확정할 수 없습니다. 근거 확보 후 판단을 업데이트하겠습니다."
     if require_rag_for_claims and has_strong_claim and not has_rag:
+        logger.info("thought_stream downgraded: reason=no_rag_strong_assertion text=%s", (out[:140] + "…") if len(out) > 140 else out)
         return "현재 규정 근거 매칭이 완료되지 않아 확정 판단을 보류합니다."
+    for code, name in _CASE_TYPE_CODE_MAP.items():
+        out = out.replace(code, name)
     return out
 
 

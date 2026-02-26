@@ -1,13 +1,17 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from core.analysis.audit_analysis_pipeline import (
+from core.analysis.analysis_pipeline import (
     _apply_rule_first_filter,
+    _build_quality_gate_codes,
     _build_dynamic_rag_query,
+    _extract_payload_case_data,
+    _finalize_reason_text_with_grounding,
     _sanitize_external_reference_text,
     _rerank_vector_results,
     _run_self_verification,
 )
+from core.analysis.policy_engine import evaluate_policy_gate
 from core.analysis.thought_stream import (
     enforce_grounded_public_thought,
     sanitize_public_thought,
@@ -32,7 +36,7 @@ def test_dynamic_rag_query_uses_case_features():
         intended_risk_type="HOLIDAY_USAGE",
     )
     assert "식대" in query
-    assert "HOLIDAY_USAGE" in query
+    assert "휴일" in query
     assert "116620" in query
 
 
@@ -76,6 +80,30 @@ def test_external_reference_sanitizer_removes_prompt_injection_lines():
     assert "ignore previous" not in out.lower()
     assert "system prompt" not in out.lower()
     assert "정상 정보" in out
+
+
+def test_finalize_reason_text_without_rag_does_not_reuse_clause_style_screening_reason():
+    out = _finalize_reason_text_with_grounding(
+        reason_text="제5조 및 제19조 위반으로 판단됩니다.",
+        case_data={"occurredAt": "2026-02-22T10:00:00+09:00"},
+        evidence_items=[],
+        screening_case_type="HOLIDAY_USAGE",
+        screening_reason_text="제5조 및 제19조 위반으로 의심됩니다.",
+    )
+    assert "제5조" not in out
+    assert "제19조" not in out
+    assert "휴무일 사용 가능 신호" in out
+
+
+def test_finalize_reason_text_with_rag_keeps_grounded_article():
+    out = _finalize_reason_text_with_grounding(
+        reason_text="제3조 위반입니다.",
+        case_data={},
+        evidence_items=[{"type": "RAG_CHUNK", "chunk_id": "c1", "article": "제3조"}],
+        screening_case_type=None,
+        screening_reason_text=None,
+    )
+    assert "제3조" in out
 
 
 def test_self_verification_warns_on_missing_fields():
@@ -143,3 +171,60 @@ def test_finance_graph_mermaid_endpoint_contract():
         body = resp.json()
         assert body["format"] == "mermaid"
         assert isinstance(body["graph"], str)
+
+
+def test_extract_payload_case_data_normalizes_time_hr_and_mcc():
+    out = _extract_payload_case_data(
+        {
+            "case_type": "HOLIDAY_USAGE",
+            "occurredAt": "2026-02-25T23:10:00+09",
+            "amount": "45000.00",
+            "hrStatus": "VACATION",
+            "mccCode": "BAR",
+        }
+    )
+    assert out["case_type"] == "HOLIDAY_USAGE"
+    assert out["occurredAt"].endswith("+09:00")
+    assert out["hrStatus"] == "LEAVE"
+    assert out["mccCode"] == "unknown"
+    assert out["mccCodeRaw"] == "BAR"
+    assert out["amount"] == 45000.0
+
+
+def test_policy_gate_recommends_holiday_usage_without_rag():
+    result = evaluate_policy_gate(
+        {
+            "occurredAt": "2026-02-22T10:00:00+09:00",
+            "hrStatus": "LEAVE",
+            "case_type": None,
+        },
+        has_rag_evidence=False,
+    )
+    assert result["recommended_case_type"] == "HOLIDAY_USAGE"
+    assert result["needs_manual_review"] is True
+
+
+def test_policy_gate_hr_raw_priority_over_weekend():
+    result = evaluate_policy_gate(
+        {
+            "occurredAt": "2026-02-22T10:00:00+09:00",  # sunday
+            "hrStatusRaw": "VACATION",
+            "hrStatus": "LEAVE",
+            "isHoliday": True,
+        },
+        has_rag_evidence=False,
+    )
+    assert result["normalized"]["isHoliday"] is False
+    assert result["normalized"]["isHolidaySource"] == "hr_status_raw_vacation"
+
+
+def test_quality_gate_codes_include_rag_zero_and_input_partial():
+    codes = _build_quality_gate_codes(
+        case_data={"occurredAt": "2026-02-22T10:00:00+09:00"},
+        evidence_items=[{"type": "CASE"}],
+        has_rag_evidence=False,
+        policy_gate={"signals": ["holiday_usage", "work_status"]},
+    )
+    assert "RAG_ZERO" in codes
+    assert "INPUT_PARTIAL" in codes
+    assert "POLICY_CONFLICT" in codes

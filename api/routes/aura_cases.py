@@ -39,6 +39,23 @@ STREAM_EVENT_DELAY = 0.15
 QUEUE_REMOVAL_DELAY_SEC = 2.0
 
 
+def _event_payload_preview(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """SSE/agent_activity_log 추적용 축약 로그."""
+    if not isinstance(payload, dict):
+        return {"type": str(type(payload))}
+    preview: dict[str, Any] = {}
+    for k in ("runId", "caseId", "label", "percent", "severity", "score", "status"):
+        if payload.get(k) is not None:
+            preview[k] = payload.get(k)
+    txt = payload.get("content") or payload.get("thought_stream") or payload.get("summary") or payload.get("reasonText")
+    if isinstance(txt, str) and txt.strip():
+        preview["text_preview"] = (txt[:180] + "…") if len(txt) > 180 else txt
+    if event_type == "failed":
+        preview["error"] = payload.get("error")
+        preview["stage"] = payload.get("stage")
+    return preview
+
+
 def _format_case_sse_event(ev: CaseStreamEvent) -> str:
     """SSE 형식: id, event, data"""
     return f"id: {ev.id}\nevent: {ev.event}\ndata: {json.dumps(ev.to_sse_data(), ensure_ascii=False)}\n\n"
@@ -175,7 +192,7 @@ async def _run_analysis_background(
     config = None
     try:
         from core.analysis.agent_factory import fetch_agent_config, select_agent_for_request
-        from core.analysis.audit_analysis_pipeline import run_audit_analysis
+        from core.analysis.analysis_pipeline import run_audit_analysis
 
         # Discovery + Selection: 사용자 요청 분석하여 적절한 에이전트 선택
         agent_id_val = await select_agent_for_request(
@@ -194,9 +211,32 @@ async def _run_analysis_background(
             agent_config=config,
         ):
             put_event(run_id, event_type, payload)
+            if event_type in ("AGENT_STREAM", "step", "completed", "failed") or (
+                event_type == "evidence" and payload.get("type") == "SENTENCE_CITATION_MAP"
+            ):
+                logger.info(
+                    "analysis_background event: run_id=%s case_id=%s event=%s payload=%s",
+                    run_id,
+                    case_id,
+                    event_type,
+                    _event_payload_preview(event_type, payload),
+                )
             # 독백 이중화: thought_stream 또는 AGENT_STREAM content를 agent/events에도 푸시 (message·reasoning에 실시간 독백 반영)
-            thought_content = payload.get("thought_stream") if event_type == "step" else payload.get("content") if event_type == "AGENT_STREAM" else None
+            thought_content = (
+                payload.get("thought_stream")
+                if event_type in ("step", "evidence")
+                else payload.get("content")
+                if event_type == "AGENT_STREAM"
+                else None
+            )
             if thought_content:
+                logger.info(
+                    "agent_activity_log enqueue: run_id=%s case_id=%s event=%s message=%s",
+                    run_id,
+                    case_id,
+                    event_type,
+                    (thought_content[:180] + "…") if len(thought_content) > 180 else thought_content,
+                )
                 try:
                     from core.audit.schemas import AgentAuditEvent
                     from core.audit.writer import get_audit_writer
@@ -369,6 +409,16 @@ async def case_analysis_stream(
                 event_type, payload = ev
                 if event_type == "started":
                     case_id_val = payload.get("caseId", "")
+                if event_type in ("AGENT_STREAM", "step", "completed", "failed") or (
+                    event_type == "evidence" and payload.get("type") == "SENTENCE_CITATION_MAP"
+                ):
+                    logger.info(
+                        "case_analysis_stream SSE event: run_id=%s case_id=%s event=%s payload=%s",
+                        run_id,
+                        case_id_val or case_id,
+                        event_type,
+                        _event_payload_preview(event_type, payload),
+                    )
                 yield format_sse_line(event_type, payload)
                 await asyncio.sleep(STREAM_EVENT_DELAY)
                 if event_type in ("completed", "failed"):
@@ -432,7 +482,7 @@ async def case_analysis_trigger(
 
     async def event_generator():
         from core.analysis.agent_factory import fetch_agent_config
-        from core.analysis.audit_analysis_pipeline import run_audit_analysis
+        from core.analysis.analysis_pipeline import run_audit_analysis
 
         try:
             from core.analysis.agent_factory import select_agent_for_request
@@ -458,7 +508,13 @@ async def case_analysis_trigger(
             ):
                 yield format_sse_line(event_type, payload)
                 # 독백 이중화: thought_stream 또는 AGENT_STREAM content를 agent/events에도 푸시
-                thought_content = payload.get("thought_stream") if event_type == "step" else payload.get("content") if event_type == "AGENT_STREAM" else None
+                thought_content = (
+                    payload.get("thought_stream")
+                    if event_type in ("step", "evidence")
+                    else payload.get("content")
+                    if event_type == "AGENT_STREAM"
+                    else None
+                )
                 if thought_content:
                     try:
                         from core.audit.schemas import AgentAuditEvent
@@ -754,7 +810,7 @@ async def case_analysis(
 
     risk_type = "DUPLICATE_INVOICE"
     if isinstance(case_data, dict):
-        risk_type = case_data.get("riskTypeKey") or case_data.get("risk_type") or risk_type
+        risk_type = case_data.get("case_type") or case_data.get("caseType") or risk_type
 
     summary = (
         f"Case {case_id} analysis: Risk type {risk_type}. "

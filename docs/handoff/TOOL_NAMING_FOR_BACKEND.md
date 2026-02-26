@@ -27,14 +27,13 @@
 
 ## Aura 쪽 참조
 
-- 상수 정의: `tools/tool_names.py` — `FINANCE_TOOL_NAMES`, `TOOL_WEB_SEARCH` 등
 - 실제 도구: `tools/synapse_finance_tool.py`, `tools/external_search_tool.py` — 위 표와 동일한 **함수명** 사용
 - **도구 상세(설명·파라미터)**: `docs/handoff/TOOL_INVENTORY_FOR_BACKEND.md` — agent_tool_inventory 시드용 이름·설명·파라미터 전체
 
 ## 백엔드 권장 사항
 
 - `agent_activity_log`, `case_analysis_result` 등에 도구 이름을 저장할 때 위 표의 **tool_name** 컬럼 값만 사용하세요.
-- 신규 도구 추가 시 Aura의 `tools/tool_names.py`와 이 문서를 함께 반영하고, DB enum/제약이 있다면 동일 문자열로 맞추세요.
+- 신규 도구 추가 시 이 문서와 DB enum/제약 문자열을 함께 반영하세요.
 
 ## 의사결정: DB에서 넘어온 인식 불가 tool_name 처리
 

@@ -30,7 +30,7 @@ class AnalysisStepEvent(BaseModel):
 
 class AnalysisEvidenceEvent(BaseModel):
     """evidence: {"type","items":[...],"thought_stream?"} — thought_stream: 찾은 증거가 위반 판단과 어떤 상관관계인지."""
-    type: str  # DOC_HEADER, DOC_ITEMS, OPEN_ITEMS, LINEAGE 등
+    type: str  # DOC_HEADER, DOC_ITEMS, OPEN_ITEMS, LINEAGE, SENTENCE_CITATION_MAP 등
     items: list[dict[str, Any]] = Field(default_factory=list)
     thought_stream: str | None = Field(default=None, description="수집된 증거가 규정 위반·주의·정상 판단에 어떻게 쓰이는지 한 문장.")
 
@@ -65,6 +65,7 @@ class AnalysisCompletedEvent(BaseModel):
     score_type: str = Field(default="final_risk_score", description="최종 위험 점수. 스트림 진행률과 구분.")
     violation_clauses: list[str] = Field(default_factory=list, description="대조한 규정 조항 리스트. 절대 누락 금지.")
     evidence_map_json: list[dict[str, Any]] = Field(default_factory=list, description="전표 행(item_idx)↔근거 문장 매핑. 절대 누락 금지.")
+    quality_gate_codes: list[str] = Field(default_factory=list, description="판정보류/품질게이트 코드. 예: RAG_ZERO, INPUT_PARTIAL")
 
 
 class AnalysisFailedEvent(BaseModel):

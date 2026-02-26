@@ -132,6 +132,10 @@ aura-platform/
 │   │   ├── auth.py            # JWT 인증
 │   │   └── permissions.py     # RBAC
 │   ├── config.py              # 전역 설정
+│   ├── analysis/              # 감사 분석 파이프라인/RAG 품질 로직
+│   │   ├── analysis_pipeline.py
+│   │   ├── precheck_pipeline.py
+│   │   └── rag_quality.py
 │   └── __init__.py
 │
 ├── domains/                   # 부서별 도메인 모듈
@@ -170,7 +174,6 @@ aura-platform/
 │   │   ├── jira_tool.py      # Jira API (예정)
 │   │   └── slack_tool.py     # Slack 알림 (예정)
 │   ├── synapse_finance_tool.py  # Synapse Finance Tool API (8개 도구) ✅
-│   ├── base.py              # 기본 도구 클래스
 │   └── __init__.py
 │
 ├── database/                 # 데이터베이스 관련
@@ -254,6 +257,55 @@ pip install pymupdf langchain-experimental langchain-text-splitters chromadb lan
 alembic upgrade head
 ```
 
+---
+
+## 🧠 RAG 청킹 품질 게이트 (Enterprise)
+
+Aura는 FE에서 전달된 `doc_type`을 기준으로 내부에서 청킹/검증을 수행합니다.
+
+- `HIERARCHICAL`: 조항 경계 파싱(1차) + 조항 내부 세분화(2차 하이브리드)
+- `REGULATION/GENERAL`: semantic/recursive 청킹 + 품질게이트
+
+적용된 품질 KPI:
+
+- `article_coverage`
+- `noise_rate`
+- `duplicate_rate`
+- `short_chunk_rate`
+
+필수 품질게이트:
+
+- 메타 필수값 검증: `doc_id`, `tenant_id`, `location` (+ 규정형 문서는 `regulation_article`)
+- 노이즈 제거: UUID/헤더 쓰레기/빈 청크 제거
+- 저정보 청크 제거: 제목-only/최소 길이 미달
+- 중복 제거: exact + near duplicate
+- 실패 시 적재 차단(strict mode), `quality_report` 반환
+
+관련 설정(`.env`/`core.config.Settings`):
+
+- `RAG_QUALITY_GATE_ENABLED`
+- `RAG_QUALITY_STRICT_MODE`
+- `RAG_CHUNK_MIN_CHARS`
+- `RAG_CHUNK_ARTICLE_COVERAGE_THRESHOLD`
+- `RAG_CHUNK_MAX_NOISE_RATE`
+- `RAG_CHUNK_MAX_DUPLICATE_RATE`
+- `RAG_CHUNK_MAX_SHORT_CHUNK_RATE`
+- `RAG_HYBRID_SUBCHUNK_ENABLED`
+- `RAG_HYBRID_SUBCHUNK_SIZE`
+- `RAG_HYBRID_SUBCHUNK_OVERLAP`
+- `RAG_HYBRID_SUBCHUNK_MIN_CHARS`
+
+리플레이 평가(골든셋):
+
+```bash
+python3 tools/rag_replay_eval.py \
+  --cases docs/prompts/golden_rag_cases.json \
+  --tenant-id 1 \
+  --doc-ids 23,26 \
+  --top-k 5 \
+  --threshold 0.7
+```
+
 ### 5. 서버 실행
 
 ```bash
@@ -312,6 +364,8 @@ curl -s "http://127.0.0.1:9000/aura/internal/metrics"
 MODEL_VERSION_PIN=gpt-4.1-2025-04-14
 PROMPT_VERSION_PIN=aura-auditor-v1
 EXPERIMENT_TAG=exp-a1
+RAG_INDEX_VERSION=2026Q1
+# RAG_EFFECTIVE_DATE_OVERRIDE=2026-01-01
 ```
 
 #### 7-4) A-Phase 품질 테스트 실행 (A9)
@@ -324,8 +378,20 @@ pytest -q tests/unit/test_audit_pipeline_quality.py
 
 - 동적 reasoning 생성: 고정 문구 최소화 및 케이스 맥락 기반 요약
 - 동적 RAG 질의/리랭킹: 전표 속성 기반 검색 + 규정/문맥 우선 정렬
+- 룰 우선 하이브리드: MCC-조항 매핑 기반 1차 필터 후 벡터 검색
+- 규정 버전/효력일 컨텍스트: index_version/effective_date 기준 검색 범위 제어
 - Self-Verification: 근거/조항/인용 누락 점검 후 결과에 반영
 - Thought stream 정제: 내부 CoT 노출 리스크를 줄인 공개용 문장 제공
+
+#### 7-6) 분석 고도화(Enterprise Guardrails)
+
+- `payload-first` 분석: `/analysis-runs`의 `evidence`를 1차 소스로 사용하고, 필드 부족 시에만 `get_case` fallback 호출
+- 결정론 정책 게이트: `core/analysis/policy_engine.py`에서 시간/근태/MCC/예산 신호를 LLM과 분리 평가
+- RAG 0건 실패안전: 조항 단정 금지 + "근거 부족으로 확정 판단 보류" 응답 강제
+- 증거 무결성: citations에 `evidence_hash(sha256)` 저장
+- 경량 운영지표 추가: `audit_analysis_rag_zero_total`, `audit_analysis_rag_nonzero_total`, `audit_analysis_degraded_total`, `audit_analysis_get_case_fallback_total`, `audit_analysis_mcc_unknown_total`
+- 판정보류 코드 표준화: `EVIDENCE_MISSING`, `RAG_ZERO`, `POLICY_CONFLICT`, `INPUT_PARTIAL` (완전 통과 시 `OK`)
+- RAG 0건 진단 로그: query/doc_ids/filter/threshold 단계별 사유(`RAG_RESULT_EMPTY`, `DOC_IDS_MISSING`, `ARTICLE_FILTER_APPLIED`, `BELOW_THRESHOLD`) 출력
 
 ---
 
