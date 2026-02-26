@@ -1,73 +1,167 @@
-2026-02-26 14:22:01,575 - api.middleware - INFO - [271e15e5-fd3e-479c-a2bd-656b91ceb414] POST /aura/rag/documents/26/vectorize - Client: 127.0.0.1
-2026-02-26 14:22:01,610 - api.routes.aura_rag - INFO - RAG vectorize start: doc_id=26 rag_document_id=26 document_path=/Users/joonbinchoi/Work/dwp/dwp-backend/storage/rag-documents/71f26a83-c82e-40a4-9cb7-a4abe6bd5a61______________________________v2.0__________.txt batch_size=30 doc_type=HIERARCHICAL tenantId=None (raw: docType=None, doc_type=HIERARCHICAL)
-2026-02-26 14:22:02,710 - core.analysis.rag - INFO - vectorization: doc_type=HIERARCHICAL rag_document_id=26 (계층형 청킹 조/항 인식)
-2026-02-26 14:22:02,710 - core.analysis.rag - INFO - hierarchical_chunk: doc_title=71f26a83-c82e-40a4-9cb7-a4abe6bd5a61______________________________v2.0__________, text_len=13955 (조/항 인식 검증)
-2026-02-26 14:22:02,710 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제1조 title=(목적)
-2026-02-26 14:22:02,710 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제2조 title=(적용범위)
-2026-02-26 14:22:02,710 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제3조 title=(정의)
-2026-02-26 14:22:02,710 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제4조 title=(기본원칙)
-2026-02-26 14:22:02,710 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제5조 title=(우선순위)
-2026-02-26 14:22:02,711 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제6조 title=(임직원의 책임)
-2026-02-26 14:22:02,711 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제7조 title=(부서장 및 승인권자의 책임)
-2026-02-26 14:22:02,711 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제8조 title=(재무부서의 책임)
-2026-02-26 14:22:02,711 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제9조 title=(준법감시/내부감사의 책임)
-2026-02-26 14:22:02,711 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제10조 title=(IT/데이터 운영의 책임)
-2026-02-26 14:22:02,711 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제11조 title=(승인권한 기준)
-2026-02-26 14:22:02,711 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제12조 title=(사전승인 및 사후승인)
-2026-02-26 14:22:02,711 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제13조 title=(권한분리 및 통제 회피 금지)
-2026-02-26 14:22:02,711 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제14조 title=(공통 증빙 의무)
-2026-02-26 14:22:02,711 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제15조 title=(증빙 제출 기한)
-2026-02-26 14:22:02,712 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제16조 title=(증빙 누락 및 불명확 증빙 처리)
-2026-02-26 14:22:02,712 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제17조 title=(전표 입력 기준)
-2026-02-26 14:22:02,712 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제18조 title=(예산 연계 원칙)
-2026-02-26 14:22:02,712 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제19조 title=(예산 초과 처리)
-2026-02-26 14:22:02,712 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제20조 title=(월말·분기말·연말 집중 집행)
-2026-02-26 14:22:02,712 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제21조 title=(계정과목별 통제 원칙)
-2026-02-26 14:22:02,712 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제22조 title=(계정과목 오분류 금지)
-2026-02-26 14:22:02,712 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제23조 title=(식대)
-2026-02-26 14:22:02,712 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제24조 title=(접대비/업무추진비)
-2026-02-26 14:22:02,712 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제25조 title=(출장비: 교통비/숙박비/일비/식비)
-2026-02-26 14:22:02,712 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제26조 title=(소모품비)
-2026-02-26 14:22:02,712 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제27조 title=(복리후생비)
-2026-02-26 14:22:02,712 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제28조 title=(교육훈련비)
-2026-02-26 14:22:02,712 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제29조 title=(통신비/구독료/SaaS 이용료)
-2026-02-26 14:22:02,712 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제30조 title=(지급수수료)
-2026-02-26 14:22:02,712 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제31조 title=(외주용역비)
-2026-02-26 14:22:02,712 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제32조 title=(광고선전비)
-2026-02-26 14:22:02,712 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제33조 title=(차량유지비)
-2026-02-26 14:22:02,713 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제34조 title=(회의비)
-2026-02-26 14:22:02,713 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제35조 title=(도서인쇄비/구독료)
-2026-02-26 14:22:02,713 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제36조 title=(자산취득 및 자산성 지출)
-2026-02-26 14:22:02,713 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제37조 title=(선급금/선급비용)
-2026-02-26 14:22:02,713 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제38조 title=(시간대 제약)
-2026-02-26 14:22:02,713 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제39조 title=(주말·공휴일 제약)
-2026-02-26 14:22:02,713 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제40조 title=(금액 및 누적한도 제약)
-2026-02-26 14:22:02,713 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제41조 title=(분할결제/분할전표 금지)
-2026-02-26 14:22:02,713 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제42조 title=(금지 업종 및 고위험 업종)
-2026-02-26 14:22:02,713 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제43조 title=(거래처 검증 및 계좌 변경 통제)
-2026-02-26 14:22:02,713 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제44조 title=(비용과 자산의 구분)
-2026-02-26 14:22:02,713 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제45조 title=(귀속기간 및 선급비용)
-2026-02-26 14:22:02,713 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제46조 title=(세무 증빙 및 세액 검토)
-2026-02-26 14:22:02,713 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제47조 title=(마감 후 수정전표)
-2026-02-26 14:22:02,713 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제48조 title=(외화 거래 및 환율 기준)
-2026-02-26 14:22:02,713 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제49조 title=(Agent AI 운영 원칙)
-2026-02-26 14:22:02,713 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제50조 title=(판정 등급)
-2026-02-26 14:22:02,713 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제51조 title=(판정 근거 및 로그)
-2026-02-26 14:22:02,713 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제52조 title=(Override 통제)
-2026-02-26 14:22:02,714 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제53조 title=(오탐·미탐 관리 및 룰 개선)
-2026-02-26 14:22:02,714 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제54조 title=(모델/룰 버전 관리)
-2026-02-26 14:22:02,714 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제55조 title=(예외 처리 원칙)
-2026-02-26 14:22:02,714 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제56조 title=(예외 사유 유형)
-2026-02-26 14:22:02,714 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제57조 title=(예외 승인 절차)
-2026-02-26 14:22:02,714 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제58조 title=(위반 유형)
-2026-02-26 14:22:02,714 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제59조 title=(조치 수준)
-2026-02-26 14:22:02,714 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제60조 title=(감사 추적 및 자료 보관)
-2026-02-26 14:22:02,714 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제61조 title=(정기 보고)
-2026-02-26 14:22:02,714 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제1조 title=(시행일)
-2026-02-26 14:22:02,714 - core.analysis.rag - INFO - hierarchical_chunk: 조 인식 article=제2조 title=(경과조치)
-2026-02-26 14:22:02,714 - core.analysis.rag - INFO - hierarchical_chunk: 완료 chunks=77 sample regulation_article=None regulation_clause=None violation_clause=
-2026-02-26 14:22:04,802 - core.analysis.rag - INFO - RAG quality_gate result: doc_id=26 input=77 final=64 errors=[] article_coverage=1.0 noise_rate=0.0 duplicate_rate=0.0 short_chunk_rate=0.1688 removed_heading_only=13 removed_duplicates=None missing_required=[]
-2026-02-26 14:22:07,876 - api.routes.aura_rag - INFO - RAG vectorize chunks ready: doc_id=26 num_chunks=64 save_url_set=True (BE expects response keys: rag_document_id, total_chunks|batches, batches_sent, batch_size)
-2026-02-26 14:22:08,939 - api.routes.aura_rag - INFO - RAG vectorize response (save_url used): rag_document_id=26 total_chunks=64 batches_sent=3 batch_size=30 keys=['rag_document_id', 'total_chunks', 'batches_sent', 'batch_size', 'quality_report'] quality_report_summary={'article_coverage': 1.0, 'noise_rate': 0.0, 'duplicate_rate': 0.0, 'short_chunk_rate': 0.1688, 'errors': []}
-INFO:     127.0.0.1:58154 - "POST /aura/rag/documents/26/vectorize HTTP/1.1" 200 OK
-2026-02-26 14:22:09,297 - api.middleware - INFO - [271e15e5-fd3e-479c-a2bd-656b91ceb414] POST /aura/rag/documents/26/vectorize - Status: 200 - Duration: 7.722s
+
+우선순위 A (정확도 직결)
+1. Policy/Regulation MCP
+    * 규정 원문, 버전, 시행일, 폐기일, 예외조항을 표준 API로 제공
+    * 분석 시점 기준 규정만 조회해서 “시점 오판” 제거
+2. Business Calendar MCP
+    * 국가 공휴일 + 사내 휴무 + 부서별 캘린더 조회
+    * isHoliday를 BE 힌트에 의존하지 않고 에이전트가 독립 검증
+3. Master Data MCP
+    * MCC, 계정과목, 비용코드, vendor risk, 권한 체계 조회
+    * 코드값 해석 오류/하드코딩 제거
+4. RAG Index MCP
+* 문서 활성버전, 인덱스 버전, 청크 품질상태를 조회
+* “왜 0건인지”를 검색 엔진이 아니라 운영 메타까지 포함해 진단
+우선순위 B (행동지능/Agentic 강화) 5. Case Context MCP
+* SAP 전표 헤더/아이템, 히스토리, 유사 케이스를 표준 툴로 호출
+* get_case fallback 남발 없이 필요한 데이터만 단계적으로 수집
+1. Evidence Verification MCP
+    * 결론 문장별 citation 검증(조항 존재/문장 매핑)을 별도 툴로 강제
+    * 환각 결론을 파이프라인 끝단에서 차단
+2. Action Simulation MCP
+* 결제차단/역분개/추가소명요청을 “시뮬레이션 모드”로 먼저 실행
+* 운영 리스크 없이 정책 효과 테스트 가능
+우선순위 C (엔터프라이즈 운영성) 8. Audit Ledger MCP
+* reasoning 요약, 사용 tool, 입력/출력 해시를 append-only로 적재
+* 감사 대응, 사후분석, 책임추적 강화
+1. Evaluation MCP
+    * 골든셋 리플레이, hit@k, citation 정합률, 보류율 자동 산출
+    * 배포 전/후 품질 게이트 자동화
+2. Access Control MCP
+* 툴별 권한(tenant, role, purpose)과 데이터 마스킹 정책 중앙화
+* 멀티테넌트 누수/과다조회 차단
+도입 원칙(중요)
+1. 읽기 툴과 쓰기 툴을 분리하고, 쓰기는 Human 승인 게이트 필수
+2. MCP 응답은 모두 version, effective_from/to, source 포함
+3. tool timeout/실패 시 표준 강등응답(판정보류)으로 일관 처리
+4. “근거 없는 결론 금지”를 MCP 검증 툴에서 기계적으로 enforce
+
+
+
+
+
+Phase 1 (정확도 기반)
+1. Policy/Regulation MCP
+    * Aura: 규정조회 툴 어댑터, 시점판정 로직
+    * BE: 규정 버전/시행일 API
+    * KPI: 잘못된 조항 인용률 감소, RAG 0건률 감소
+2. Business Calendar MCP
+    * Aura: 휴일 독립검증 체인
+    * BE/외부: 공휴일/사내휴무 데이터 소스
+    * KPI: 휴일 분류 정확도, HOLIDAY_USAGE 오탐률 감소
+3. Master Data MCP
+    * Aura: 코드값 해석 툴 호출
+    * BE: MCC/계정/권한 마스터 API
+    * KPI: 코드 해석 오류율 감소
+4. RAG Index MCP
+* Aura: 인덱스 상태 진단 분기
+* BE: active version/quality 상태 API
+* KPI: “원인 미상 RAG 실패” 비율 감소
+Phase 2 (검증/행동 지능) 5. Case Context MCP
+* Aura: 단계별 데이터 수집(필요 시만 호출)
+* BE: 전표/히스토리/유사사례 API
+* KPI: INPUT_PARTIAL 비율 감소
+1. Evidence Verification MCP
+    * Aura: 문장-인용 강제검증
+    * BE(선택): 검증 결과 저장
+    * KPI: SENTENCE_CITATION_MISSING 비율 감소
+2. Action Simulation MCP
+* Aura: 조치 시뮬레이션 플로우
+* BE: 결제차단/역분개 시뮬레이션 API
+* KPI: 조치 추천 신뢰도, 잘못된 자동조치 0
+Phase 3 (운영/거버넌스) 8. Audit Ledger MCP
+* Aura: 실행해시/근거요약 적재
+* BE/인프라: append-only 저장소
+* KPI: 감사추적 완결성(누락 0)
+1. Evaluation MCP
+    * Aura: 리플레이/평가 실행
+    * CI/BE: 배포게이트 및 결과 저장
+    * KPI: gate 통과율, 회귀 탐지율
+2. Access Control MCP
+* Aura: 툴 호출 전 권한컨텍스트 전달
+* BE/인증: tool-level RBAC/ABAC
+* KPI: 권한 위반 호출 0, 테넌트 누수 0
+난이도/의존도
+1. Phase 1: 중~상, BE 의존 중간
+2. Phase 2: 상, BE 의존 큼
+3. Phase 3: 상~최상, BE+FE+CI 의존 큼
+Aura 단독으로 먼저 가능한 시작점
+1. Evidence Verification MCP 프로토타입
+2. Evaluation MCP 로컬 실행 확장
+3. RAG Index 진단 어댑터(임시 API/모의 응답 기반)
+
+
+
+
+
+
+
+---
+
+## MCP 도입 최종 로드맵 (확정안, 2026-02-26)
+
+### 목적
+- Aura 분석 정확도와 재현성을 엔터프라이즈 기준으로 끌어올리기 위해, LLM 추론과 사실판정(Fact/Rule)을 분리한다.
+- MCP는 "정확도 자체"가 아니라 "데이터/툴 접근 표준화" 역할로 도입한다.
+
+### 핵심 원칙
+1. 판정 책임 분리: BE 정책엔진(결정론) = 위반/비위반 판정, Aura LLM = 설명/요약/예외 해석.
+2. Payload-first: analysis-runs payload를 1차 신뢰소스로 사용, 누락 시에만 MCP/Tool fallback 호출.
+3. 근거 강제: 문장별 citation_id 없는 결론 문장 금지.
+4. 보수적 강등: RAG_ZERO, EVIDENCE_MISSING, POLICY_CONFLICT 발생 시 확정 위반 금지.
+5. 추적 가능성: 모든 결과는 quality_gate_codes + sentence_citation_map + score_breakdown으로 남긴다.
+
+### Phase 1 (P0) - Fact/Rule 정합성 고정
+목표: 환각/임의문장 제거, 근거 없는 위반 결론 차단
+- Policy/Regulation MCP(읽기)
+  - 규정 조항, version, effective_from/to 조회 표준화
+- Business Calendar MCP(읽기)
+  - isHoliday 판단 근거를 표준 소스에서 조회(주말/휴무/법정공휴일)
+- Master Data MCP(읽기)
+  - mcc, expenseType, hrStatus 정규화/의미어 해석
+- KPI
+  - citation 누락률 감소
+  - RAG 0건 이후 확정위반 출력 0건
+  - HOLIDAY_USAGE 오탐률 감소
+
+### Phase 2 (P1) - 증거 검증/시계열 강화
+목표: "그럴듯한" 문장 대신 "검증된" 문장만 통과
+- Case Context MCP(읽기)
+  - window_10m_txn_count, 24h/30d 맥락, 유사케이스 통계
+- Evidence Verification MCP(검증툴)
+  - citation_id ↔ article 매핑 검증, 불일치 시 POLICY_CONFLICT
+- RAG/Policy 충돌 재평가 루프
+  - 재검색 1회 + 보류 코드화
+- KPI
+  - SENTENCE_CITATION_MISSING 감소
+  - POLICY_CONFLICT 탐지 후 보류 전환율 100%
+  - 동일입력 동일결론율(재현성) 상승
+
+### Phase 3 (P2) - 거버넌스/운영 게이트
+목표: 운영 중 품질 하락 자동 차단
+- Evaluation MCP/Replay Gate
+  - 골든셋 리플레이 점수 저장 및 배포 게이트 연동
+- Audit Ledger
+  - append-only 감사추적(결정 코드/근거 해시/모델버전)
+- Access Control
+  - tool-level RBAC/ABAC + tenant 경계 검증
+- KPI
+  - DEFAULT 유입률 안정화
+  - 품질게이트 미달 배포 0건
+  - 테넌트 누수 0건
+
+### 구현 순서 (실행 권장)
+1. Phase 1 먼저 완성 (가장 큰 정확도 개선 구간)
+2. Phase 2로 근거 검증과 시계열 맥락 보강
+3. Phase 3로 운영 게이트 자동화
+
+### 비고
+- FE는 신규 화면 없이 기존 화면에 문장-근거/게이트코드 위치만 확정해도 충분함.
+- MCP는 점진 도입(기존 tool 계약 유지 + MCP 어댑터 병행)으로 리스크 최소화.
+
+---
+
+## 타 시스템 전달 프롬프트 파일
+- BE 전달용: `docs/handoff/MCP_BACKEND_PROMPT_FINAL.md`
+- FE 전달용: `docs/handoff/MCP_FRONTEND_PROMPT_FINAL.md`
+
