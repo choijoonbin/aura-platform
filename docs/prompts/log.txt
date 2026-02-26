@@ -1,1 +1,35 @@
-요
+더 “Agentic”하게 만들려면
+LangGraph 기반 감사 에이전트 도입
+analyze → gather → plan → execute → reflect 등 단계를 그래프로 정의
+stream_events로 단계·도구 호출을 실시간 스트리밍
+도구 선택 자율화
+LLM이 “get_case / search_documents / get_open_items 중 무엇을 언제 쓸지” 결정
+현재처럼 파이프라인에서 항상 같은 순서로 호출하는 방식에서 벗어나기
+점진적 도입
+기존 analysis_pipeline 유지 + 새 LangGraph 에이전트 경로 추가
+케이스 유형·리스크에 따라 파이프라인 vs 에이전트 선택
+LLM이 판단·도구 선택을 주도하는 Agentic AI” 수준
+ ReAct / LangGraph 스타일의 자율 에이전트
+
+ -> 현재 에이전트는 테스트 및 다른 용도로 일단 두고  새로 에이전트를 만들어서 완성 후에 스위칭 하는 방향으로 갈지도 전략을 고민해주세요
+
+
+ 스트림 무가공 원칙 명문화
+스트림은 오직 실제 이벤트만: 노드 진입/종료, 툴 호출 요청/응답, 근거 채택/폐기, 게이트 판정
+금지: 임의 요약 문장, 근거 없는 “진행중” 멘트
+Agent Event Schema 고정
+event_type, node, tool, input_hash, output_ref, evidence_ids, decision_code, timestamp
+이 스키마로 SSE/agent_activity_log/감사로그를 통일
+도구 선택 자율화 + 결정론 가드레일
+LLM이 tool 선택은 하되,
+확정 위반은 정책엔진/근거검증 통과 시에만 허용 (현재 게이트 유지)
+Shadow Run 필수
+동일 케이스를 기존 analysis_pipeline과 신규 LangGraph가 동시에 실행
+비교 KPI: 정확도, citation 연결률, 보류율, 지연시간, 재현성
+스위칭 기준(Go/No-Go) 사전 합의
+예: 2주 연속 citation 누락률, 오탐률, RAG_ZERO 후 확정위반 0건 통과 시 전환
+권장 전략:
+
+지금 에이전트는 유지
+finance_aura_v2_agentic 신규 경로로 완성
+검증 끝나면 feature flag로 점진 스위칭

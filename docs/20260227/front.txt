@@ -1,0 +1,113 @@
+# FE 작업 요청서 (자율형 에이전트 전환용)
+
+목표
+- 기존 화면 구조를 유지하면서, 신규 자율형 에이전트의 "실제 이벤트"를 투명하게 표시한다.
+- 임의 문장 스트림이 아니라, 시스템 이벤트 중심 스트림으로 전환한다.
+
+원칙
+1) 기존 탭 구조 유지(분석 단계/판단 규정/근거 맵/최종 판단)
+2) 내부 CoT 원문 노출 금지
+3) 이벤트/근거/신뢰신호를 일관된 용어로 표시
+
+---
+
+## 1. 분석 단계 탭 (P0)
+
+1. 스트림 타임라인 데이터 소스 전환
+- 기존 문장 위주 -> 이벤트 위주 렌더링
+- 표시 이벤트 유형:
+  - NODE_START / NODE_END
+  - TOOL_CALL / TOOL_RESULT
+  - EVIDENCE_ADDED / EVIDENCE_REJECTED
+  - GATE_APPLIED
+  - COMPLETED / FAILED
+
+2. 이벤트 카드 표준
+- 필수 표시: 시간, 단계(node), 결과(decisionCode), 요약 메시지
+- 선택 표시: tool명, latency, evidence 개수
+
+3. 중복 메시지 억제
+- 동일 run에서 같은 event_type+node+payload_hash는 1회만 표시
+
+---
+
+## 2. 근거 맵 탭 (P0)
+
+1. 문장별 근거 연결 강화
+- sentence_citation_map에서 citation_ids 없으면 "근거 미연결" 배지
+- grounded=false 문장 하이라이트
+
+2. Citation 목록 개선
+- C1/C2 클릭 시 해당 문장으로 상호 하이라이트
+- citation 메타(문서/장/조/chunk_id) 노출
+
+3. 위반 전표 아이템 유지
+- 유지하되 "근거 사용 여부" 컬럼 추가
+  - USED / REFERENCED / NOT_USED
+
+---
+
+## 3. 판단 규정 탭 (P0)
+
+1. regulationCheckpoints 우선
+- regulationCheckpoints가 빈 배열이면 logicCheckpoints fallback 유지
+
+2. 상태 문구
+- COMPLIANT: 준수
+- VIOLATION: 위반
+- NEEDS_REVIEW: 재검토 필요
+
+3. 충돌 방지
+- 최종판단이 보류면 준수로만 보이지 않게 NEEDS_REVIEW 반영
+
+---
+
+## 4. 분석 신뢰도 UI (P0)
+
+1. 배지 문구
+- "정책 신호 충돌" -> "판단 근거 상충" 유지
+
+2. KPI 도움말
+- ! 아이콘 툴팁 유지
+- 분자/분모/계산식 표시
+
+3. 빈값 정책
+- '-' 사용 금지
+- "데이터 없음" 통일
+
+---
+
+## 5. Shadow Run 비교 UI (P1)
+
+1. 운영자 전용 비교 패널
+- legacy vs agentic_shadow 결과 나란히 표시
+- 항목:
+  - verdict 일치 여부
+  - score 차이
+  - citation 연결률 차이
+  - 보류 코드 차이
+
+2. 라벨
+- agent_mode 배지 표시
+  - Legacy
+  - Shadow
+  - Primary
+
+---
+
+## 6. 완료 기준
+
+P0 완료 기준
+- 이벤트 중심 스트림 표시
+- 근거맵 하이라이트 정상 동작
+- 규정 탭 fallback 규칙 적용
+- 신뢰도 UI 문구/툴팁/빈값 정책 반영
+
+증적 요청
+- 화면 캡처 4장
+  - 분석 단계 이벤트 스트림
+  - 근거 맵(문장-근거 하이라이트)
+  - 판단 규정 탭(NEEDS_REVIEW 케이스)
+  - 신뢰도 UI(툴팁/데이터 없음)
+- API 응답 샘플 1건 (case analysis)
+

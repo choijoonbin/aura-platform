@@ -163,7 +163,12 @@ def _tool_path(base: str, path: str) -> str:
     return f"{base}/api/synapse/mcp/tools{path}"
 
 
-async def _post_tool(path: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+async def _post_tool(
+    path: str,
+    payload: dict[str, Any],
+    *,
+    extra_headers: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
     base = _tool_base_url()
     if not base:
         return None
@@ -171,6 +176,8 @@ async def _post_tool(path: str, payload: dict[str, Any]) -> dict[str, Any] | Non
     timeout = float(getattr(settings, "mcp_timeout_seconds", 5.0))
     url = _tool_path(base, path)
     headers = get_synapse_headers()
+    if extra_headers:
+        headers.update({k: v for k, v in extra_headers.items() if v not in (None, "")})
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json=payload, headers=headers)
@@ -222,24 +229,62 @@ async def resolve_fact_context(
         )
         return base_ctx
     data = payload if isinstance(payload, dict) else {}
+    request_ctx = get_request_context() or {}
+    default_headers = get_synapse_headers()
+    tenant_id = str(default_headers.get("X-Tenant-ID") or request_ctx.get("tenant_id") or "").strip() or None
+    user_id = (
+        _extract(data, "userId", "user_id", "requestedByUserId", "requested_by_user_id")
+        or default_headers.get("X-User-ID")
+        or request_ctx.get("user_id")
+    )
+    user_id_str = str(user_id).strip() if user_id is not None else None
+    trace_id = str(default_headers.get("X-Trace-ID") or request_ctx.get("trace_id") or "").strip() or None
+    effective_headers = {}
+    if tenant_id:
+        effective_headers["X-Tenant-ID"] = tenant_id
+    if user_id_str:
+        effective_headers["X-User-ID"] = user_id_str
+    if trace_id:
+        effective_headers["X-Trace-ID"] = trace_id
+    missing_header_fields: list[str] = []
+    if not tenant_id:
+        missing_header_fields.append("X-Tenant-ID")
+    if not user_id_str:
+        missing_header_fields.append("X-User-ID")
+    if missing_header_fields:
+        quality = dict(base_ctx.get("quality") or {})
+        existing = [str(v) for v in quality.get("missing_fields", []) if str(v).strip()]
+        merged = list(dict.fromkeys(existing + missing_header_fields))
+        quality.update({
+            "input_partial": True,
+            "missing_fields": merged,
+            "mcp_enriched": False,
+            "mcp_calls_ok": 0,
+            "mcp_skipped": True,
+            "mcp_skip_reason": "MCP_HEADERS_MISSING",
+            "mcp_missing_headers": missing_header_fields,
+        })
+        out = dict(base_ctx)
+        out["mode"] = mode
+        out["quality"] = quality
+        logger.warning(
+            "mcp_adapter skip remote calls stage=%s case_id=%s reason=MCP_HEADERS_MISSING missing_headers=%s",
+            stage,
+            case_id,
+            missing_header_fields,
+        )
+        return out
     facts = dict(base_ctx.get("facts") or {})
     enriched_calls = 0
 
     # 1) business-calendar
     occurred_at = facts.get("occurredAt")
-    user_id_raw = _extract(data, "userId", "user_id")
-    if user_id_raw is None:
-        try:
-            user_id_raw = (get_request_context() or {}).get("user_id")
-        except Exception:
-            user_id_raw = None
-    user_id = None
-    try:
-        user_id = int(user_id_raw) if user_id_raw is not None else None
-    except (TypeError, ValueError):
-        user_id = None
-    if occurred_at and user_id is not None:
-        cal = await _post_tool("/business-calendar", {"occurredAt": occurred_at, "userId": user_id})
+    if occurred_at and user_id_str:
+        cal = await _post_tool(
+            "/business-calendar",
+            {"occurredAt": occurred_at, "userId": user_id_str},
+            extra_headers=effective_headers,
+        )
         if isinstance(cal, dict):
             enriched_calls += 1
             facts["isHoliday"] = cal.get("isHoliday", facts.get("isHoliday"))
@@ -255,7 +300,7 @@ async def resolve_fact_context(
         "hrStatus": facts.get("hrStatusRaw") or facts.get("hrStatus"),
     }
     if any(v not in (None, "") for v in md_req.values()):
-        md = await _post_tool("/master-data", md_req)
+        md = await _post_tool("/master-data", md_req, extra_headers=effective_headers)
         if isinstance(md, dict):
             enriched_calls += 1
             mcc = md.get("mcc") if isinstance(md.get("mcc"), dict) else {}
@@ -280,7 +325,11 @@ async def resolve_fact_context(
     elif isinstance(rel, str) and rel.strip():
         article_hint = rel.strip()
     if article_hint:
-        pol = await _post_tool("/policy-regulation", {"article": article_hint, "effectiveAt": occurred_at})
+        pol = await _post_tool(
+            "/policy-regulation",
+            {"article": article_hint, "effectiveAt": occurred_at},
+            extra_headers=effective_headers,
+        )
         if isinstance(pol, dict):
             enriched_calls += 1
             facts["policyItemCount"] = pol.get("count")
@@ -299,7 +348,7 @@ async def resolve_fact_context(
         case_id,
         mode,
         occurred_at,
-        user_id,
+        user_id_str,
         enriched_calls,
     )
     return out

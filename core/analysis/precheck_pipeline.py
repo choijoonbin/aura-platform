@@ -375,9 +375,20 @@ def _align_case_type_with_signals(case_type: str, scoring: dict[str, Any]) -> tu
     evidence_map = scoring.get("evidence_map") if isinstance(scoring.get("evidence_map"), dict) else {}
     decision_codes = set(scoring.get("decision_codes") or [])
     is_holiday = bool(evidence_map.get("isHoliday"))
+    holiday_type = str(evidence_map.get("holidayType") or "").strip().upper()
+    hr_status = str(evidence_map.get("hrStatus") or "").strip().upper()
+    hr_status_raw = str(evidence_map.get("hrStatusRaw") or "").strip().upper()
     budget_exceeded = evidence_map.get("budgetExceeded") is True
     aligned = case_type
     reason = None
+    holiday_signal = is_holiday or holiday_type in {"WEEKEND", "PUBLIC_HOLIDAY"}
+    leave_signal = (hr_status_raw or hr_status) in {"OFF", "VACATION", "LEAVE"}
+
+    # 휴일/휴무 신호가 강한데 일반 위험으로 분류되면 HOLIDAY_USAGE를 우선 적용
+    if holiday_signal and leave_signal and case_type in {"PRIVATE_USE_RISK", "UNUSUAL_PATTERN", "LIMIT_EXCEED"}:
+        aligned = "HOLIDAY_USAGE"
+        reason = "holiday_leave_signal_promoted_to_holiday_usage"
+
     if case_type == "HOLIDAY_USAGE" and not is_holiday:
         if budget_exceeded:
             aligned = "LIMIT_EXCEED"

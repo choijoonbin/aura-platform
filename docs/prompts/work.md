@@ -253,10 +253,22 @@ yarn tsc --noEmit 통과
 
 ### 진행 중(테스트/튜닝)
 - [ ] MCP 실제 호출 경로 실증(로그 기준 `mode=hybrid`, `calls_ok>0` 확인)
+  - 2026-02-26 반영: `X-Tenant-ID`/`X-User-ID` 누락 시 원격 MCP 호출을 스킵하고 `MCP_HEADERS_MISSING` 사유를 quality에 기록하도록 Aura 보강 완료
 - [ ] 휴일 케이스 1건 확정 통과
   - 기준: caseType/score_breakdown/reasonText/근거매핑 정합
+  - 2026-02-26 반영: 휴일+휴무 신호(`isHoliday=true` + `LEAVE/OFF/VACATION`)일 때 `PRIVATE_USE_RISK/UNUSUAL_PATTERN/LIMIT_EXCEED`를 `HOLIDAY_USAGE`로 승격하는 정렬 규칙 추가
 - [ ] RAG 조항 정합(위험유형-조항 불일치 감소) 재검증
 - [ ] SSE/agent_activity_log 문구 품질 회귀 확인
+
+### Aura 즉시 반영(2026-02-26)
+- MCP adapter
+  - `X-User-ID` 누락 상태에서 `/master-data`를 호출해 400이 발생하던 흐름 제거
+  - 헤더 누락 시 `mcp_skip_reason=MCP_HEADERS_MISSING`, `mcp_missing_headers=[...]` 로그/quality로 추적 가능
+  - `business-calendar.userId`는 int 강제 캐스팅을 제거하고 문자열 그대로 전달
+- Screening
+  - 휴일/휴무 조합 케이스에서 `HOLIDAY_USAGE` 우선 승격 규칙 강화
+- Analysis
+  - Aura finalResult에 `analysis_quality_signals` 직접 포함(표시명 배열), BE fallback 의존도 축소
 
 ### 잔여 작업 (Phase 2 / P1)
 - [ ] `Case Context MCP` 연계 강화

@@ -989,6 +989,39 @@ def _build_quality_gate_codes(
     return codes
 
 
+_QUALITY_SIGNAL_LABELS: dict[str, str] = {
+    "OK": "정상",
+    "EVIDENCE_MISSING": "근거 데이터 없음",
+    "RAG_ZERO": "규정 검색 실패",
+    "INPUT_PARTIAL": "입력 데이터 일부 누락",
+    "POLICY_CONFLICT": "판단 근거 상충",
+    "POLICY_CONFLICT_DETECTED": "판단 근거 상충",
+    "POLICY_REEVAL_APPLIED": "정책 재검토 적용",
+    "RISK_ARTICLE_MISMATCH": "위험유형-조항 불일치",
+    "SENTENCE_CITATION_MISSING": "문장 근거 미연결",
+    "EVIDENCE_COVERAGE_LOW": "근거 커버리지 낮음",
+    "FACT_CONTEXT_PARTIAL": "사실 컨텍스트 일부 누락",
+}
+
+
+def _build_analysis_quality_signals(quality_gate_codes: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    for code in quality_gate_codes or []:
+        c = str(code or "").strip().upper()
+        if c:
+            cleaned.append(c)
+    if not cleaned:
+        cleaned = ["OK"]
+    # 다른 신호가 있으면 OK 제거
+    if any(c != "OK" for c in cleaned):
+        cleaned = [c for c in cleaned if c != "OK"]
+    deduped = list(dict.fromkeys(cleaned))
+    signals: list[str] = []
+    for code in deduped:
+        signals.append(_QUALITY_SIGNAL_LABELS.get(code, f"기타({code})"))
+    return signals or ["정상"]
+
+
 def _build_compact_rag_query(case_data: dict[str, Any] | None, risk_type: str | None) -> str:
     """
     RAG 0건 재시도용 간결 쿼리(노이즈 토큰 제거).
@@ -2569,7 +2602,9 @@ async def run_audit_analysis(
             recommended_action=recommended_action,
             item_no=item_no,
         )
+        analysis_quality_signals = _build_analysis_quality_signals(quality_gate_codes)
         decision_reason["quality_gate_codes"] = quality_gate_codes
+        decision_reason["analysis_quality_signals"] = analysis_quality_signals
         decision_reason["analysis_score_breakdown"] = analysis_score_breakdown
         decision_reason["score_breakdown"] = analysis_score_breakdown
         decision_reason["sentence_citation_map"] = sentence_citation_map
@@ -2628,6 +2663,7 @@ async def run_audit_analysis(
             "citations": citations,
             "decision_reason": decision_reason,
             "quality_gate_codes": quality_gate_codes,
+            "analysis_quality_signals": analysis_quality_signals,
             "evidence_map_json": decision_reason.get("evidence_map_json", []),
             "doc_id": doc_id_ref,
             "item_id": item_id_ref,

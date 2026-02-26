@@ -1,0 +1,117 @@
+# dwp-mcp-server 작업 요청서 (자율형 에이전트 전환용)
+
+목표
+- 기존 경로는 유지하고, 신규 자율형 감사 에이전트(Shadow Run)에서 필요한 MCP 능력을 확장한다.
+- 확정 위반 판정은 항상 검증 가능한 Fact/Policy 결과를 근거로 하게 한다.
+
+원칙
+1) 기존 API/스키마 호환성 깨지지 않게 유지
+2) 신규 기능은 MCP tool 확장으로 제공
+3) 모든 응답은 traceId/decisionCode/evidenceRef 포함
+
+---
+
+## 1. 필수 MCP Tool 확장 (우선순위 P0)
+
+1. case-context tool
+- Endpoint: POST /api/mcp/tools/case-context
+- 입력: caseId, docKey, occurredAt, userId, mccCode, amount
+- 출력(필수):
+  - window_10m_txn_count
+  - window_24h_txn_count
+  - window_30d_txn_count
+  - avg_amount_30d
+  - peer_group_percentile
+  - decisionCode (OK|INPUT_PARTIAL|NO_DATA)
+  - evidenceRefs[]
+
+2. evidence-verification tool
+- Endpoint: POST /api/mcp/tools/evidence-verification
+- 입력: riskType, sentenceCitationMap, citations, regulationVersion
+- 출력(필수):
+  - verified (bool)
+  - mismatchReasons[]
+  - groundedCoverageRatio
+  - ungroundedSentences[]
+  - decisionCode (OK|MISMATCH|PARTIAL)
+
+3. rag-conflict-diagnostics tool 강화
+- Endpoint: POST /api/mcp/tools/rag-conflict-diagnostics
+- 출력(필수):
+  - conflictType (RISK_ARTICLE_MISMATCH|POLICY_CONFLICT|NONE)
+  - recommendedAction (REEVAL|HOLD|PASS)
+  - decisionCode
+
+---
+
+## 2. 공통 응답 계약 (모든 MCP tool)
+
+필수 공통 필드
+- traceId
+- success
+- decisionCode
+- errorCode (실패 시)
+- errorMessage (실패 시)
+- latencyMs
+- data (tool payload)
+
+요청 헤더 필수
+- X-Tenant-ID
+- X-User-ID
+- X-Trace-Id
+
+누락 시
+- HTTP 400
+- errorCode: INPUT_PARTIAL
+- errorMessage: "X-User-ID 헤더가 필요합니다." 등 명확 문구
+
+---
+
+## 3. 로그 표준화 (운영/감사용)
+
+요청 로그
+- MCP request summary: tool=... traceId=... tenantId=... userId=... caseId=... runId=...
+
+응답 로그
+- MCP response summary: tool=... traceId=... success=... decisionCode=... latency_ms=...
+
+검증 로그
+- MCP verification summary: traceId=... groundedCoverageRatio=... mismatchCount=...
+
+---
+
+## 4. Shadow Run 지원
+
+목표
+- 동일 케이스를 기존 분석 경로 + 신규 자율형 경로에서 동시에 실행하고 결과 비교
+
+요청
+1) run metadata 저장 필드
+- agent_mode (legacy|agentic_shadow|agentic_primary)
+- trace_id
+- model_version
+- policy_version
+
+2) 비교용 집계 API (최소)
+- GET /api/mcp/metrics/shadow-compare?from=&to=
+- 반환:
+  - total
+  - sameVerdictRate
+  - citationMismatchRate
+  - ragZeroRate
+  - holdRate
+
+---
+
+## 5. 완료 기준 (Go/No-Go)
+
+P0 완료 기준
+- 신규 tool 3종 정상 응답 + 표준 로그 확인
+- 헤더 누락/입력 누락 에러 표준화
+- Shadow compare API 1차 제공
+
+증적 요청
+- 각 tool 성공/실패 로그 1건씩
+- API 샘플 요청/응답 JSON
+- Shadow compare 샘플 응답 1건
+
