@@ -12,7 +12,7 @@
 4. RAG Index MCP
 * 문서 활성버전, 인덱스 버전, 청크 품질상태를 조회
 * “왜 0건인지”를 검색 엔진이 아니라 운영 메타까지 포함해 진단
-우선순위 B (행동지능/Agentic 강화) 5. Case Context MCP
+우선순위 B (행동지능/Agentic 강화)5. Case Context MCP
 * SAP 전표 헤더/아이템, 히스토리, 유사 케이스를 표준 툴로 호출
 * get_case fallback 남발 없이 필요한 데이터만 단계적으로 수집
 1. Evidence Verification MCP
@@ -21,7 +21,7 @@
 2. Action Simulation MCP
 * 결제차단/역분개/추가소명요청을 “시뮬레이션 모드”로 먼저 실행
 * 운영 리스크 없이 정책 효과 테스트 가능
-우선순위 C (엔터프라이즈 운영성) 8. Audit Ledger MCP
+우선순위 C (엔터프라이즈 운영성)8. Audit Ledger MCP
 * reasoning 요약, 사용 tool, 입력/출력 해시를 append-only로 적재
 * 감사 대응, 사후분석, 책임추적 강화
 1. Evaluation MCP
@@ -57,7 +57,7 @@ Phase 1 (정확도 기반)
 * Aura: 인덱스 상태 진단 분기
 * BE: active version/quality 상태 API
 * KPI: “원인 미상 RAG 실패” 비율 감소
-Phase 2 (검증/행동 지능) 5. Case Context MCP
+Phase 2 (검증/행동 지능)5. Case Context MCP
 * Aura: 단계별 데이터 수집(필요 시만 호출)
 * BE: 전표/히스토리/유사사례 API
 * KPI: INPUT_PARTIAL 비율 감소
@@ -69,7 +69,7 @@ Phase 2 (검증/행동 지능) 5. Case Context MCP
 * Aura: 조치 시뮬레이션 플로우
 * BE: 결제차단/역분개 시뮬레이션 API
 * KPI: 조치 추천 신뢰도, 잘못된 자동조치 0
-Phase 3 (운영/거버넌스) 8. Audit Ledger MCP
+Phase 3 (운영/거버넌스)8. Audit Ledger MCP
 * Aura: 실행해시/근거요약 적재
 * BE/인프라: append-only 저장소
 * KPI: 감사추적 완결성(누락 0)
@@ -164,4 +164,129 @@ Aura 단독으로 먼저 가능한 시작점
 ## 타 시스템 전달 프롬프트 파일
 - BE 전달용: `docs/handoff/MCP_BACKEND_PROMPT_FINAL.md`
 - FE 전달용: `docs/handoff/MCP_FRONTEND_PROMPT_FINAL.md`
+- BE 1차 점검 보완: `docs/handoff/MCP_BACKEND_REVIEW_FIXES_P0_P1.md`
 
+
+---
+
+## PM 진행 현황 (MCP 고도화 트랙)
+
+기준일: 2026-02-26
+용어 통일: 기존 "대시보드"는 모두 "통합워크벤치"로 표기
+
+### 1) 시스템별 상태
+- AURA: 착수/진행 중
+  - 완료: MCP adapter(payload-first) 도입
+  - 완료: MCP hybrid 모드(dwp-mcp-server 실호출) 연동
+  - 완료: Screening/Analysis에 fact context 연결
+  - 완료: FACT_CONTEXT_PARTIAL 보수 게이트 추가
+  - 완료: MCP fact context 운영 로그 추가
+- BE: 착수(팀 진행 중)
+  - 대기: Policy/Calendar/Master MCP Tool 계약 확정
+  - 대기: sentence-citation 검증 API/저장 연동
+- FE: 착수(팀 진행 중)
+  - 대기: 기존 화면에 quality_gate_codes/sentence_citation_map/score_breakdown 위치 확정
+
+### 2) Aura 이번 반영 상세
+- 파일: `core/analysis/mcp_adapter.py`
+  - payload 기반 표준 fact context 생성기 추가 (mode: payload_only)
+- 파일: `core/config.py`
+  - `mcp_enabled`, `mcp_mode`, `mcp_require_fact_for_violation` 추가
+- 파일: `core/analysis/precheck_pipeline.py`
+  - screening context에 `mcp_fact_context` 포함
+  - 단건/배치 로그에 mcp missing 필드 요약 추가
+- 파일: `core/analysis/analysis_pipeline.py`
+  - 입력 정규화 직후 mcp fact context 생성/누락필드 보강
+  - evidence에 `MCP_FACT_CONTEXT` 추가
+  - `FACT_CONTEXT_PARTIAL` 품질게이트(확정 위반 보류) 추가
+
+### 3) 크로스시스템 의존성(진행 필요)
+1. BE에서 MCP Tool 응답 표준 필드 확정
+2. FE에서 보류코드/문장근거 맵 렌더 위치 반영
+3. 통합 E2E 테스트(동일 케이스 3회 재현성 + RAG_ZERO/POLICY_CONFLICT)
+
+### 4) 다음 점검 포인트
+- AURA 로그 확인 키워드
+  - `audit_analysis mcp_fact_context`
+  - `FACT_CONTEXT_PARTIAL`
+- 기대 동작
+  - 필수 fact 누락 시 확정 위반 문구 대신 보류 문구
+  - sentence-citation, quality_gate_codes와 충돌 없이 함께 내려감
+
+#프론트 작업결과 1차
+변경 사항
+
+통합 워크벤치(workbench-new) 반영
+quality_gate_codes 배지 표시(우선순위 정렬 포함)
+sentence_citation_map 표 렌더링 + 근거 미연결 경고
+citation 클릭 시 하단 citation 목록으로 점프/하이라이트
+score_breakdown(정책/근거/최종점수, 보류 사유) 카드 추가
+POLICY_CONFLICT/RAG_ZERO 시 보류 안내 문구 표시
+운영자 디버그 섹션 추가(raw quality_report, quality_gate_codes, mismatch_reasons, sentence_citation_map)
+파일: workbench-new-case-panel.tsx, index.tsx
+기존 관리자 분석 탭 디버그 확장
+운영자 디버그에 raw quality_report, mismatch_reasons 추가
+파일: case-analysis-tab.tsx
+검증
+
+yarn eslint 통과
+yarn tsc --noEmit 통과
+즉, “질문 없으면 바로 진행”으로 요청하신 작업은 이번에 반영 완료되었습니다.
+
+---
+
+## MCP PM 트래커 (최신, 2026-02-26)
+
+### 현재 단계 요약
+- 현재 상태: `Phase 1 (P0)` 구현 완료, 통합 테스트 진행 중
+- 현재 우선순위: 휴일(HOLIDAY_USAGE) 케이스 정확도/근거 정합성 안정화
+- 진행 원칙: `Payload-first` 유지 + MCP fact/tool 보강 + 보수적 판정보류 게이트
+
+### 완료(확정)
+- [x] Aura MCP adapter 도입 (`payload_only` + `hybrid` 구조)
+- [x] Analysis/Screening에 fact context 연결
+- [x] 사실 컨텍스트 누락 시 보류 게이트(`FACT_CONTEXT_PARTIAL`)
+- [x] 문장-근거 매핑/분석 점수분해/신뢰신호(quality_gate_codes) 출력 강화
+- [x] 스트림 중복 문구 억제 및 문장 표현 보정
+- [x] Screening 점수/심각도 표준 가중치 로직 반영 (CRITICAL 포함)
+- [x] FE/BE 전달 프롬프트 1차 배포 완료
+
+### 진행 중(테스트/튜닝)
+- [ ] MCP 실제 호출 경로 실증(로그 기준 `mode=hybrid`, `calls_ok>0` 확인)
+- [ ] 휴일 케이스 1건 확정 통과
+  - 기준: caseType/score_breakdown/reasonText/근거매핑 정합
+- [ ] RAG 조항 정합(위험유형-조항 불일치 감소) 재검증
+- [ ] SSE/agent_activity_log 문구 품질 회귀 확인
+
+### 잔여 작업 (Phase 2 / P1)
+- [ ] `Case Context MCP` 연계 강화
+  - `window_10m_txn_count`, 24h/30d 맥락, 유사케이스 통계 활용
+- [ ] `Evidence Verification MCP` 본격 적용
+  - citation_id ↔ article 검증툴 강제, 불일치 시 보류 전환 일관화
+- [ ] RAG/Policy 충돌 재평가 루프 표준화
+  - 1회 재검색 + 보류 코드화 + 운영 집계 연동
+
+### 잔여 작업 (Phase 3 / P2)
+- [ ] `Evaluation MCP` / replay gate 운영 연동
+  - 최신 eval-run 기반 배포 게이트(로컬/운영 공통 기준)
+- [ ] `Audit Ledger`(append-only) 정식 적용
+  - 판단 코드, 근거 해시, 모델/프롬프트 버전 추적
+- [ ] `Access Control` 강화
+  - tool-level RBAC/ABAC + tenant 경계 테스트 자동화
+
+### 시스템별 대기/의존
+- AURA
+  - [ ] MCP hybrid 실호출 안정화 로그 검증
+  - [ ] 분석 신뢰 신호 코드/표시명 계약 최종 반영
+- BE
+  - [ ] eval-run/latest 응답키 최종 고정 및 집계 API 정합성 확인
+  - [ ] case_analysis_result 신뢰신호 필드 저장/집계 검증
+- FE
+  - [ ] `평가 데이터 없음` 상태 표기 통일
+  - [ ] 신뢰지표/신뢰신호 용어 반영 및 맵핑키 최종 고정
+
+### 다음 회의/테스트 때 확인할 로그 키워드
+- `mcp_adapter resolved stage=... mode=hybrid ... calls_ok=...`
+- `audit_analysis quality_gate ... codes=[...]`
+- `analysis_pipeline: RAG summary ...`
+- `SENTENCE_CITATION_MAP`

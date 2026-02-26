@@ -50,6 +50,7 @@ from core.analysis.policy_engine import (
     normalize_mcc_code,
     normalize_occurred_at,
 )
+from core.analysis.mcp_adapter import resolve_fact_context
 from core.config import get_settings
 from core.llm import get_llm_client
 from core.observability import incr, start_timer, stop_timer
@@ -110,6 +111,15 @@ CASE_TYPE_DISPLAY_NAME: dict[str, str] = {
     "DEFAULT": "기본 분류",
 }
 
+HR_STATUS_DISPLAY_NAME: dict[str, str] = {
+    "LEAVE": "휴무/휴가",
+    "OFF": "휴무",
+    "VACATION": "휴가",
+    "WORK": "근무",
+    "WORKING": "근무",
+    "BUSINESS_TRIP": "출장",
+}
+
 # BE가 Aura와 다른 코드로 저장한 경우 매핑 (예: DUPLICATE_INVOICE → DUPLICATE_SUSPECT). DEFAULT는 매핑하지 않음.
 BE_CASE_TYPE_TO_SCREENING: dict[str, str] = {
     "DUPLICATE_INVOICE": "DUPLICATE_SUSPECT",
@@ -160,6 +170,26 @@ def _is_agent_stream_insight(content: str | None) -> bool:
     return True
 
 
+_AGENT_STREAM_ALLOWED_STEPS = frozenset({
+    "EVIDENCE_GATHER",
+    "REGULATION_MATCH",
+})
+
+
+def _normalize_agent_stream_text(text: str) -> str:
+    s = re.sub(r"\s+", " ", (text or "").strip().lower())
+    s = re.sub(r"[^\w가-힣\s]", "", s)
+    return s
+
+
+def _token_jaccard_similarity(a: str, b: str) -> float:
+    sa = set(re.findall(r"[가-힣A-Za-z0-9]{2,}", a or ""))
+    sb = set(re.findall(r"[가-힣A-Za-z0-9]{2,}", b or ""))
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
+
+
 def _run_self_verification(
     *,
     reason_text: str,
@@ -188,7 +218,8 @@ def _split_reason_sentences(text: str) -> list[str]:
     src = (text or "").strip()
     if not src:
         return []
-    parts = re.split(r"(?<=[\.\!\?]|다\.)\s+", src)
+    # 종결 어미(다.)가 잘리지 않도록 문장 패턴 매칭으로 분리한다.
+    parts = re.findall(r".+?(?:[.!?]|다\.)(?:\s+|$)|.+$", src)
     out = [p.strip() for p in parts if p and p.strip()]
     return out
 
@@ -196,6 +227,44 @@ def _split_reason_sentences(text: str) -> list[str]:
 def _tokens_for_overlap(text: str) -> set[str]:
     toks = re.findall(r"[가-힣A-Za-z0-9]{2,}", text or "")
     return {t.lower() for t in toks if len(t) >= 2}
+
+
+def _fuzzy_overlap_count(left: set[str], right: set[str]) -> int:
+    if not left or not right:
+        return 0
+    count = 0
+    for a in left:
+        for b in right:
+            if a == b:
+                count += 1
+                break
+            if len(a) >= 2 and len(b) >= 2 and (a.startswith(b) or b.startswith(a)):
+                count += 1
+                break
+    return count
+
+
+def _format_datetime_kor(value: Any, *, with_time: bool = True, include_weekday: bool = False) -> str | None:
+    if value in (None, ""):
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    weekday_ko = ["월", "화", "수", "목", "금", "토", "일"][dt.weekday()]
+    if with_time:
+        return dt.strftime("%Y년 %m월 %d일 %H:%M:%S") + (f" ({weekday_ko})" if include_weekday else "")
+    return dt.strftime("%Y년 %m월 %d일") + (f" ({weekday_ko})" if include_weekday else "")
+
+
+def _format_hr_status_display(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    key = str(value).strip().upper()
+    return HR_STATUS_DISPLAY_NAME.get(key, str(value))
 
 
 def _compute_reason_grounding_coverage(
@@ -289,12 +358,53 @@ def _build_analysis_score_breakdown(
             adjustments.append({"code": code, "effect": "downward_cap_or_hold"})
     if coverage_ratio is not None:
         adjustments.append({"code": "EVIDENCE_COVERAGE", "value": round(float(coverage_ratio), 3)})
+    policy_score = int(round(float(rule_compliance) * 100))
+    evidence_score = int(round(float(coverage_ratio if coverage_ratio is not None else pattern_match) * 100))
+    final_score = int(round(float(output_overall) * 100))
     return {
         "components": weighted,
         "adjustments": adjustments,
         "final_overall": round(float(output_overall), 4),
-        "final_risk_score": int(round(float(output_overall) * 100)),
+        "final_risk_score": final_score,
+        "policy_score": policy_score,
+        "evidence_score": evidence_score,
+        "final_score": final_score,
     }
+
+
+def _is_risk_article_semantically_aligned(
+    *,
+    risk_type: str | None,
+    citations: list[dict[str, Any]],
+) -> bool:
+    ru = str(risk_type or "").strip().upper()
+    if not ru:
+        return True
+    corpus = " ".join(
+        str(c.get("reference") or c.get("title") or c.get("excerpt") or "")
+        for c in (citations or [])
+        if isinstance(c, dict)
+    )
+    corpus_norm = re.sub(r"\s+", "", corpus)
+    if ru == "HOLIDAY_USAGE":
+        if any(k in corpus for k in ("휴일", "주말", "공휴일", "심야", "시간대", "야간")):
+            return True
+        if any(a in corpus_norm for a in ("제38조", "제39조")):
+            return True
+        return False
+    if ru == "LIMIT_EXCEED":
+        if any(k in corpus for k in ("한도", "초과", "금액")):
+            return True
+        if "제40조" in corpus_norm:
+            return True
+        return False
+    if ru == "SPLIT_PAYMENT":
+        if any(k in corpus for k in ("분할결제", "분할전표")):
+            return True
+        if "제41조" in corpus_norm:
+            return True
+        return False
+    return True
 
 
 def _analysis_fewshot_by_risk(risk_type: str | None) -> str:
@@ -374,7 +484,44 @@ def _replace_case_type_codes(text: str) -> str:
     out = text
     for code, name in CASE_TYPE_DISPLAY_NAME.items():
         out = out.replace(code, name)
+    for code, name in HR_STATUS_DISPLAY_NAME.items():
+        out = re.sub(rf"\b{re.escape(code)}\b", name, out)
     return out
+
+
+def _build_hold_reason_with_context(
+    *,
+    case_data: dict[str, Any] | None,
+    risk_type: str | None,
+    hold_reason: str,
+) -> str:
+    """보류 문구에도 케이스 맥락(유형/일자/금액/근태)을 남긴다."""
+    parts: list[str] = []
+    if risk_type:
+        parts.append(f"본 건은 **{_case_type_name(risk_type)}** 신호로 분류되었으나,")
+    occurred = None
+    amount = None
+    hr = None
+    if isinstance(case_data, dict):
+        occurred = case_data.get("occurredAt") or case_data.get("occurred_at")
+        amount = case_data.get("amount")
+        hr = case_data.get("hrStatus") or case_data.get("hr_status")
+    facts: list[str] = []
+    if occurred:
+        occurred_label = _format_datetime_kor(occurred, with_time=True, include_weekday=True) or str(occurred)[:19]
+        facts.append(f"발생 시각 **{occurred_label}**")
+    if amount is not None:
+        try:
+            facts.append(f"금액 **{int(float(amount)):,}원**")
+        except Exception:
+            pass
+    if hr:
+        hr_label = _format_hr_status_display(hr) or str(hr)
+        facts.append(f"근태 **{hr_label}**")
+    if facts:
+        parts.append(", ".join(facts) + " 기준으로")
+    parts.append(hold_reason)
+    return " ".join(parts)
 
 
 def _finalize_reason_text_with_grounding(
@@ -562,7 +709,15 @@ def _build_citations_payload(
     for d in doc_list:
         if not isinstance(d, dict):
             continue
-        raw_title = (d.get("title") or d.get("file_name") or d.get("location") or "").strip()
+        raw_title = (
+            d.get("title")
+            or d.get("file_name")
+            or d.get("location")
+            or d.get("regulation_article")
+            or d.get("regulationArticle")
+            or "내부 규정"
+        )
+        raw_title = str(raw_title).strip()
         title = raw_title
         if ">" in title:
             parts = [p.strip() for p in title.split(">") if p.strip()]
@@ -573,8 +728,24 @@ def _build_citations_payload(
         if not title or re.fullmatch(r"[0-9a-fA-F\-]{24,}", title or ""):
             title = "내부 규정"
         url = (d.get("s3_url") or d.get("url") or "").strip()
+        location = str(d.get("location") or "").strip()
+        article = str(d.get("regulation_article") or d.get("regulationArticle") or "").strip()
+        clause = str(d.get("regulation_clause") or d.get("regulationClause") or "").strip()
+        reference = " ".join([x for x in [article, clause, location] if x]).strip()
+        excerpt = str(d.get("excerpt") or d.get("content") or d.get("chunk_text") or "").strip()
+        if len(excerpt) > 220:
+            excerpt = excerpt[:220]
         cid_seq += 1
-        out.append({"citation_id": f"C{cid_seq}", "title": title, "url": url, "source": "rag"})
+        out.append(
+            {
+                "citation_id": f"C{cid_seq}",
+                "title": title,
+                "url": url,
+                "source": "rag",
+                "reference": reference or title,
+                "excerpt": excerpt,
+            }
+        )
     for c in external_citations:
         if isinstance(c, dict):
             cid_seq += 1
@@ -606,11 +777,19 @@ def _build_sentence_citation_map(
             if _ARTICLE_IN_TEXT_PATTERN.search(sent or "") and _ARTICLE_IN_TEXT_PATTERN.search(ref or ""):
                 matched_ids.append(cid)
                 continue
-            if sent_tokens and len(sent_tokens & ref_tokens) >= 1:
+            token_overlap = len(sent_tokens & ref_tokens) if sent_tokens and ref_tokens else 0
+            if token_overlap < 1:
+                token_overlap = _fuzzy_overlap_count(sent_tokens, ref_tokens)
+            if sent_tokens and token_overlap >= 1:
                 matched_ids.append(cid)
                 continue
             if sent_norm and sent_norm[:12] and sent_norm[:12] in ref_norm:
                 matched_ids.append(cid)
+        # 보수적 연결: 문장이 일반 근거 설명 성격일 때 최소 1개 인용 연결
+        if not matched_ids and citation_rows and any(k in sent for k in ("규정", "조항", "근거", "내부규정")):
+            fallback_cid = str(citation_rows[0].get("citation_id") or "").strip()
+            if fallback_cid:
+                matched_ids.append(fallback_cid)
         rows.append(
             {
                 "sentence_index": idx,
@@ -892,6 +1071,7 @@ async def run_audit_analysis(
         reasoning_history: list[str] = []
         # AGENT_STREAM 중복 송출 방지: 직전에 보낸 content와 100% 동일하면 스킵
         last_agent_stream_content: list[str | None] = [None]
+        recent_agent_stream_norms: list[str] = []
         # ID 매핑: FE Red Glow 등 행/청크 하이라이트용 — thought_pending/AGENT_STREAM/step에 target_buzei, chunk_id, doc_id 누락 없이 포함
         id_mapping: dict[str, Any] = {"target_buzei": None, "chunk_id": None, "doc_id": None}
         if body_evidence and isinstance(body_evidence, dict):
@@ -908,16 +1088,34 @@ async def run_audit_analysis(
         def _with_coords(payload: dict[str, Any]) -> dict[str, Any]:
             return {**_coords_payload(id_mapping), **payload}
 
+        def _should_emit_agent_stream(content: str | None, step_label: str) -> bool:
+            if not _is_agent_stream_insight(content):
+                return False
+            if step_label not in _AGENT_STREAM_ALLOWED_STEPS:
+                return False
+            c = (content or "").strip()
+            if not c:
+                return False
+            if c == last_agent_stream_content[0]:
+                return False
+            c_norm = _normalize_agent_stream_text(c)
+            for prev in recent_agent_stream_norms[-4:]:
+                if _token_jaccard_similarity(c_norm, prev) >= 0.72:
+                    return False
+            recent_agent_stream_norms.append(c_norm)
+            if len(recent_agent_stream_norms) > 8:
+                recent_agent_stream_norms[:] = recent_agent_stream_norms[-8:]
+            return True
+
         # Step1: 입력 정규화 — 진행 상태는 step만. AGENT_STREAM은 인사이트 문장만 발행(플레이스홀더 미발행)
         yield ("thought_pending", _with_coords({"step_label": "INPUT_NORM", "message": THOUGHT_PENDING_MESSAGE, **id_mapping}))
         thought_input_norm = INPUT_NORM_THOUGHT_SHORT
         if thought_input_norm:
             reasoning_history.append(thought_input_norm)
-        if _is_agent_stream_insight(thought_input_norm):
+        if _should_emit_agent_stream(thought_input_norm, "INPUT_NORM"):
             c = (thought_input_norm or "").strip()
-            if c != last_agent_stream_content[0]:
-                last_agent_stream_content[0] = c
-                yield ("AGENT_STREAM", _with_coords({"content": thought_input_norm or "", "step_label": "INPUT_NORM", **id_mapping}))
+            last_agent_stream_content[0] = c
+            yield ("AGENT_STREAM", _with_coords({"content": thought_input_norm or "", "step_label": "INPUT_NORM", **id_mapping}))
         # step.thought_stream은 AGENT_STREAM으로 이미 보냈거나 플레이스홀더이면 None — FE 중복/기술 문구 노출 방지
         yield ("step", _with_coords({**AnalysisStepEvent(
             label="INPUT_NORM",
@@ -976,7 +1174,25 @@ async def run_audit_analysis(
             )
 
         # [추적] payload/get_case 정규화 후 스크리닝 필드 유무
+        mcp_fact_context: dict[str, Any] = await resolve_fact_context(
+            case_data if isinstance(case_data, dict) else {},
+            case_id=case_id,
+            stage="analysis",
+        )
         if isinstance(case_data, dict) and case_data:
+            facts = mcp_fact_context.get("facts") if isinstance(mcp_fact_context.get("facts"), dict) else {}
+            # MCP fact context 값으로 누락 필드만 보강(payload-first 유지)
+            for k in (
+                "occurredAt",
+                "hrStatus",
+                "hrStatusRaw",
+                "mccCode",
+                "mccCodeRaw",
+                "isHoliday",
+                "holidayType",
+            ):
+                if case_data.get(k) is None and facts.get(k) is not None:
+                    case_data[k] = facts.get(k)
             _ct = case_data.get("case_type") or case_data.get("caseType")
             _rt = case_data.get("reasonText") or case_data.get("screening_reason_text")
             _mcc_code = case_data.get("mccCode") or case_data.get("mcc_code")
@@ -992,6 +1208,16 @@ async def run_audit_analysis(
                 _mcc_name,
                 _mcc_article,
                 (_rt[:60] + "…") if _rt and len(_rt) > 60 else (_rt or ""),
+            )
+            logger.info(
+                "audit_analysis mcp_fact_context: case_id=%s mode=%s input_partial=%s missing_fields=%s isHoliday=%s holidayType=%s weekday=%s",
+                case_id,
+                mcp_fact_context.get("mode"),
+                (mcp_fact_context.get("quality") or {}).get("input_partial"),
+                (mcp_fact_context.get("quality") or {}).get("missing_fields"),
+                facts.get("isHoliday"),
+                facts.get("holidayType"),
+                facts.get("weekdayKo"),
             )
             if _mcc_article is None:
                 logger.warning(
@@ -1074,11 +1300,10 @@ async def run_audit_analysis(
         )
         if thought_evidence_gather:
             reasoning_history.append(thought_evidence_gather)
-        if _is_agent_stream_insight(thought_evidence_gather):
+        if _should_emit_agent_stream(thought_evidence_gather, "EVIDENCE_GATHER"):
             c = (thought_evidence_gather or "").strip()
-            if c != last_agent_stream_content[0]:
-                last_agent_stream_content[0] = c
-                yield ("AGENT_STREAM", _with_coords({"content": thought_evidence_gather or "", "step_label": "EVIDENCE_GATHER", **id_mapping}))
+            last_agent_stream_content[0] = c
+            yield ("AGENT_STREAM", _with_coords({"content": thought_evidence_gather or "", "step_label": "EVIDENCE_GATHER", **id_mapping}))
         _step_thought = None if _is_agent_stream_insight(thought_evidence_gather) else (thought_evidence_gather or None)
         yield ("step", _with_coords({**AnalysisStepEvent(
             label="EVIDENCE_GATHER",
@@ -1155,11 +1380,10 @@ async def run_audit_analysis(
         )
         if thought_regulation:
             reasoning_history.append(thought_regulation)
-        if _is_agent_stream_insight(thought_regulation):
+        if _should_emit_agent_stream(thought_regulation, "REGULATION_MATCH"):
             c = (thought_regulation or "").strip()
-            if c != last_agent_stream_content[0]:
-                last_agent_stream_content[0] = c
-                yield ("AGENT_STREAM", _with_coords({"content": thought_regulation or "", "step_label": "REGULATION_MATCH", **id_mapping}))
+            last_agent_stream_content[0] = c
+            yield ("AGENT_STREAM", _with_coords({"content": thought_regulation or "", "step_label": "REGULATION_MATCH", **id_mapping}))
         _step_thought = None if _is_agent_stream_insight(thought_regulation) else (thought_regulation or None)
         yield ("step", _with_coords({**AnalysisStepEvent(
             label="REGULATION_MATCH",
@@ -1651,11 +1875,10 @@ async def run_audit_analysis(
         )
         if evidence_thought:
             reasoning_history.append(evidence_thought)
-        if _is_agent_stream_insight(evidence_thought):
+        if _should_emit_agent_stream(evidence_thought, "EVIDENCE_COLLECTED"):
             c = (evidence_thought or "").strip()
-            if c != last_agent_stream_content[0]:
-                last_agent_stream_content[0] = c
-                yield ("AGENT_STREAM", _with_coords({"content": evidence_thought or "", "step_label": "EVIDENCE_COLLECTED", **id_mapping}))
+            last_agent_stream_content[0] = c
+            yield ("AGENT_STREAM", _with_coords({"content": evidence_thought or "", "step_label": "EVIDENCE_COLLECTED", **id_mapping}))
         _ev_thought = None if _is_agent_stream_insight(evidence_thought) else (evidence_thought or None)
         yield ("evidence", AnalysisEvidenceEvent(type="COLLECTED", items=evidence_items, thought_stream=_ev_thought).model_dump())
         yield ("thought_pending", _with_coords({"step_label": "RULE_SCORING", "message": THOUGHT_PENDING_MESSAGE, **id_mapping}))
@@ -1674,11 +1897,10 @@ async def run_audit_analysis(
         )
         if thought_rule:
             reasoning_history.append(thought_rule)
-        if _is_agent_stream_insight(thought_rule):
+        if _should_emit_agent_stream(thought_rule, "RULE_SCORING"):
             c = (thought_rule or "").strip()
-            if c != last_agent_stream_content[0]:
-                last_agent_stream_content[0] = c
-                yield ("AGENT_STREAM", _with_coords({"content": thought_rule or "", "step_label": "RULE_SCORING", **id_mapping}))
+            last_agent_stream_content[0] = c
+            yield ("AGENT_STREAM", _with_coords({"content": thought_rule or "", "step_label": "RULE_SCORING", **id_mapping}))
         _step_thought = None if _is_agent_stream_insight(thought_rule) else (thought_rule or None)
         yield ("step", _with_coords({**AnalysisStepEvent(
             label="RULE_SCORING",
@@ -1726,11 +1948,10 @@ async def run_audit_analysis(
         )
         if thought_llm:
             reasoning_history.append(thought_llm)
-        if _is_agent_stream_insight(thought_llm):
+        if _should_emit_agent_stream(thought_llm, "LLM_REASONING"):
             c = (thought_llm or "").strip()
-            if c != last_agent_stream_content[0]:
-                last_agent_stream_content[0] = c
-                yield ("AGENT_STREAM", _with_coords({"content": thought_llm or "", "step_label": "LLM_REASONING", **id_mapping}))
+            last_agent_stream_content[0] = c
+            yield ("AGENT_STREAM", _with_coords({"content": thought_llm or "", "step_label": "LLM_REASONING", **id_mapping}))
         _step_thought = None if _is_agent_stream_insight(thought_llm) else (thought_llm or None)
         yield ("step", _with_coords({**AnalysisStepEvent(
             label="LLM_REASONING",
@@ -2122,9 +2343,39 @@ async def run_audit_analysis(
                 "quality_gate_codes": quality_gate_codes,
             }
         )
+        evidence_items.append(
+            {
+                "type": "MCP_FACT_CONTEXT",
+                "source": "mcp_adapter",
+                "mode": mcp_fact_context.get("mode"),
+                "facts": mcp_fact_context.get("facts"),
+                "quality": mcp_fact_context.get("quality"),
+            }
+        )
 
         # 문장별 근거 커버리지 점검: 결론 문장이 근거와 연결되지 않으면 보수적으로 강등
         citations_preview = _build_citations_payload(doc_list, external_citations)
+        # 위험유형-조항 의미 정합성 게이트
+        if not _is_risk_article_semantically_aligned(risk_type=risk_type, citations=citations_preview):
+            if "RISK_ARTICLE_MISMATCH" not in quality_gate_codes:
+                quality_gate_codes.append("RISK_ARTICLE_MISMATCH")
+            logger.info(
+                "audit_analysis risk-article mismatch gate: case_id=%s risk_type=%s citations_preview=%s",
+                case_id,
+                risk_type,
+                len(citations_preview),
+            )
+            reason_text = _build_hold_reason_with_context(
+                case_data=case_data if isinstance(case_data, dict) else None,
+                risk_type=risk_type,
+                hold_reason=(
+                    "현재 인용된 조항의 의미가 위험유형과 충분히 정합하지 않아 확정 판단을 보류합니다. "
+                    "위험유형에 맞는 규정 조항을 재매칭한 뒤 재평가가 필요합니다."
+                ),
+            )
+            output_overall = min(output_overall, 0.45)
+            if risk_level == "HIGH":
+                risk_level = "MEDIUM"
         grounding = _compute_reason_grounding_coverage(
             reason_text=reason_text,
             evidence_items=evidence_items,
@@ -2162,7 +2413,7 @@ async def run_audit_analysis(
             AnalysisEvidenceEvent(
                 type="SENTENCE_CITATION_MAP",
                 items=sentence_citation_map,
-                thought_stream="결론 문장별 인용 근거 매핑을 완료했습니다.",
+                thought_stream="[결론] 문장별 인용 근거 매핑을 완료했습니다.",
             ).model_dump(),
         )
         if ungrounded_claim_count > 0:
@@ -2173,9 +2424,13 @@ async def run_audit_analysis(
                 case_id,
                 ungrounded_claim_count,
             )
-            reason_text = (
-                "일부 핵심 결론 문장이 인용 근거와 직접 연결되지 않아 확정 판단을 보류합니다. "
-                "근거 문장 매핑을 보강한 뒤 재평가가 필요합니다."
+            reason_text = _build_hold_reason_with_context(
+                case_data=case_data if isinstance(case_data, dict) else None,
+                risk_type=risk_type,
+                hold_reason=(
+                    "일부 핵심 결론 문장이 인용 근거와 직접 연결되지 않아 확정 판단을 보류합니다. "
+                    "근거 문장 매핑을 보강한 뒤 재평가가 필요합니다."
+                ),
             )
             output_overall = min(output_overall, 0.4)
             if risk_level == "HIGH":
@@ -2193,12 +2448,37 @@ async def run_audit_analysis(
                 grounding.get("ungrounded_sentences"),
             )
             if _VIOLATION_TEXT_PATTERN.search(reason_text):
-                reason_text = (
-                    "현재 문장별 근거 연결률이 충분하지 않아 위반 확정 판단을 보류합니다. "
-                    "추가 규정 근거 확인 후 재평가가 필요합니다."
+                reason_text = _build_hold_reason_with_context(
+                    case_data=case_data if isinstance(case_data, dict) else None,
+                    risk_type=risk_type,
+                    hold_reason=(
+                        "현재 문장별 근거 연결률이 충분하지 않아 위반 확정 판단을 보류합니다. "
+                        "추가 규정 근거 확인 후 재평가가 필요합니다."
+                    ),
                 )
                 output_overall = min(output_overall, 0.45)
                 risk_level = "MEDIUM" if risk_level == "HIGH" else risk_level
+
+        # MCP fact context가 불완전한 경우 확정 위반을 보수적으로 제한
+        if bool(get_settings().mcp_require_fact_for_violation):
+            mcp_input_partial = bool((mcp_fact_context.get("quality") or {}).get("input_partial"))
+            if mcp_input_partial and _VIOLATION_TEXT_PATTERN.search(reason_text):
+                if "FACT_CONTEXT_PARTIAL" not in quality_gate_codes:
+                    quality_gate_codes.append("FACT_CONTEXT_PARTIAL")
+                reason_text = _build_hold_reason_with_context(
+                    case_data=case_data if isinstance(case_data, dict) else None,
+                    risk_type=risk_type,
+                    hold_reason=(
+                        "입력 사실 컨텍스트가 일부 누락되어 확정 위반 판단을 보류합니다. "
+                        "필수 필드 보강 후 재분석이 필요합니다."
+                    ),
+                )
+                output_overall = min(output_overall, 0.45)
+                if risk_level == "HIGH":
+                    risk_level = "MEDIUM"
+        # OK와 경고 코드 동시 노출 방지
+        if any(code != "OK" for code in quality_gate_codes):
+            quality_gate_codes = [code for code in quality_gate_codes if code != "OK"]
 
         analysis_score_breakdown = _build_analysis_score_breakdown(
             anomaly_score=anomaly_score,
@@ -2291,6 +2571,7 @@ async def run_audit_analysis(
         )
         decision_reason["quality_gate_codes"] = quality_gate_codes
         decision_reason["analysis_score_breakdown"] = analysis_score_breakdown
+        decision_reason["score_breakdown"] = analysis_score_breakdown
         decision_reason["sentence_citation_map"] = sentence_citation_map
         self_verify = _run_self_verification(
             reason_text=reason_text,
@@ -2333,6 +2614,7 @@ async def run_audit_analysis(
                 "overall": output_overall,
             },
             "analysis_score_breakdown": analysis_score_breakdown,
+            "score_breakdown": analysis_score_breakdown,
             "sentence_citation_map": sentence_citation_map,
             "evidence": evidence_items[:10],
             "ragRefs": evidence_items[:5],

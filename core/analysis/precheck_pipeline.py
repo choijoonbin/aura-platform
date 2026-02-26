@@ -13,6 +13,7 @@ from typing import Any
 
 from core.llm import get_llm_client
 from core.llm.prompts import get_screening_prompt
+from core.analysis.mcp_adapter import build_fact_context, resolve_fact_context
 from core.analysis.policy_engine import normalize_occurred_at
 
 logger = logging.getLogger(__name__)
@@ -38,12 +39,70 @@ CASE_TYPE_DISPLAY_NAME: dict[str, str] = {
     "UNUSUAL_PATTERN": "이상 패턴",
 }
 
-_ALLOWED_SEVERITIES = {"LOW", "MEDIUM", "HIGH"}
-_MCC_RISK_POINTS = {"LOW": 5, "MEDIUM": 15, "HIGH": 25, "UNKNOWN": 8}
+HR_STATUS_DISPLAY_NAME: dict[str, str] = {
+    "LEAVE": "휴무/휴가",
+    "OFF": "휴무",
+    "VACATION": "휴가",
+    "WORK": "근무",
+    "WORKING": "근무",
+    "BUSINESS_TRIP": "출장",
+}
+
+_ALLOWED_SEVERITIES = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
 _FALLBACK_REASONS = {
     "NO_EVIDENCE": "핵심 입력값이 일부 누락되어 보수적으로 분류했습니다.",
     "INPUT_PARTIAL": "핵심 입력값 일부 누락(INPUT_PARTIAL)으로 점수를 보수적으로 조정했습니다.",
 }
+
+
+def _to_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_avg_monthly_amount(voucher: dict[str, Any]) -> float | None:
+    ev = voucher.get("evidence") if isinstance(voucher.get("evidence"), dict) else {}
+    candidates = [
+        voucher.get("avg_monthly_amount"),
+        voucher.get("avgMonthlyAmount"),
+        voucher.get("user_avg_monthly_amount"),
+        (voucher.get("user_expense_stats") or {}).get("avg_monthly_amount") if isinstance(voucher.get("user_expense_stats"), dict) else None,
+        (voucher.get("user_expense_stats") or {}).get("avgMonthlyAmount") if isinstance(voucher.get("user_expense_stats"), dict) else None,
+        (voucher.get("userExpenseStats") or {}).get("avg_monthly_amount") if isinstance(voucher.get("userExpenseStats"), dict) else None,
+        (voucher.get("userExpenseStats") or {}).get("avgMonthlyAmount") if isinstance(voucher.get("userExpenseStats"), dict) else None,
+        ev.get("avg_monthly_amount"),
+        ev.get("avgMonthlyAmount"),
+        (ev.get("user_expense_stats") or {}).get("avg_monthly_amount") if isinstance(ev.get("user_expense_stats"), dict) else None,
+        (ev.get("userExpenseStats") or {}).get("avgMonthlyAmount") if isinstance(ev.get("userExpenseStats"), dict) else None,
+    ]
+    for c in candidates:
+        v = _to_float(c)
+        if v is not None and v >= 0:
+            return v
+    return None
+
+
+def _extract_user_risk_level(voucher: dict[str, Any]) -> str | None:
+    ev = voucher.get("evidence") if isinstance(voucher.get("evidence"), dict) else {}
+    candidates = [
+        voucher.get("userRiskLevel"),
+        voucher.get("user_risk_level"),
+        (voucher.get("user_risk_profile") or {}).get("risk_level") if isinstance(voucher.get("user_risk_profile"), dict) else None,
+        (voucher.get("userRiskProfile") or {}).get("risk_level") if isinstance(voucher.get("userRiskProfile"), dict) else None,
+        (voucher.get("userRiskProfile") or {}).get("riskLevel") if isinstance(voucher.get("userRiskProfile"), dict) else None,
+        ev.get("userRiskLevel"),
+        ev.get("user_risk_level"),
+        (ev.get("user_risk_profile") or {}).get("risk_level") if isinstance(ev.get("user_risk_profile"), dict) else None,
+        (ev.get("userRiskProfile") or {}).get("riskLevel") if isinstance(ev.get("userRiskProfile"), dict) else None,
+    ]
+    for c in candidates:
+        if c is not None and str(c).strip():
+            return str(c).strip().upper()
+    return None
 
 
 def _replace_case_type_codes(text: str) -> str:
@@ -52,7 +111,16 @@ def _replace_case_type_codes(text: str) -> str:
     out = text
     for code, name in CASE_TYPE_DISPLAY_NAME.items():
         out = out.replace(code, name)
+    for code, name in HR_STATUS_DISPLAY_NAME.items():
+        out = re.sub(rf"\b{re.escape(code)}\b", name, out)
     return out
+
+
+def _hr_status_display(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    key = str(value).strip().upper()
+    return HR_STATUS_DISPLAY_NAME.get(key, str(value))
 
 
 def _case_type_name(code: str | None) -> str:
@@ -152,9 +220,11 @@ def _derive_deterministic_signals(voucher: dict[str, Any], case_type: str) -> di
         amount = float(amount_raw) if amount_raw is not None else None
     except (TypeError, ValueError):
         amount = None
-    points = 0
+    points = 0.0
     breakdown: list[dict[str, Any]] = []
     decision_codes: list[str] = []
+    avg_monthly_amount = _extract_avg_monthly_amount(voucher)
+    user_risk_level = _extract_user_risk_level(voucher)
     evidence_map: dict[str, Any] = {
         "occurredAt": occurred,
         "weekday": None,
@@ -169,6 +239,8 @@ def _derive_deterministic_signals(voucher: dict[str, Any], case_type: str) -> di
         "budgetExceededFlag": budget_flag or None,
         "isWeekendAllowed": is_weekend_allowed or None,
         "amount": amount,
+        "avgMonthlyAmount": avg_monthly_amount,
+        "userRiskLevel": user_risk_level,
     }
     if dt:
         weekday_ko = ["월", "화", "수", "목", "금", "토", "일"][dt.weekday()]
@@ -185,46 +257,72 @@ def _derive_deterministic_signals(voucher: dict[str, Any], case_type: str) -> di
     if missing_required:
         decision_codes.append("INPUT_PARTIAL")
         breakdown.append({"code": "INPUT_PARTIAL", "points": 0, "evidence": ",".join(missing_required)})
-    mcc_points = _MCC_RISK_POINTS.get(mcc_risk, _MCC_RISK_POINTS["UNKNOWN"])
-    points += mcc_points
-    breakdown.append({"code": "MCC_RISK", "points": mcc_points, "evidence": mcc_risk})
-    if is_holiday and hr_status == "LEAVE":
+
+    # 표준 가중치 1) 업종 위반
+    if mcc_risk in {"PROHIBITED", "HIGH"}:
+        points += 50
+        decision_codes.append("MCC_PROHIBITED")
+        breakdown.append({"code": "MCC_PROHIBITED", "points": 50, "evidence": f"mccRiskCategory={mcc_risk}"})
+    elif mcc_risk in {"CAUTION", "MEDIUM"}:
+        points += 20
+        decision_codes.append("MCC_CAUTION")
+        breakdown.append({"code": "MCC_CAUTION", "points": 20, "evidence": f"mccRiskCategory={mcc_risk}"})
+    else:
+        breakdown.append({"code": "MCC_NORMAL_OR_UNKNOWN", "points": 0, "evidence": f"mccRiskCategory={mcc_risk}"})
+
+    # 표준 가중치 2) 근태 모순
+    hr_for_rule = hr_status_raw or hr_status
+    if hr_for_rule in {"VACATION", "OFF", "LEAVE"}:
         points += 30
-        decision_codes.append("HOLIDAY_LEAVE")
-        breakdown.append({"code": "HOLIDAY_LEAVE", "points": 30, "evidence": f"isHoliday={is_holiday},hrStatus={hr_status}"})
-    if is_holiday and is_weekend_allowed == "N":
-        points += 15
-        decision_codes.append("WEEKEND_NOT_ALLOWED")
-        breakdown.append({"code": "WEEKEND_NOT_ALLOWED", "points": 15, "evidence": f"isHoliday={is_holiday},isWeekendAllowed={is_weekend_allowed}"})
-    if budget_exceeded is True or budget_flag == "Y":
-        points += 15
-        decision_codes.append("BUDGET_EXCEEDED")
-        breakdown.append({"code": "BUDGET_EXCEEDED", "points": 15, "evidence": f"budgetExceeded={budget_exceeded},flag={budget_flag}"})
-    if dt and (dt.hour >= 22 or dt.hour < 6):
+        decision_codes.append("HR_CONFLICT")
+        breakdown.append({"code": "HR_CONFLICT", "points": 30, "evidence": f"hrStatus={hr_status},hrStatusRaw={hr_status_raw}"})
+
+    # 보강 규칙: 휴일+휴무 조합
+    if is_holiday and hr_status == "LEAVE":
         points += 10
+        decision_codes.append("HOLIDAY_LEAVE")
+        breakdown.append({"code": "HOLIDAY_LEAVE", "points": 10, "evidence": f"isHoliday={is_holiday},hrStatus={hr_status}"})
+    if is_holiday and is_weekend_allowed == "N":
+        points += 10
+        decision_codes.append("WEEKEND_NOT_ALLOWED")
+        breakdown.append({"code": "WEEKEND_NOT_ALLOWED", "points": 10, "evidence": f"isHoliday={is_holiday},isWeekendAllowed={is_weekend_allowed}"})
+
+    # 표준 가중치 3) 예산 초과
+    if budget_exceeded is True or budget_flag == "Y":
+        points += 10
+        decision_codes.append("BUDGET_EXCEEDED")
+        breakdown.append({"code": "BUDGET_EXCEEDED", "points": 10, "evidence": f"budgetExceeded={budget_exceeded},flag={budget_flag}"})
+
+    # 표준 가중치 4) 패턴 이탈 (단건 >= 월평균 3배)
+    if amount is not None and avg_monthly_amount is not None and avg_monthly_amount > 0:
+        ratio = amount / avg_monthly_amount
+        if ratio >= 3.0:
+            points += 10
+            decision_codes.append("PATTERN_DEVIATION")
+            breakdown.append(
+                {"code": "PATTERN_DEVIATION", "points": 10, "evidence": f"amount={amount},avg_monthly_amount={avg_monthly_amount},ratio={ratio:.2f}"}
+            )
+
+    # 보강(비치명): 심야 사용
+    if dt and (dt.hour >= 22 or dt.hour < 6):
+        points += 5
         decision_codes.append("NIGHT_TIME")
-        breakdown.append({"code": "NIGHT_TIME", "points": 10, "evidence": f"hour={dt.hour}"})
-    if amount is not None:
-        if amount >= 1_000_000:
-            points += 20
-            decision_codes.append("HIGH_AMOUNT")
-            breakdown.append({"code": "HIGH_AMOUNT", "points": 20, "evidence": f"amount={amount}"})
-        elif amount >= 300_000:
-            points += 12
-            decision_codes.append("MID_HIGH_AMOUNT")
-            breakdown.append({"code": "MID_HIGH_AMOUNT", "points": 12, "evidence": f"amount={amount}"})
-        elif amount >= 100_000:
-            points += 6
-            decision_codes.append("MID_AMOUNT")
-            breakdown.append({"code": "MID_AMOUNT", "points": 6, "evidence": f"amount={amount}"})
-    if case_type == "HOLIDAY_USAGE":
-        points += 8
-        breakdown.append({"code": "CASE_TYPE_HOLIDAY_USAGE", "points": 8, "evidence": "llm_case_type"})
-    elif case_type == "LIMIT_EXCEED":
-        points += 8
-        breakdown.append({"code": "CASE_TYPE_LIMIT_EXCEED", "points": 8, "evidence": "llm_case_type"})
+        breakdown.append({"code": "NIGHT_TIME", "points": 5, "evidence": f"hour={dt.hour}"})
+
+    # 상태 보정 5) 상습 위반자 가중치
+    if user_risk_level == "HIGH":
+        before = points
+        points = points * 1.2
+        decision_codes.append("USER_RISK_HIGH_MULTIPLIER")
+        breakdown.append({"code": "USER_RISK_HIGH_MULTIPLIER", "points": round(points - before, 2), "evidence": "userRiskLevel=HIGH,multiplier=1.2"})
+
     score = max(0, min(100, int(round(points))))
-    if score >= 70:
+    is_prohibited = mcc_risk in {"PROHIBITED", "HIGH"}
+    is_leave_or_vacation = hr_for_rule in {"VACATION", "OFF", "LEAVE"}
+    is_duplicate_case = case_type == "DUPLICATE_SUSPECT"
+    if score >= 90 or (is_prohibited and is_leave_or_vacation and is_duplicate_case):
+        severity = "CRITICAL"
+    elif score >= 70:
         severity = "HIGH"
     elif score >= 40:
         severity = "MEDIUM"
@@ -318,7 +416,8 @@ def _deterministic_holiday_reason(voucher: dict[str, Any]) -> str | None:
         or ((voucher.get("evidence") or {}).get("hrStatus") if isinstance(voucher.get("evidence"), dict) else None)
         or "UNKNOWN"
     )
-    return f"{dt.date().isoformat()}는 {weekday_ko}이며, 근태 상태({hr_status})와 결합해 휴일 사용 위험으로 분류함."
+    hr_label = _hr_status_display(hr_status) or str(hr_status)
+    return f"{dt.date().isoformat()}는 {weekday_ko}이며, 근태 상태({hr_label})와 결합해 휴일 사용 위험으로 분류함."
 
 
 def _apply_reasontext_policy(result: dict[str, Any], voucher: dict[str, Any]) -> dict[str, Any]:
@@ -352,7 +451,7 @@ SCREENING_SYSTEM_DEFAULT = """[Role]
 [Output — JSON만 출력. score는 정수 0~100]
 {
   "caseType": "아래 6종 중 하나",
-  "severity": "LOW|MEDIUM|HIGH",
+  "severity": "LOW|MEDIUM|HIGH|CRITICAL",
   "score": 0~100,
   "reasonText": "한국어 한 문장",
   "reasoningProcess": "판단 근거",
@@ -365,6 +464,20 @@ SCREENING_SYSTEM_DEFAULT = """[Role]
 HOLIDAY_USAGE, DUPLICATE_SUSPECT, SPLIT_PAYMENT, PRIVATE_USE_RISK, LIMIT_EXCEED, UNUSUAL_PATTERN
 
 [판단] [금액+시각+업종] 결합. 제공된 증거 강도에 따라 가장 적합한 유형 1개만 선택.
+
+[위험 점수(Score) 산출 기준 가이드]
+- 기본 점수 0점.
+- 업종 위반: mccRiskCategory가 PROHIBITED/HIGH이면 +50, CAUTION/MEDIUM이면 +20.
+- 근태 모순: hrStatusRaw/hrStatus가 VACATION/OFF/LEAVE이면 +30.
+- 예산 초과: budgetExceeded=true 또는 budgetExceededFlag=Y이면 +10.
+- 패턴 이탈: amount >= avgMonthlyAmount*3 이면 +10.
+- 상습 위반자: userRiskLevel=HIGH이면 최종 점수 *1.2.
+
+[위험 등급(Severity) 결정]
+- CRITICAL: score >= 90 또는 (금지업종 + 휴가/휴무 + 중복 의심 조합)
+- HIGH: 70~89
+- MEDIUM: 40~69
+- LOW: 0~39
 
 [reasonText] 전문 감사관 톤. 핵심 수치·키워드는 **굵게**. 입력에 없는 패턴(예: 10분 내 N회)은 생성 금지."""
 
@@ -451,6 +564,18 @@ def _voucher_to_context(voucher: dict[str, Any]) -> str:
     parts.append(
         "runtime_enrichment: "
         + json.dumps(runtime_enrichment, ensure_ascii=False)
+    )
+    mcp_ctx = build_fact_context(voucher, stage="screening")
+    parts.append(
+        "mcp_fact_context: "
+        + json.dumps(
+            {
+                "mode": mcp_ctx.get("mode"),
+                "facts": mcp_ctx.get("facts", {}),
+                "quality": mcp_ctx.get("quality", {}),
+            },
+            ensure_ascii=False,
+        )
     )
     risk = voucher.get("case_type") or voucher.get("caseType") or ev.get("case_type") or ev.get("caseType")
     if risk:
@@ -617,18 +742,21 @@ async def run_screen(voucher: dict[str, Any], case_id: str = "") -> dict[str, An
     Returns:
         { "caseType", "severity", "reasonText", "score", "caseId"? }
     """
+    mcp_ctx = await resolve_fact_context(voucher, case_id=case_id or None, stage="screening")
     context = _voucher_to_context(voucher)
     has_occurred = bool(voucher.get("occurredAt") or voucher.get("occurred_at") or (voucher.get("evidence") or {}).get("occurredAt"))
     has_hr_status = bool(voucher.get("hrStatus") or voucher.get("hr_status") or (voucher.get("evidence") or {}).get("hrStatus"))
     has_mcc = bool(voucher.get("mccCode") or voucher.get("mcc_code") or (voucher.get("evidence") or {}).get("mccCode"))
     logger.info(
-        "Screening input (단건): case_id=%s has_occurredAt=%s has_hrStatus=%s has_mcc=%s mccCode=%s mccName=%s voucher_keys=%s context_preview=%s",
+        "Screening input (단건): case_id=%s has_occurredAt=%s has_hrStatus=%s has_mcc=%s mccCode=%s mccName=%s mcp_mode=%s mcp_missing=%s voucher_keys=%s context_preview=%s",
         case_id or "(n/a)",
         has_occurred,
         has_hr_status,
         has_mcc,
         voucher.get("mccCode") or voucher.get("mcc_code") or (voucher.get("evidence") or {}).get("mccCode"),
         voucher.get("mccName") or voucher.get("mcc_name") or (voucher.get("evidence") or {}).get("mccName"),
+        mcp_ctx.get("mode"),
+        (mcp_ctx.get("quality") or {}).get("missing_fields"),
         list(voucher.keys()),
         context.replace("\n", " | ")[:250] + ("..." if len(context) > 250 else ""),
     )
@@ -710,6 +838,14 @@ async def run_screen_batch(
         return []
     case_ids = case_ids or []
     # 단일 LLM 호출: N건을 한 번에 넘기고 JSON 배열 요청
+    mcp_batch = [
+        await resolve_fact_context(
+            v,
+            case_id=(case_ids[i] if case_ids and i < len(case_ids) else None),
+            stage="screening",
+        )
+        for i, v in enumerate(vouchers)
+    ]
     contexts = [_voucher_to_context(v) for v in vouchers]
     numbered = "\n\n".join(f"[전표 {i+1}]\n{ctx}" for i, ctx in enumerate(contexts))
 
@@ -724,11 +860,12 @@ async def run_screen_batch(
     ctx_has_mcc = sum(1 for v in vouchers if v.get("mccCode") or v.get("mcc_code"))
     ctx_has_budget = sum(1 for v in vouchers if v.get("budgetExceeded") is not None or v.get("budget_exceeded") is not None)
     logger.info(
-        "Screening batch context summary: vouchers_with_occurredAt=%d vouchers_with_hrStatus=%d vouchers_with_mcc=%d vouchers_with_budgetExceeded=%d (of n=%d)",
+        "Screening batch context summary: vouchers_with_occurredAt=%d vouchers_with_hrStatus=%d vouchers_with_mcc=%d vouchers_with_budgetExceeded=%d mcp_input_partial=%d (of n=%d)",
         ctx_has_occurred,
         ctx_has_hr,
         ctx_has_mcc,
         ctx_has_budget,
+        sum(1 for c in mcp_batch if bool((c.get("quality") or {}).get("input_partial"))),
         len(vouchers),
     )
     user_prompt = f"""[전표 {len(vouchers)}건 — 순서 유지 필수]
@@ -818,12 +955,12 @@ def pick_briefing_priority(
 ) -> tuple[int | None, str | None]:
     """
     배치 결과에서 '가장 주목해야 할' 케이스 1건을 선정.
-    - 규칙: score 최대 → 동점이면 severity HIGH > MEDIUM > LOW → 동점이면 첫 번째 인덱스.
+    - 규칙: score 최대 → 동점이면 severity CRITICAL > HIGH > MEDIUM > LOW → 동점이면 첫 번째 인덱스.
     - Returns: (priority_index, priority_case_id) 또는 (None, None).
     """
     if not results:
         return (None, None)
-    severity_order = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}
+    severity_order = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
 
     def key(i: int) -> tuple[int, int]:
         r = results[i]

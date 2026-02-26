@@ -5,13 +5,43 @@ OpenAI / Azure OpenAI 클라이언트를 관리하고 LangChain과의 통합을 
 Streaming 지원을 포함하여 React 프론트엔드로 실시간 응답을 전송할 수 있습니다.
 """
 
+import logging
 from functools import lru_cache
 from typing import Any, AsyncGenerator
+
+logger = logging.getLogger(__name__)
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage
 
 from core.config import settings
+
+
+class _LoggingChatModelWrapper:
+    """LangChain BaseChatModel 래퍼. ainvoke/invoke/astream 호출 시 사용 모델 로깅."""
+
+    def __init__(self, wrapped: BaseChatModel, model_name: str) -> None:
+        self._wrapped = wrapped
+        self._model_name = model_name
+
+    def _log_invoke(self) -> None:
+        logger.info("LLM invoke: model=%s (실제 호출 모델)", self._model_name)
+
+    async def ainvoke(self, *args: Any, **kwargs: Any) -> Any:
+        self._log_invoke()
+        return await self._wrapped.ainvoke(*args, **kwargs)
+
+    def invoke(self, *args: Any, **kwargs: Any) -> Any:
+        self._log_invoke()
+        return self._wrapped.invoke(*args, **kwargs)
+
+    async def astream(self, *args: Any, **kwargs: Any) -> Any:
+        self._log_invoke()
+        async for chunk in self._wrapped.astream(*args, **kwargs):
+            yield chunk
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._wrapped, name)
 
 
 def _create_chat_model(model: str | None = None, **kwargs: Any) -> BaseChatModel:
@@ -90,12 +120,13 @@ class LLMClient:
             ChatOpenAI 인스턴스
         """
         if self._client is None:
-            self._client = _create_chat_model(
+            raw = _create_chat_model(
                 model=self.model,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
                 **self.extra_kwargs,
             )
+            self._client = _LoggingChatModelWrapper(raw, model_name=str(self.model))
         return self._client
     
     async def ainvoke(
@@ -116,6 +147,7 @@ class LLMClient:
         if isinstance(messages, str):
             messages = [{"role": "user", "content": messages}]
         
+        logger.info("LLM ainvoke: model=%s (실제 호출 모델)", self.model)
         response = await self.client.ainvoke(messages, **kwargs)
         return response.content
     
@@ -137,6 +169,7 @@ class LLMClient:
         if isinstance(messages, str):
             messages = [{"role": "user", "content": messages}]
         
+        logger.info("LLM invoke: model=%s (실제 호출 모델)", self.model)
         response = self.client.invoke(messages, **kwargs)
         return response.content
     
@@ -166,6 +199,7 @@ class LLMClient:
         if isinstance(messages, str):
             messages = [{"role": "user", "content": messages}]
         
+        logger.info("LLM astream: model=%s (실제 호출 모델)", self.model)
         async for chunk in self.client.astream(messages, **kwargs):
             if hasattr(chunk, "content") and chunk.content:
                 yield chunk.content

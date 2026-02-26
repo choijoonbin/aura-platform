@@ -123,6 +123,29 @@ class Settings(BaseSettings):
         default=True,
         description="RAG 0건 시 동일 run에서 doc_ids 필터를 1회 해제해 원인 진단 로그를 남김(결과 반영 없음, 로그 전용).",
     )
+    # MCP adapter (Aura-side) - 단계적 전환용
+    mcp_enabled: bool = Field(
+        default=True,
+        description="Aura MCP adapter 활성화 여부. false면 기존 payload-only 로직만 사용.",
+    )
+    mcp_mode: str = Field(
+        default="payload_only",
+        description="MCP 동작 모드(payload_only | hybrid | remote). 현재 payload_only/hybrid 사용.",
+    )
+    mcp_base_url: str | None = Field(
+        default=None,
+        description="MCP tool 서버 base URL. 예: http://localhost:8086 또는 http://localhost:8080/api/synapse",
+    )
+    mcp_timeout_seconds: float = Field(
+        default=5.0,
+        ge=0.5,
+        le=30.0,
+        description="MCP tool HTTP timeout(초).",
+    )
+    mcp_require_fact_for_violation: bool = Field(
+        default=True,
+        description="사실(Fact) 컨텍스트가 부족하면 확정 위반 문구를 제한하는 보수 게이트.",
+    )
     rag_quality_gate_enabled: bool = Field(
         default=True,
         description="RAG 청킹 품질 게이트 활성화(메타 필수값/노이즈 제거/중복 제거/검증 리포트).",
