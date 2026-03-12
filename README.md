@@ -335,16 +335,20 @@ uvicorn main:app --host 0.0.0.0 --port 9000 --workers 4
 
 ```bash
 # 토큰 생성
-TOKEN=$(python3 - <<'PY'
+TOKEN=$(.venv/bin/python - <<'PY'
 from core.security.auth import create_token
-print(create_token(user_id="local-test", tenant_id="1"))
+print(create_token(user_id='local-test', tenant_id='1'))
 PY
 )
 
 # Mermaid 텍스트 조회
 curl -s -H "Authorization: Bearer $TOKEN" \
-  "http://127.0.0.1:9000/agents/finance/graph?format=mermaid"
-```
+  "http://127.0.0.1:9000/agents/finance/graph?format=mermaid" \
+| python3 -c "import sys,json,pathlib; j=json.load(sys.stdin); pathlib.Path('docs/20260227/finance_agent_graph.mmd').write_text(j.get('graph',''),encoding='utf-8')"
+
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:9000/agents/finance/graph?format=png" \
+| python3 -c "import sys,json,base64,pathlib; j=json.load(sys.stdin); pathlib.Path('docs/20260227/finance_agent_graph.png').write_bytes(base64.b64decode(j['graph']))"
 
 현재 플로우:
 

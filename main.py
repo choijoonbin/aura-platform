@@ -29,25 +29,39 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 async def lifespan(app: FastAPI):
     """
     애플리케이션 라이프사이클 관리
-    
-    시작 시: Redis 연결 초기화
+
+    시작 시: Redis 연결 초기화 + RAG Score 재청킹 워커 시작
     종료 시: Redis 연결 정리
     """
+    import asyncio
+
     # Startup
     logger.info(f"Starting {settings.app_name} v{settings.app_version}")
     logger.info(f"Environment: {settings.app_env}")
-    
+
     # Redis 연결 초기화
     try:
-        redis_store = await get_redis_store()
+        await get_redis_store()
         logger.info("Redis connection established")
     except Exception as e:
         logger.error(f"Failed to connect to Redis: {e}")
-    
+
+    # RAG Score 기반 재청킹 워커 시작 (진짜 피드백 루프)
+    worker_task = None
+    if getattr(settings, "rag_score_tracking_enabled", True):
+        try:
+            from api.routes.aura_rag import _score_based_reindex_worker
+            worker_task = asyncio.ensure_future(_score_based_reindex_worker())
+            logger.info("RAG score_reindex_worker: 백그라운드 시작")
+        except Exception as e:
+            logger.warning(f"RAG score_reindex_worker 시작 실패 (non-critical): {e}")
+
     yield
-    
+
     # Shutdown
     logger.info("Shutting down application")
+    if worker_task and not worker_task.done():
+        worker_task.cancel()
     await cleanup_redis()
 
 

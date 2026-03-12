@@ -76,6 +76,68 @@ router = APIRouter(prefix="/aura/rag", tags=["aura-rag"])
 
 
 # =============================================================================
+# RAG Score 기반 재청킹 워커 — 진짜 피드백 루프 (Phase 3 P2)
+# =============================================================================
+
+async def _score_based_reindex_worker() -> None:
+    """
+    백그라운드 무한 루프 워커.
+    rag:reindex_queue에서 태스크를 꺼내 v2 재청킹 실행.
+    앱 스타트업에서 asyncio.ensure_future로 시작됨.
+    """
+    from core.analysis.rag_score_tracker import (
+        pop_reindex_task,
+        mark_reindex_in_progress,
+        mark_reindex_done,
+    )
+    logger.info("RAG score_reindex_worker: 시작")
+    while True:
+        try:
+            settings = get_settings()
+            poll_sec = int(getattr(settings, "rag_score_worker_poll_seconds", 30))
+            task = pop_reindex_task()
+            if task is None:
+                await asyncio.sleep(poll_sec)
+                continue
+
+            doc_id = task.get("doc_id", "")
+            file_path = task.get("file_path", "")
+            doc_type = task.get("doc_type", "HIERARCHICAL")
+            avg_score = task.get("avg_score", 0.0)
+            reason = task.get("reason", "")
+
+            logger.info(
+                "RAG score_reindex_worker: 태스크 수신 doc_id=%s avg_score=%s reason='%s'",
+                doc_id, avg_score, reason,
+            )
+            if not file_path or not Path(file_path).exists():
+                logger.warning(
+                    "RAG score_reindex_worker: 파일 없음 doc_id=%s path=%s",
+                    doc_id, file_path,
+                )
+                continue
+
+            mark_reindex_in_progress(doc_id)
+            save_url = getattr(settings, "backend_rag_chunks_save_url", None) or None
+            batch_size = int(getattr(settings, "rag_chunk_batch_size", 30))
+
+            await _background_reindex(
+                file_path=file_path,
+                doc_id=doc_id,
+                metadata={},
+                doc_type=doc_type,
+                save_url=save_url,
+                batch_size=batch_size,
+                trigger_reason=f"score_based: {reason}",
+            )
+            mark_reindex_done(doc_id)
+
+        except Exception as e:
+            logger.error("RAG score_reindex_worker: 예외 (%s)", e, exc_info=True)
+            await asyncio.sleep(10)
+
+
+# =============================================================================
 # RAG 자동 재청킹 (Auto Reindex) — Phase 3 P2
 # =============================================================================
 
@@ -662,3 +724,57 @@ async def rag_reindex(
         doc_id, len(chunks), quality_report.get("article_coverage"),
     )
     return response
+
+
+# =============================================================================
+# RAG Score 통계 모니터링
+# =============================================================================
+
+@router.get(
+    "/score-stats/{doc_id}",
+    summary="문서별 RAG 검색 score 통계 조회",
+    description=(
+        "doc_id의 누적 유사도 점수 통계를 반환합니다. "
+        "avg_score가 임계값 미만이면 재청킹 대기 큐에 적재됩니다."
+    ),
+    tags=["aura-rag"],
+)
+async def rag_score_stats(
+    doc_id: str = FPath(..., description="조회할 rag_document_id"),
+) -> JSONResponse:
+    try:
+        from core.analysis.rag_score_tracker import get_score_stats, get_queue_length
+        stats = get_score_stats(doc_id)
+        if stats is None:
+            return JSONResponse(
+                status_code=404,
+                content={"error": f"score stats not found for doc_id={doc_id}"},
+            )
+        settings = get_settings()
+        stats["threshold"] = float(getattr(settings, "rag_score_avg_threshold", 0.65))
+        stats["min_searches_required"] = int(getattr(settings, "rag_score_min_searches_before_reindex", 5))
+        stats["reindex_queue_length"] = get_queue_length()
+        return JSONResponse(status_code=200, content=stats)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@router.get(
+    "/score-stats",
+    summary="RAG 재청킹 대기 큐 길이 조회",
+    description="현재 score 기반 재청킹 대기 중인 문서 수를 반환합니다.",
+    tags=["aura-rag"],
+)
+async def rag_reindex_queue_status() -> JSONResponse:
+    try:
+        from core.analysis.rag_score_tracker import get_queue_length
+        settings = get_settings()
+        return JSONResponse(status_code=200, content={
+            "reindex_queue_length": get_queue_length(),
+            "score_tracking_enabled": bool(getattr(settings, "rag_score_tracking_enabled", True)),
+            "avg_score_threshold": float(getattr(settings, "rag_score_avg_threshold", 0.65)),
+            "min_searches_required": int(getattr(settings, "rag_score_min_searches_before_reindex", 5)),
+            "worker_poll_seconds": int(getattr(settings, "rag_score_worker_poll_seconds", 30)),
+        })
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})

@@ -96,14 +96,20 @@ def build_fact_context(
     if not holiday_type:
         holiday_type = "WEEKEND" if is_holiday else "NONE"
 
-    missing_fields: list[str] = []
-    for field_name, val in (
+    # 단계별 필수값 정의:
+    # - screening: case_type이 아직 없을 수 있으므로 필수에서 제외
+    # - analysis: 최종 판단 단계라 case_type 포함
+    required_fields = (
         ("occurredAt", occurred_at),
         ("amount", _extract(data, "amount", "totalAmount")),
         ("hrStatus", hr_status),
         ("mccCode", mcc_code),
-        ("case_type", _extract(data, "case_type", "caseType")),
-    ):
+    )
+    if str(stage).strip().lower() != "screening":
+        required_fields = required_fields + (("case_type", _extract(data, "case_type", "caseType")),)
+
+    missing_fields: list[str] = []
+    for field_name, val in required_fields:
         if val in (None, ""):
             missing_fields.append(field_name)
 
@@ -308,46 +314,49 @@ async def resolve_fact_context(
             facts["hrStatus"] = cal.get("hrStatus", facts.get("hrStatus"))
             facts["hrStatusRaw"] = cal.get("hrStatusRaw", facts.get("hrStatusRaw"))
 
-    # 2) master-data
-    md_req = {
-        "mccCode": facts.get("mccCodeRaw") or facts.get("mccCode"),
-        "expenseType": facts.get("expenseType"),
-        "hrStatus": facts.get("hrStatusRaw") or facts.get("hrStatus"),
-    }
-    if any(v not in (None, "") for v in md_req.values()):
-        md = await _post_tool("/master-data", md_req, extra_headers=effective_headers)
-        if isinstance(md, dict):
-            enriched_calls += 1
-            mcc = md.get("mcc") if isinstance(md.get("mcc"), dict) else {}
-            exp = md.get("expenseType") if isinstance(md.get("expenseType"), dict) else {}
-            hr = md.get("hrStatus") if isinstance(md.get("hrStatus"), dict) else {}
-            if mcc.get("normalized"):
-                facts["mccCode"] = mcc.get("normalized")
-            if mcc.get("raw"):
-                facts["mccCodeRaw"] = mcc.get("raw")
-            if exp.get("normalizedName"):
-                facts["expenseTypeName"] = exp.get("normalizedName")
-            if hr.get("normalized"):
-                facts["hrStatus"] = hr.get("normalized")
-            if hr.get("raw"):
-                facts["hrStatusRaw"] = hr.get("raw")
+    # screening 단계는 권한/비용 최소화를 위해 calendar만 사용.
+    # master/policy는 analysis 단계에서만 수행.
+    if str(stage).strip().lower() != "screening":
+        # 2) master-data
+        md_req = {
+            "mccCode": facts.get("mccCodeRaw") or facts.get("mccCode"),
+            "expenseType": facts.get("expenseType"),
+            "hrStatus": facts.get("hrStatusRaw") or facts.get("hrStatus"),
+        }
+        if any(v not in (None, "") for v in md_req.values()):
+            md = await _post_tool("/master-data", md_req, extra_headers=effective_headers)
+            if isinstance(md, dict):
+                enriched_calls += 1
+                mcc = md.get("mcc") if isinstance(md.get("mcc"), dict) else {}
+                exp = md.get("expenseType") if isinstance(md.get("expenseType"), dict) else {}
+                hr = md.get("hrStatus") if isinstance(md.get("hrStatus"), dict) else {}
+                if mcc.get("normalized"):
+                    facts["mccCode"] = mcc.get("normalized")
+                if mcc.get("raw"):
+                    facts["mccCodeRaw"] = mcc.get("raw")
+                if exp.get("normalizedName"):
+                    facts["expenseTypeName"] = exp.get("normalizedName")
+                if hr.get("normalized"):
+                    facts["hrStatus"] = hr.get("normalized")
+                if hr.get("raw"):
+                    facts["hrStatusRaw"] = hr.get("raw")
 
-    # 3) policy-regulation (힌트 조항이 있을 때만)
-    rel = facts.get("relatedArticleHint")
-    article_hint = None
-    if isinstance(rel, list) and rel:
-        article_hint = str(rel[0]).strip()
-    elif isinstance(rel, str) and rel.strip():
-        article_hint = rel.strip()
-    if article_hint:
-        pol = await _post_tool(
-            "/policy-regulation",
-            {"article": article_hint, "effectiveAt": occurred_at},
-            extra_headers=effective_headers,
-        )
-        if isinstance(pol, dict):
-            enriched_calls += 1
-            facts["policyItemCount"] = pol.get("count")
+        # 3) policy-regulation (힌트 조항이 있을 때만)
+        rel = facts.get("relatedArticleHint")
+        article_hint = None
+        if isinstance(rel, list) and rel:
+            article_hint = str(rel[0]).strip()
+        elif isinstance(rel, str) and rel.strip():
+            article_hint = rel.strip()
+        if article_hint:
+            pol = await _post_tool(
+                "/policy-regulation",
+                {"article": article_hint, "effectiveAt": occurred_at},
+                extra_headers=effective_headers,
+            )
+            if isinstance(pol, dict):
+                enriched_calls += 1
+                facts["policyItemCount"] = pol.get("count")
 
     out = dict(base_ctx)
     out["mode"] = mode

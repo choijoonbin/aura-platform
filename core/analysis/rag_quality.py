@@ -314,6 +314,7 @@ def rerank_vector_results(
     hr_status = ""
     is_holiday = False
     budget_exceeded = False
+    risk_type = ""
     if isinstance(case_data, dict):
         expense = str(case_data.get("expenseType") or case_data.get("expense_type") or "").strip().lower()
         hr_status = str(case_data.get("hrStatus") or case_data.get("hr_status") or "").strip().upper()
@@ -322,6 +323,12 @@ def rerank_vector_results(
             case_data.get("budgetExceeded") is True
             or str(case_data.get("budget_exceeded") or "").strip().upper() in {"Y", "TRUE", "1"}
         )
+        risk_type = str(
+            case_data.get("case_type")
+            or case_data.get("caseType")
+            or case_data.get("intended_risk_type")
+            or ""
+        ).strip().upper()
     preferred_set = {str(a).replace(" ", "") for a in (preferred_articles or []) if str(a).strip()}
 
     def _rank(d: dict[str, Any]) -> tuple[float, float, float]:
@@ -337,15 +344,43 @@ def rerank_vector_results(
             + " "
             + str(d.get("excerpt") or d.get("content") or "")
         ).lower()
+        meta_penalty_keywords = (
+            "ai 에이전트의 역할",
+            "판정 근거 및 로그",
+            "문서 개요",
+            "제1장 문서 개요",
+        )
         semantic_bonus = 1.0 if (expense and expense in text) else 0.0
         policy_bonus = 0.0
+        risk_bonus = 0.0
+        penalty = 0.0
+        if any(k in text for k in meta_penalty_keywords):
+            penalty += 1.2
         if is_holiday and any(t in text for t in ("휴일", "주말", "공휴일", "휴무")):
             policy_bonus += 0.8
+        if is_holiday and any(t in text for t in ("심야", "야간", "시간대")):
+            policy_bonus += 0.4
         if hr_status == "LEAVE" and any(t in text for t in ("휴가", "휴무", "근태")):
             policy_bonus += 0.4
         if budget_exceeded and any(t in text for t in ("한도", "초과", "예산")):
             policy_bonus += 0.6
-        weighted = (score * 0.45) + (has_rule * 0.2) + (semantic_bonus * 0.1) + (rule_link_bonus * 0.15) + (policy_bonus * 0.1)
+        if risk_type == "HOLIDAY_USAGE":
+            if any(t in text for t in ("휴일", "주말", "공휴일", "휴무", "휴가", "심야", "야간", "시간대")):
+                risk_bonus += 1.0
+            if any(t in text for t in ("식대", "업무상 식대")):
+                risk_bonus += 0.3
+            # 경과조치 단독 조항은 휴일 위험유형과 정합도가 낮음
+            if "경과조치" in text and not any(t in text for t in ("휴일", "주말", "공휴일", "심야", "야간")):
+                penalty += 0.9
+        weighted = (
+            (score * 0.35)
+            + (has_rule * 0.2)
+            + (semantic_bonus * 0.1)
+            + (rule_link_bonus * 0.1)
+            + (policy_bonus * 0.15)
+            + (risk_bonus * 0.2)
+            - penalty
+        )
         return (weighted, has_rule, score)
 
     return sorted(results, key=_rank, reverse=True)

@@ -66,6 +66,14 @@ class AnalysisCompletedEvent(BaseModel):
     violation_clauses: list[str] = Field(default_factory=list, description="대조한 규정 조항 리스트. 절대 누락 금지.")
     evidence_map_json: list[dict[str, Any]] = Field(default_factory=list, description="전표 행(item_idx)↔근거 문장 매핑. 절대 누락 금지.")
     quality_gate_codes: list[str] = Field(default_factory=list, description="판정보류/품질게이트 코드. 예: RAG_ZERO, INPUT_PARTIAL")
+    grounding_coverage_ratio: float | None = Field(
+        default=None,
+        description="문장 근거 커버리지 비율(0~1). shadow 비교/품질지표 계산에 사용.",
+    )
+    analysis_score_breakdown: dict[str, Any] = Field(
+        default_factory=dict,
+        description="리스크 점수 분해(정책/근거/최종/KPI) 스냅샷.",
+    )
 
 
 class AnalysisFailedEvent(BaseModel):

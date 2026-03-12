@@ -214,6 +214,136 @@ def _run_self_verification(
     return {"status": status, "issues": issues}
 
 
+def _is_agentic_v2_enabled(agent_config: Any | None) -> bool:
+    aid = str(getattr(agent_config, "agent_id", "") or "").strip().lower()
+    return "v2" in aid and "agentic" in aid
+
+
+def _parse_json_bool_map(raw: str) -> dict[str, bool] | None:
+    try:
+        obj = json.loads(raw)
+        if not isinstance(obj, dict):
+            return None
+        out: dict[str, bool] = {}
+        for k in ("use_open_items", "use_lineage", "use_web_search"):
+            v = obj.get(k)
+            if isinstance(v, bool):
+                out[k] = v
+        if len(out) >= 2:
+            return out
+    except Exception:
+        return None
+    return None
+
+
+async def _llm_optional_tool_plan(
+    *,
+    intended_risk_type: str | None,
+    case_data: dict[str, Any] | None,
+    body_evidence: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """
+    v2 전용: LLM이 optional tool 호출 여부를 결정.
+    반환 예:
+      {"use_open_items": true, "use_lineage": false, "use_web_search": true}
+    """
+    try:
+        risk = str(
+            intended_risk_type
+            or (case_data or {}).get("case_type")
+            or (case_data or {}).get("caseType")
+            or ""
+        ).strip().upper()
+        if risk in BE_CASE_TYPE_TO_SCREENING:
+            risk = BE_CASE_TYPE_TO_SCREENING[risk]
+
+        cd = case_data or {}
+        be = body_evidence or {}
+        compact = {
+            "risk_type": risk,
+            "amount": cd.get("amount"),
+            "occurredAt": cd.get("occurredAt"),
+            "merchantName": cd.get("merchantName"),
+            "mccCode": cd.get("mccCode"),
+            "hrStatus": cd.get("hrStatus"),
+            "isHoliday": cd.get("isHoliday"),
+            "payload_has_openItems": isinstance(be.get("openItems"), list) and len(be.get("openItems")) > 0,
+            "payload_has_lineage": isinstance(be.get("lineage"), dict) and len((be.get("lineage") or {}).keys()) > 0,
+        }
+        prompt = (
+            "너는 감사 Agent의 tool planner다.\n"
+            "아래 입력을 보고 optional tool 호출 여부를 JSON만 반환하라.\n"
+            "규칙:\n"
+            "- payload에 이미 있으면 해당 tool은 false\n"
+            "- HOLIDAY_USAGE는 보통 open_items/lineage 불필요\n"
+            "- DUPLICATE_SUSPECT/SPLIT_PAYMENT는 open_items/lineage가 유용\n"
+            "- 규정 근거가 빈약할 가능성이 높으면 use_web_search=true\n"
+            f"입력: {json.dumps(compact, ensure_ascii=False)}\n"
+            '출력 예: {"use_open_items":false,"use_lineage":false,"use_web_search":true}'
+        )
+        llm = get_llm_client()
+        out = await llm.ainvoke(prompt)
+        if not isinstance(out, str):
+            out = str(out)
+        return _parse_json_bool_map(out)
+    except Exception:
+        return None
+
+
+def _select_optional_tools(
+    *,
+    intended_risk_type: str | None,
+    case_data: dict[str, Any] | None,
+    body_evidence: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """
+    P2 Agentic 선행: 고정 호출 대신 케이스 맥락 기반 optional tool 선택.
+    반환:
+      {
+        "use_open_items": bool,
+        "use_lineage": bool,
+        "reason": str
+      }
+    """
+    ct = str(
+        intended_risk_type
+        or (case_data or {}).get("case_type")
+        or (case_data or {}).get("caseType")
+        or ""
+    ).strip().upper()
+    if ct in BE_CASE_TYPE_TO_SCREENING:
+        ct = BE_CASE_TYPE_TO_SCREENING[ct]
+
+    be = body_evidence or {}
+    be_open = be.get("openItems")
+    be_lineage = be.get("lineage")
+    has_open_from_payload = isinstance(be_open, list) and len(be_open) > 0
+    has_lineage_from_payload = isinstance(be_lineage, dict) and len(be_lineage.keys()) > 0
+
+    use_open_items = ct in {"DUPLICATE_SUSPECT", "SPLIT_PAYMENT", "LIMIT_EXCEED", "UNUSUAL_PATTERN"}
+    use_lineage = ct in {"DUPLICATE_SUSPECT", "SPLIT_PAYMENT", "PRIVATE_USE_RISK", "UNUSUAL_PATTERN"}
+
+    # payload-first: 이미 전달된 데이터가 있으면 외부 tool 호출 생략
+    if has_open_from_payload:
+        use_open_items = False
+    if has_lineage_from_payload:
+        use_lineage = False
+
+    reasons: list[str] = []
+    reasons.append(f"risk_type={ct or 'UNKNOWN'}")
+    reasons.append(f"payload_openItems={'yes' if has_open_from_payload else 'no'}")
+    reasons.append(f"payload_lineage={'yes' if has_lineage_from_payload else 'no'}")
+    reasons.append(f"use_open_items={'yes' if use_open_items else 'no'}")
+    reasons.append(f"use_lineage={'yes' if use_lineage else 'no'}")
+
+    return {
+        "use_open_items": use_open_items,
+        "use_lineage": use_lineage,
+        "use_web_search": True,
+        "reason": ", ".join(reasons),
+    }
+
+
 def _split_reason_sentences(text: str) -> list[str]:
     src = (text or "").strip()
     if not src:
@@ -332,6 +462,13 @@ def _build_analysis_score_breakdown(
     quality_gate_codes: list[str],
     coverage_ratio: float | None = None,
 ) -> dict[str, Any]:
+    gate_set = set(quality_gate_codes or [])
+    # FE KPI 카드용 비율(개별 케이스 기준): 0.0 또는 1.0
+    rag_zero_rate = 1.0 if "RAG_ZERO" in gate_set else 0.0
+    evidence_coverage_low_rate = 1.0 if "EVIDENCE_COVERAGE_LOW" in gate_set else 0.0
+    sentence_citation_missing_rate = 1.0 if "SENTENCE_CITATION_MISSING" in gate_set else 0.0
+    policy_reeval_applied_rate = 1.0 if "POLICY_REEVAL_APPLIED" in gate_set else 0.0
+
     weighted = [
         {
             "name": "anomaly_score",
@@ -369,6 +506,26 @@ def _build_analysis_score_breakdown(
         "policy_score": policy_score,
         "evidence_score": evidence_score,
         "final_score": final_score,
+        # per-case KPI rates (camelCase + snake_case 동시 제공)
+        "ragZeroRate": rag_zero_rate,
+        "rag_zero_rate": rag_zero_rate,
+        "evidenceCoverageLowRate": evidence_coverage_low_rate,
+        "evidence_coverage_low_rate": evidence_coverage_low_rate,
+        "sentenceCitationMissingRate": sentence_citation_missing_rate,
+        "sentence_citation_missing_rate": sentence_citation_missing_rate,
+        "policyReevalAppliedRate": policy_reeval_applied_rate,
+        "policy_reeval_applied_rate": policy_reeval_applied_rate,
+        # 분모/건수(카드 fallback 계산용)
+        "completedAnalysisCount": 1,
+        "completed_analysis_count": 1,
+        "ragZeroCount": int(rag_zero_rate),
+        "rag_zero_count": int(rag_zero_rate),
+        "evidenceCoverageLowCount": int(evidence_coverage_low_rate),
+        "evidence_coverage_low_count": int(evidence_coverage_low_rate),
+        "sentenceCitationMissingCount": int(sentence_citation_missing_rate),
+        "sentence_citation_missing_count": int(sentence_citation_missing_rate),
+        "policyReevalAppliedCount": int(policy_reeval_applied_rate),
+        "policy_reeval_applied_count": int(policy_reeval_applied_rate),
     }
 
 
@@ -389,19 +546,13 @@ def _is_risk_article_semantically_aligned(
     if ru == "HOLIDAY_USAGE":
         if any(k in corpus for k in ("휴일", "주말", "공휴일", "심야", "시간대", "야간")):
             return True
-        if any(a in corpus_norm for a in ("제38조", "제39조")):
-            return True
         return False
     if ru == "LIMIT_EXCEED":
         if any(k in corpus for k in ("한도", "초과", "금액")):
             return True
-        if "제40조" in corpus_norm:
-            return True
         return False
     if ru == "SPLIT_PAYMENT":
         if any(k in corpus for k in ("분할결제", "분할전표")):
-            return True
-        if "제41조" in corpus_norm:
             return True
         return False
     return True
@@ -446,6 +597,118 @@ def _analysis_fewshot_by_risk(risk_type: str | None) -> str:
         "[예시]\n"
         "입력 근거가 부족하면 '확정 판단 보류'로 마무리하고 추가 확인 항목을 제시.\n"
     )
+
+
+def _risk_keyword_filter_results(
+    results: list[dict[str, Any]],
+    *,
+    risk_type: str | None,
+) -> list[dict[str, Any]]:
+    """위험유형 정합 키워드 기준 1차 필터. 비면 원본 유지."""
+    if not isinstance(results, list) or not results:
+        return []
+    ru = str(risk_type or "").strip().upper()
+    if ru != "HOLIDAY_USAGE":
+        return results
+    meta_penalty_keywords = (
+        "ai 에이전트의 역할",
+        "판정 근거 및 로그",
+        "문서 개요",
+        "제1장 문서 개요",
+    )
+    keep: list[dict[str, Any]] = []
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        txt = " ".join(
+            str(r.get(k) or "")
+            for k in ("title", "location", "excerpt", "content", "regulation_article", "regulationArticle")
+        ).lower()
+        if any(k in txt for k in meta_penalty_keywords):
+            continue
+        if any(k in txt for k in ("휴일", "주말", "공휴일", "휴무", "휴가", "심야", "야간", "시간대")):
+            keep.append(r)
+            continue
+    return keep if keep else results
+
+
+def _risk_alignment_score_doc(doc: dict[str, Any], risk_type: str | None) -> float:
+    if not isinstance(doc, dict):
+        return 0.0
+    ru = str(risk_type or "").strip().upper()
+    text = " ".join(
+        str(doc.get(k) or "")
+        for k in ("title", "location", "excerpt", "content", "regulation_article", "regulationArticle")
+    ).lower()
+    score = float(doc.get("score", 0) or 0)
+    bonus = 0.0
+    penalty = 0.0
+    meta_penalty_keywords = (
+        "ai 에이전트의 역할",
+        "판정 근거 및 로그",
+        "문서 개요",
+        "제1장 문서 개요",
+    )
+    if any(k in text for k in meta_penalty_keywords):
+        penalty += 1.2
+    if ru == "HOLIDAY_USAGE":
+        if any(k in text for k in ("휴일", "주말", "공휴일", "휴무", "휴가", "심야", "야간", "시간대")):
+            bonus += 1.0
+        if any(k in text for k in ("식대", "업무상 식대")):
+            bonus += 0.3
+        # 경과조치 단독 조항은 휴일 위반 판단과 정합도가 낮으므로 페널티
+        if "경과조치" in text and not any(k in text for k in ("휴일", "주말", "공휴일", "심야", "야간")):
+            penalty += 0.8
+    elif ru == "LIMIT_EXCEED":
+        if any(k in text for k in ("한도", "초과", "예산", "금액")):
+            bonus += 0.8
+    elif ru == "SPLIT_PAYMENT":
+        if any(k in text for k in ("분할", "반복", "쪼개기")):
+            bonus += 0.8
+    return round(score + bonus - penalty, 4)
+
+
+def _is_governance_meta_doc(doc: dict[str, Any]) -> bool:
+    if not isinstance(doc, dict):
+        return False
+    text = " ".join(
+        str(doc.get(k) or "")
+        for k in ("title", "location", "excerpt", "content", "regulation_article", "regulationArticle")
+    ).lower()
+    meta_signals = (
+        "문서 개요",
+        "목적",
+        "ai 에이전트의 역할",
+        "판정 근거 및 로그",
+        "agent ai",
+        "로그",
+        "운영",
+    )
+    # 실질 집행 규정 키워드가 없고 운영/메타 신호가 강하면 메타 문서로 분류
+    has_operational_signal = any(k in text for k in meta_signals)
+    has_business_rule_signal = any(k in text for k in ("휴일", "주말", "공휴일", "식대", "한도", "초과", "분할", "중복", "업무"))
+    return bool(has_operational_signal and not has_business_rule_signal)
+
+
+def _select_risk_aligned_docs(doc_list: list[dict[str, Any]], risk_type: str | None) -> list[dict[str, Any]]:
+    if not isinstance(doc_list, list) or not doc_list:
+        return []
+    ranked = sorted(
+        [d for d in doc_list if isinstance(d, dict)],
+        key=lambda d: _risk_alignment_score_doc(d, risk_type),
+        reverse=True,
+    )
+    # 운영/메타 문서는 실질 규정이 있을 때 후순위로 밀어낸다.
+    non_meta = [d for d in ranked if not _is_governance_meta_doc(d)]
+    meta = [d for d in ranked if _is_governance_meta_doc(d)]
+    merged = (non_meta + meta) if non_meta else ranked
+
+    # 최소 1건은 유지, 최대 3건(근거맵 과도한 인용 방지)
+    picked = merged[:3]
+    # 위험유형 정합도가 전혀 없는 문서만 남는 경우 원본 순서 fallback
+    if picked and _risk_alignment_score_doc(picked[0], risk_type) <= 0 and isinstance(doc_list[0], dict):
+        return [d for d in doc_list if isinstance(d, dict)][:5]
+    return picked
 
 
 def _has_rag_evidence_items(evidence_items: list[dict[str, Any]]) -> bool:
@@ -762,34 +1025,55 @@ def _build_sentence_citation_map(
     if not sentences:
         return []
     citation_rows = [c for c in (citations or []) if isinstance(c, dict)]
+    stop_tokens = {
+        "규정", "조항", "근거", "내부", "문서", "분석", "판단", "결과", "해당", "대상",
+        "필요", "추가", "검토", "운영", "기준", "회사", "지출", "전표",
+    }
+
+    def _norm_tokens(text: str) -> set[str]:
+        return {t for t in _tokens_for_overlap(text) if t not in stop_tokens and len(t) >= 2}
+
+    def _extract_articles(text: str) -> set[str]:
+        hits = re.findall(r"제\s*\d+\s*조", text or "")
+        return {re.sub(r"\s+", "", h) for h in hits}
+
+    citation_feats: list[dict[str, Any]] = []
+    for c in citation_rows:
+        cid = str(c.get("citation_id") or "").strip()
+        if not cid:
+            continue
+        ref = " ".join(str(c.get(k) or "") for k in ("title", "reference", "excerpt"))
+        citation_feats.append(
+            {
+                "cid": cid,
+                "ref": ref,
+                "tokens": _norm_tokens(ref),
+                "articles": _extract_articles(ref),
+            }
+        )
+
     rows: list[dict[str, Any]] = []
     for idx, sent in enumerate(sentences, start=1):
-        sent_norm = re.sub(r"\s+", "", sent)
-        sent_tokens = _tokens_for_overlap(sent)
-        matched_ids: list[str] = []
-        for c in citation_rows:
-            cid = str(c.get("citation_id") or "").strip()
-            if not cid:
+        sent_tokens = _norm_tokens(sent)
+        sent_articles = _extract_articles(sent)
+        scored: list[tuple[str, int]] = []
+        for cf in citation_feats:
+            article_hit = bool(sent_articles and (sent_articles & cf["articles"]))
+            if sent_articles and not article_hit:
+                # 문장에 조항이 명시된 경우 동일 조항 citation만 허용
                 continue
-            ref = " ".join(str(c.get(k) or "") for k in ("title", "url", "reference", "excerpt"))
-            ref_norm = re.sub(r"\s+", "", ref)
-            ref_tokens = _tokens_for_overlap(ref)
-            if _ARTICLE_IN_TEXT_PATTERN.search(sent or "") and _ARTICLE_IN_TEXT_PATTERN.search(ref or ""):
-                matched_ids.append(cid)
-                continue
-            token_overlap = len(sent_tokens & ref_tokens) if sent_tokens and ref_tokens else 0
-            if token_overlap < 1:
-                token_overlap = _fuzzy_overlap_count(sent_tokens, ref_tokens)
-            if sent_tokens and token_overlap >= 1:
-                matched_ids.append(cid)
-                continue
-            if sent_norm and sent_norm[:12] and sent_norm[:12] in ref_norm:
-                matched_ids.append(cid)
-        # 보수적 연결: 문장이 일반 근거 설명 성격일 때 최소 1개 인용 연결
-        if not matched_ids and citation_rows and any(k in sent for k in ("규정", "조항", "근거", "내부규정")):
-            fallback_cid = str(citation_rows[0].get("citation_id") or "").strip()
-            if fallback_cid:
-                matched_ids.append(fallback_cid)
+            overlap = len(sent_tokens & cf["tokens"]) if sent_tokens and cf["tokens"] else 0
+            fuzzy = _fuzzy_overlap_count(sent_tokens, cf["tokens"]) if sent_tokens and cf["tokens"] else 0
+            score = overlap * 2 + fuzzy + (6 if article_hit else 0)
+            if score > 0:
+                scored.append((cf["cid"], score))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        if sent_articles:
+            # 조항 명시 문장은 가장 높은 동일조항 1건만 연결
+            matched_ids = [scored[0][0]] if scored else []
+        else:
+            # 일반 문장은 점수 충분한 상위 1~2건만 연결
+            matched_ids = [cid for cid, sc in scored[:2] if sc >= 4]
         rows.append(
             {
                 "sentence_index": idx,
@@ -1130,6 +1414,10 @@ async def run_audit_analysis(
             return {**_coords_payload(id_mapping), **payload}
 
         def _should_emit_agent_stream(content: str | None, step_label: str) -> bool:
+            # v2 경로는 AGENT_EVENT/step 중심 운영이 기본. 필요 시 플래그로만 허용.
+            settings_local = get_settings()
+            if _is_agentic_v2_enabled(agent_config) and not bool(getattr(settings_local, "agentic_v2_emit_agent_stream", False)):
+                return False
             if not _is_agent_stream_insight(content):
                 return False
             if step_label not in _AGENT_STREAM_ALLOWED_STEPS:
@@ -1600,13 +1888,17 @@ async def run_audit_analysis(
             )
             raw_vector_results = hybrid_retrieve(
                 query=rag_query,
-                top_k=5,
+                top_k=20,
                 include_article_clause=True,
                 bukrs=bukrs or None,
                 belnr=belnr or None,
                 metadata_filter=metadata_filter,
                 doc_ids=doc_ids,
                 tenant_id=tenant_id_int,
+            )
+            raw_vector_results = _risk_keyword_filter_results(
+                raw_vector_results or [],
+                risk_type=intended_risk_type or (case_data.get("case_type") if isinstance(case_data, dict) else None),
             )
             raw_count = len(raw_vector_results or [])
             raw_max = max((float(r.get("score", 0) or 0) for r in (raw_vector_results or []) if isinstance(r, dict)), default=0.0)
@@ -1620,6 +1912,10 @@ async def run_audit_analysis(
                 raw_vector_results,
                 preferred_articles=rag_constraints.get("articles"),
                 effective_date=None,
+            )
+            vector_results = _risk_keyword_filter_results(
+                vector_results or [],
+                risk_type=intended_risk_type or (case_data.get("case_type") if isinstance(case_data, dict) else None),
             )
             rule_filtered_count = len(vector_results or [])
             if raw_count and not rule_filtered_count:
@@ -1665,7 +1961,7 @@ async def run_audit_analysis(
                         )
                         retry_results = retrieve_rag_pgvector(
                             compact_query,
-                            top_k=5,
+                            top_k=20,
                             bukrs=bukrs or None,
                             belnr=belnr or None,
                             metadata_filter=metadata_filter,
@@ -1676,6 +1972,10 @@ async def run_audit_analysis(
                             tenant_id=tenant_id_int if tenant_id_int > 0 else None,
                         )
                         if retry_results:
+                            retry_results = _risk_keyword_filter_results(
+                                retry_results,
+                                risk_type=intended_risk_type or (case_data.get("case_type") if isinstance(case_data, dict) else None),
+                            )
                             vector_results = _rerank_vector_results(
                                 retry_results,
                                 case_data=case_data if isinstance(case_data, dict) else None,
@@ -1722,7 +2022,7 @@ async def run_audit_analysis(
                             )
                             retry_results_2 = retrieve_rag_pgvector(
                                 ultra_query,
-                                top_k=5,
+                                top_k=20,
                                 bukrs=bukrs or None,
                                 belnr=belnr or None,
                                 metadata_filter=metadata_filter,
@@ -1733,6 +2033,10 @@ async def run_audit_analysis(
                                 tenant_id=tenant_id_int if tenant_id_int > 0 else None,
                             )
                             if retry_results_2:
+                                retry_results_2 = _risk_keyword_filter_results(
+                                    retry_results_2,
+                                    risk_type=intended_risk_type or (case_data.get("case_type") if isinstance(case_data, dict) else None),
+                                )
                                 vector_results = _rerank_vector_results(
                                     retry_results_2,
                                     case_data=case_data if isinstance(case_data, dict) else None,
@@ -1758,7 +2062,7 @@ async def run_audit_analysis(
             ):
                 diag_results = hybrid_retrieve(
                     query=rag_query,
-                    top_k=5,
+                    top_k=20,
                     include_article_clause=True,
                     bukrs=bukrs or None,
                     belnr=belnr or None,
@@ -1864,6 +2168,42 @@ async def run_audit_analysis(
             incr("audit_analysis_rag_nonzero_total")
         else:
             incr("audit_analysis_rag_zero_total")
+        optional_tools = _select_optional_tools(
+            intended_risk_type=intended_risk_type,
+            case_data=case_data if isinstance(case_data, dict) else {},
+            body_evidence=body_evidence if isinstance(body_evidence, dict) else {},
+        )
+        if _is_agentic_v2_enabled(agent_config):
+            llm_plan = await _llm_optional_tool_plan(
+                intended_risk_type=intended_risk_type,
+                case_data=case_data if isinstance(case_data, dict) else {},
+                body_evidence=body_evidence if isinstance(body_evidence, dict) else {},
+            )
+            if llm_plan:
+                # 결정론 가드레일: payload에 이미 있는 데이터를 다시 호출하지 않음
+                be = body_evidence if isinstance(body_evidence, dict) else {}
+                if isinstance(be.get("openItems"), list) and len(be.get("openItems")) > 0:
+                    llm_plan["use_open_items"] = False
+                if isinstance(be.get("lineage"), dict) and len((be.get("lineage") or {}).keys()) > 0:
+                    llm_plan["use_lineage"] = False
+                optional_tools.update(llm_plan)
+                optional_tools["reason"] = f"{optional_tools.get('reason')}, llm_plan={llm_plan}"
+                yield ("step", _with_coords({**AnalysisStepEvent(
+                    label="TOOL_PLANNING",
+                    detail="자율 도구 선택 계획을 수립했습니다.",
+                    percent=37,
+                ).model_dump(), **id_mapping}))
+            else:
+                optional_tools["reason"] = f"{optional_tools.get('reason')}, llm_plan=fallback_rule"
+
+        logger.info(
+            "analysis_pipeline: optional_tool_plan case_id=%s %s",
+            case_id,
+            optional_tools.get("reason"),
+        )
+
+        # web_search는 RAG 비어도 planner가 false면 생략 가능 (v2)
+        need_web_search = bool(need_web_search and optional_tools.get("use_web_search", True))
         if need_web_search:
             yield ("step", _with_coords({**AnalysisStepEvent(
                 label="WEB_SEARCH",
@@ -1907,73 +2247,95 @@ async def run_audit_analysis(
                 logger.debug(f"web_search in pipeline failed: {e}")
 
         _open_items_input = {"filters": {"caseId": case_id}}
-        yield ("tool_call", _with_coords({
-            "node": "EVIDENCE_GATHER",
-            "tool": "get_open_items",
-            "decision_code": "REQUESTED",
-            "input_hash": _stable_hash(_open_items_input),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            **id_mapping,
-        }))
-        try:
-            oi_result = await get_open_items.ainvoke({"filters": {"caseId": case_id}})
-            oi_data = json.loads(oi_result) if isinstance(oi_result, str) else oi_result
-            yield ("tool_result", _with_coords({
+        if optional_tools.get("use_open_items"):
+            yield ("tool_call", _with_coords({
                 "node": "EVIDENCE_GATHER",
                 "tool": "get_open_items",
-                "decision_code": "OK",
+                "decision_code": "REQUESTED",
                 "input_hash": _stable_hash(_open_items_input),
-                "output_ref": _stable_hash(oi_data or {}),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 **id_mapping,
             }))
-            items = oi_data.get("items", oi_data.get("openItems", [])) if isinstance(oi_data, dict) else []
-            if items:
-                evidence_items.append({"type": "OPEN_ITEMS", "source": "get_open_items", "count": len(items)})
-        except Exception as e:
-            logger.debug(f"get_open_items failed: {e}")
+            try:
+                oi_result = await get_open_items.ainvoke({"filters": {"caseId": case_id}})
+                oi_data = json.loads(oi_result) if isinstance(oi_result, str) else oi_result
+                yield ("tool_result", _with_coords({
+                    "node": "EVIDENCE_GATHER",
+                    "tool": "get_open_items",
+                    "decision_code": "OK",
+                    "input_hash": _stable_hash(_open_items_input),
+                    "output_ref": _stable_hash(oi_data or {}),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    **id_mapping,
+                }))
+                items = oi_data.get("items", oi_data.get("openItems", [])) if isinstance(oi_data, dict) else []
+                if items:
+                    evidence_items.append({"type": "OPEN_ITEMS", "source": "get_open_items", "count": len(items)})
+            except Exception as e:
+                logger.debug(f"get_open_items failed: {e}")
+                yield ("tool_result", _with_coords({
+                    "node": "EVIDENCE_GATHER",
+                    "tool": "get_open_items",
+                    "decision_code": "ERROR",
+                    "input_hash": _stable_hash(_open_items_input),
+                    "output_ref": str(e)[:120],
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    **id_mapping,
+                }))
+        else:
             yield ("tool_result", _with_coords({
                 "node": "EVIDENCE_GATHER",
                 "tool": "get_open_items",
-                "decision_code": "ERROR",
+                "decision_code": "SKIPPED",
                 "input_hash": _stable_hash(_open_items_input),
-                "output_ref": str(e)[:120],
+                "output_ref": "optional_plan_skip",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 **id_mapping,
             }))
 
         _lineage_input = {"caseId": case_id}
-        yield ("tool_call", _with_coords({
-            "node": "EVIDENCE_GATHER",
-            "tool": "get_lineage",
-            "decision_code": "REQUESTED",
-            "input_hash": _stable_hash(_lineage_input),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            **id_mapping,
-        }))
-        try:
-            lineage_result = await get_lineage.ainvoke({"caseId": case_id})
-            lineage_data = json.loads(lineage_result) if isinstance(lineage_result, str) else lineage_result
-            yield ("tool_result", _with_coords({
+        if optional_tools.get("use_lineage"):
+            yield ("tool_call", _with_coords({
                 "node": "EVIDENCE_GATHER",
                 "tool": "get_lineage",
-                "decision_code": "OK",
+                "decision_code": "REQUESTED",
                 "input_hash": _stable_hash(_lineage_input),
-                "output_ref": _stable_hash(lineage_data or {}),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 **id_mapping,
             }))
-            lineage = lineage_data.get("lineage", []) if isinstance(lineage_data, dict) and "error" not in lineage_data else []
-            if lineage:
-                evidence_items.append({"type": "LINEAGE", "source": "get_lineage", "count": len(lineage)})
-        except Exception as e:
-            logger.debug(f"get_lineage failed: {e}")
+            try:
+                lineage_result = await get_lineage.ainvoke({"caseId": case_id})
+                lineage_data = json.loads(lineage_result) if isinstance(lineage_result, str) else lineage_result
+                yield ("tool_result", _with_coords({
+                    "node": "EVIDENCE_GATHER",
+                    "tool": "get_lineage",
+                    "decision_code": "OK",
+                    "input_hash": _stable_hash(_lineage_input),
+                    "output_ref": _stable_hash(lineage_data or {}),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    **id_mapping,
+                }))
+                lineage = lineage_data.get("lineage", []) if isinstance(lineage_data, dict) and "error" not in lineage_data else []
+                if lineage:
+                    evidence_items.append({"type": "LINEAGE", "source": "get_lineage", "count": len(lineage)})
+            except Exception as e:
+                logger.debug(f"get_lineage failed: {e}")
+                yield ("tool_result", _with_coords({
+                    "node": "EVIDENCE_GATHER",
+                    "tool": "get_lineage",
+                    "decision_code": "ERROR",
+                    "input_hash": _stable_hash(_lineage_input),
+                    "output_ref": str(e)[:120],
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    **id_mapping,
+                }))
+        else:
             yield ("tool_result", _with_coords({
                 "node": "EVIDENCE_GATHER",
                 "tool": "get_lineage",
-                "decision_code": "ERROR",
+                "decision_code": "SKIPPED",
                 "input_hash": _stable_hash(_lineage_input),
-                "output_ref": str(e)[:120],
+                "output_ref": "optional_plan_skip",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 **id_mapping,
             }))
@@ -2280,7 +2642,22 @@ async def run_audit_analysis(
             bool(screening_reason_text and not screening_case_type),
         )
 
-        regulation_citations = build_regulation_citations(doc_list)
+        citation_source_docs = vector_results if (isinstance(vector_results, list) and len(vector_results) > 0) else doc_list
+        doc_list_for_reason = _select_risk_aligned_docs(citation_source_docs, risk_type)
+        logger.info(
+            "analysis_pipeline: risk_aligned_docs case_id=%s risk_type=%s source=%s selected=%s top_ref=%s top3_refs=%s",
+            case_id,
+            risk_type,
+            "vector_results" if citation_source_docs is vector_results else "search_documents",
+            len(doc_list_for_reason),
+            str((doc_list_for_reason[0].get("location") if doc_list_for_reason else "") or "")[:120] if doc_list_for_reason else "",
+            [
+                str((d.get("location") or d.get("regulation_article") or d.get("title") or ""))[:120]
+                for d in (doc_list_for_reason or [])[:3]
+                if isinstance(d, dict)
+            ],
+        )
+        regulation_citations = build_regulation_citations(doc_list_for_reason or doc_list)
         case_context_parts: list[str] = []
         if isinstance(case_data, dict):
             if case_data.get("occurredAt") or case_data.get("occurred_at"):
@@ -2395,7 +2772,7 @@ async def run_audit_analysis(
         risk_level = "HIGH" if overall >= 0.8 else "MEDIUM" if overall >= 0.6 else "LOW"
         # DEMO 케이스: RAG 검색 결과(doc_list/vector_results) 기반으로만 문장 구성. 하드코딩 조문 금지.
         if is_demo_norm:
-            citation_sentence = build_citation_reasoning(doc_list, risk_level="LOW", default_subject="본 건")
+            citation_sentence = build_citation_reasoning(doc_list_for_reason or doc_list, risk_level="LOW", default_subject="본 건")
             prefix = (citation_sentence + " ") if citation_sentence else "수집된 규정 기준을 충족하는 지출로 판단됩니다. "
             reason_text = prefix + reason_text
             risk_level = "LOW"
@@ -2415,7 +2792,7 @@ async def run_audit_analysis(
                 if violation_clause_str and violation_clause_str not in violation_clauses:
                     violation_clauses.append(violation_clause_str)
                 clause_evidence = get_violation_clause_evidence(
-                    doc_list, violation_article or "", violation_clause or ""
+                    doc_list_for_reason or doc_list, violation_article or "", violation_clause or ""
                 ) if doc_list else None
                 if clause_evidence:
                     evidence_items.append({
@@ -2439,7 +2816,7 @@ async def run_audit_analysis(
             risk_level = "HIGH"
         else:
             citation_sentence = build_citation_reasoning(
-                doc_list, risk_level=risk_level, default_subject="본 건"
+                doc_list_for_reason or doc_list, risk_level=risk_level, default_subject="본 건"
             )
             if "에 의거하여" in citation_sentence:
                 reason_text = citation_sentence + " " + reason_text
@@ -2537,7 +2914,7 @@ async def run_audit_analysis(
         )
 
         # 문장별 근거 커버리지 점검: 결론 문장이 근거와 연결되지 않으면 보수적으로 강등
-        citations_preview = _build_citations_payload(doc_list, external_citations)
+        citations_preview = _build_citations_payload(doc_list_for_reason or doc_list, external_citations)
         logger.info(
             "audit_analysis citations_preview: case_id=%s doc_list=%s external_citations=%s citations_preview=%s sample_ids=%s sample_refs=%s",
             case_id,
@@ -2759,7 +3136,7 @@ async def run_audit_analysis(
             recommended_action = "; ".join(p.get("rationale", "") for p in proposals if p.get("rationale"))
 
         # citations: 내부 규정(RAG) + 외부 검색 URL
-        citations = _build_citations_payload(doc_list, external_citations)
+        citations = _build_citations_payload(doc_list_for_reason or doc_list, external_citations)
         logger.info(
             "audit_analysis citations_final: case_id=%s count=%s sample_ids=%s",
             case_id,
@@ -2887,6 +3264,8 @@ async def run_audit_analysis(
             violation_clauses=decision_reason.get("violation_clauses", violation_clauses),
             evidence_map_json=decision_reason.get("evidence_map_json", []),
             quality_gate_codes=quality_gate_codes,
+            grounding_coverage_ratio=coverage_ratio,
+            analysis_score_breakdown=analysis_score_breakdown,
         ).model_dump()
         yield ("completed", completed_payload)
         incr("audit_analysis_completed_total")

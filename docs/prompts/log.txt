@@ -1,35 +1,75 @@
-더 “Agentic”하게 만들려면
-LangGraph 기반 감사 에이전트 도입
-analyze → gather → plan → execute → reflect 등 단계를 그래프로 정의
-stream_events로 단계·도구 호출을 실시간 스트리밍
-도구 선택 자율화
-LLM이 “get_case / search_documents / get_open_items 중 무엇을 언제 쓸지” 결정
-현재처럼 파이프라인에서 항상 같은 순서로 호출하는 방식에서 벗어나기
-점진적 도입
-기존 analysis_pipeline 유지 + 새 LangGraph 에이전트 경로 추가
-케이스 유형·리스크에 따라 파이프라인 vs 에이전트 선택
-LLM이 판단·도구 선택을 주도하는 Agentic AI” 수준
- ReAct / LangGraph 스타일의 자율 에이전트
+Aura PoC 통합 구현 마스터 지시서 (Lead: Aura Agent Cursor)
+1. 프로젝트 개요 및 환경
+목적: 기존 엔터프라이즈 시스템(React/Java)의 핵심 기능을 Streamlit + Python 기반 PoC 환경으로 포팅.
 
- -> 현재 에이전트는 테스트 및 다른 용도로 일단 두고  새로 에이전트를 만들어서 완성 후에 스위칭 하는 방향으로 갈지도 전략을 고민해주세요
+작업 경로: /Users/joonbinchoi/Work/MaterTask (이 폴더 내에 FE/BE/Aura 통합 구조 구축)
 
+핵심 스택:
 
- 스트림 무가공 원칙 명문화
-스트림은 오직 실제 이벤트만: 노드 진입/종료, 툴 호출 요청/응답, 근거 채택/폐기, 게이트 판정
-금지: 임의 요약 문장, 근거 없는 “진행중” 멘트
-Agent Event Schema 고정
-event_type, node, tool, input_hash, output_ref, evidence_ids, decision_code, timestamp
-이 스키마로 SSE/agent_activity_log/감사로그를 통일
-도구 선택 자율화 + 결정론 가드레일
-LLM이 tool 선택은 하되,
-확정 위반은 정책엔진/근거검증 통과 시에만 허용 (현재 게이트 유지)
-Shadow Run 필수
-동일 케이스를 기존 analysis_pipeline과 신규 LangGraph가 동시에 실행
-비교 KPI: 정확도, citation 연결률, 보류율, 지연시간, 재현성
-스위칭 기준(Go/No-Go) 사전 합의
-예: 2주 연속 citation 누락률, 오탐률, RAG_ZERO 후 확정위반 0건 통과 시 전환
-권장 전략:
+UI: Streamlit (Pure UI)
 
-지금 에이전트는 유지
-finance_aura_v2_agentic 신규 경로로 완성
-검증 끝나면 feature flag로 점진 스위칭
+Backend & Logic: FastAPI (BE 로직 + Aura 에이전트 통합)
+
+Database: 기존 PostgreSQL 재사용 (dwp_aura, public 스키마 유지)
+
+Agent: LangGraph 기반 Aura 에이전트
+
+인증 정책: 전면 제거. 로그인 및 JWT 검증 없이 모든 기능 오픈.
+
+2. 작업 비중 및 역할 정의 (Lead Cursor 지침)
+당신은 마스터 커서로서 다음 소스들을 정밀 분석하여 신규 폴더에 통합 재구현해야 합니다.
+
+분석 대상 (Reference Source):
+
+FE: dwp-frontend (React 컴포넌트 및 상태 관리 로직 분석)
+
+BE: dwp-backend (Java Entity, QueryDSL 쿼리, 서비스 로직 분석)
+
+Aura: aura-platform (현재의 에이전트 및 도구 로직 분석)
+
+구현 대상 (Target Implementation):
+
+/Users/joonbinchoi/Work/MaterTask 폴더 내에 main.py (FastAPI), app.py (Streamlit), agent/ 폴더 구조를 생성하십시오.
+
+3. 시스템별 상세 포팅 전략
+[BE & Aura 통합 - FastAPI]
+DB 연동: Java 엔티티를 Python SQLModel 또는 SQLAlchemy로 변환하여 기존 PostgreSQL 테이블에 연결하십시오.
+
+로직 통합: Java의 @Service 로직(전표 조회, 상태 변경 등)을 FastAPI 엔드포인트로 구현하십시오.
+
+Aura 연동: Aura 에이전트를 FastAPI 내부로 import하여 실행하십시오. 분석 결과는 **SSE(Server-Sent Events)**를 통해 스트리밍으로 내려주어야 합니다.
+
+[UI - Streamlit]
+메뉴 구성 (Sidebar):
+
+통합 워크벤치: 2개 탭(나의 모든 전표 / 소명 대기함)으로 구성. 전표 클릭 시 Aura 추론 과정을 보여주는 상세 뷰 연결.
+
+에이전트 스튜디오: LangGraph 시각화(Graphviz) 및 프롬프트/파라미터 실시간 모니터링 화면.
+
+시연 데이터 제어: PoC 시나리오 데이터(e.g., 휴가 중 결제)를 DB에 즉시 생성/삭제하는 제어판.
+
+실시간 렌더링: FastAPI의 SSE를 수신하여 st.write_stream 기능을 통해 AI의 사고 과정을 실시간으로 화면에 출력하십시오.
+
+4. 작업 규칙 및 협업 가이드 (Core Rules)
+One-Codebase: 모든 로직은 /Users/joonbinchoi/Work/MaterTask 내에서 동작해야 하며, 서로의 소스 경로를 참조할 수 있도록 설정하십시오.
+
+No-Auth: 모든 API 요청에서 Authorization 헤더 및 UserID 검증 로직을 제거하고, 기본 tenant_id=1, user_id=1로 하드코딩하여 PoC의 편의성을 높이십시오.
+
+DB Integrity: 기존 DB 스키마를 수정하지 말고 그대로 사용하되, 부족한 필드는 Python 레벨에서 Mocking 처리하십시오.
+
+Stream-First: 사용자가 "분석 시작" 버튼을 누르면 AI가 생각하는 과정이 끊김 없이 출력되도록 비동기(asyncio) 처리를 최우선으로 하십시오.
+
+5. 초기 구현 우선순위 (Sprint 1)
+Step 1: FastAPI에서 기존 DB의 전표 목록을 조회하는 API 완성.
+
+Step 2: Streamlit에서 3개 메뉴 사이드바 및 전표 목록 그리드 구현.
+
+Step 3: Aura 에이전트의 SSE 스트리밍을 Streamlit st.write_stream에 바인딩.
+
+Step 4: '시연 데이터 제어'를 통해 PoC용 위반 데이터 10건 자동 생성 기능 추가.
+
+💡 사용자님을 위한 팁
+이 프롬프트를 **가장 비중이 높은 Aura 담당 커서(Python Expert)**에게 전달하십시오.
+
+커서에게 전달할 때의 한마디:
+"기존의 Java BE와 React FE 소스를 /Users/joonbinchoi/Work/MaterTask라는 새로운 통안에 Python으로 다시 조립한다고 생각하고 작업을 시작해줘. 소스 간의 로직 흐름은 그대로 유지하되, 기술 스택만 streamlit과 FastAPI로 갈아 끼우는 게 핵심이야."

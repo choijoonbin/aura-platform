@@ -181,7 +181,7 @@ Aura 단독으로 먼저 가능한 시작점
 
 ### 액션 4건 즉시 실행 상태
 1. PM 트래커 1:1 재정렬: 완료
-2. Aura `finance_aura_v2_agentic` 플래그 경로: 진행 중
+2. Aura `finance_aura_v2_agentic` 플래그 경로: 완료(플래그+fallback 적용)
 3. FE `agent-events` 우선 전환 체크: 진행 중
 4. Shadow Run(휴일 3건) 시작 준비: 진행 중
 
@@ -192,12 +192,32 @@ Aura 단독으로 먼저 가능한 시작점
   - `NODE_START/NODE_END/TOOL_CALL/TOOL_RESULT/EVIDENCE_ADDED/GATE_APPLIED/COMPLETED/FAILED`
 - [x] Aura MCP payload-first + hybrid 병행
 - [x] 품질 보류 게이트 유지 (`RAG_ZERO`, `POLICY_CONFLICT`, `FACT_CONTEXT_PARTIAL` 등)
-- [ ] LangGraph v2 에이전트 실행 경로 본격 연결 (`finance_aura_v2_agentic`)
+- [x] `AGENT_EVENT` 영속 푸시 연결
+  - Aura `run_store` 이벤트를 Synapse `/api/synapse/agent/events`로 즉시 push
+  - 확인 로그: `AGENT_EVENT persisted push ok`
+- [x] Shadow 비교 KPI 요약 로그 추가
+  - `verdict_match`, `score_delta`, `citation_coverage_delta` 산출/로그
+- [x] Optional Tool Plan (P2 선행)
+  - `get_open_items` / `get_lineage` 고정 호출 제거
+  - 케이스 위험유형 + payload 보유 데이터 기준으로 `REQUESTED/SKIPPED` 분기
+  - 로그: `analysis_pipeline: optional_tool_plan ...`
+- [x] Agentic v2 Tool Planner 적용 (Aura)
+  - v2 경로에서 LLM이 `use_open_items/use_lineage/use_web_search` 계획 산출
+  - 결정론 가드레일(payload 보유 데이터 재호출 금지) 유지
+- [x] AGENT_EVENT debug 구분 메타 추가
+  - `debug_only=true` for `TOOL_CALL/TOOL_RESULT`
+- [x] v2 기본 스트림 정책 정리
+  - `agentic_v2_emit_agent_stream=false` 기본값으로 AGENT_STREAM(설명형 문장) 억제
+  - 표준 이벤트(AGENT_EVENT + step) 중심 운영 고정
+- [ ] LangGraph v2 에이전트 실행 경로 완전 분리 (`finance_aura_v2_agentic` 전용 graph runner)
 
 ### Phase B - Shadow 비교/스위칭
 - [ ] Shadow Run 동시 실행
   - 동일 입력에 대해 legacy vs v2를 병행 실행
   - 비교 지표: 정확도, citation 연결률, 보류율, 지연시간, 재현성
+- [x] shadow 비교 요약 이벤트화 (Aura)
+  - `node=SHADOW_COMPARE`, `decision_code=SHADOW_MATCH|SHADOW_MISMATCH|SHADOW_UNKNOWN`
+  - AGENT_EVENT 영속 푸시 + run 기준 조회 추적 가능
 - [ ] Go/No-Go 기준 고정
   - 예: 2주 연속 citation 누락률/오탐률 임계치 통과
 - [ ] feature flag 점진 전환

@@ -41,6 +41,9 @@ STREAM_EVENT_DELAY = 0.15
 # 백그라운드 분석 완료 후 큐 삭제 전 대기 시간 (BE 프록시가 completed 수신할 시간 확보)
 QUEUE_REMOVAL_DELAY_SEC = 2.0
 
+# run_id -> primary completed summary (shadow 비교용, 프로세스 메모리)
+_PRIMARY_RUN_SUMMARY: dict[str, dict[str, Any]] = {}
+
 
 def _event_payload_preview(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
     """SSE/agent_activity_log 추적용 축약 로그."""
@@ -57,6 +60,57 @@ def _event_payload_preview(event_type: str, payload: dict[str, Any]) -> dict[str
         preview["error"] = payload.get("error")
         preview["stage"] = payload.get("stage")
     return preview
+
+
+def _bool_verdict_from_payload(payload: dict[str, Any] | None) -> bool | None:
+    """completed payload에서 위반/보류 성격을 bool로 축약(비교용)."""
+    if not isinstance(payload, dict):
+        return None
+    status = str(payload.get("status") or "").upper()
+    if status in {"HOLD", "REVIEW", "PENDING"}:
+        return False
+    qcodes = [str(c).upper() for c in (payload.get("quality_gate_codes") or []) if str(c).strip()]
+    if any(c in {"RAG_ZERO", "INPUT_PARTIAL", "POLICY_CONFLICT", "POLICY_CONFLICT_DETECTED", "RISK_ARTICLE_MISMATCH"} for c in qcodes):
+        return False
+    sev = str(payload.get("severity") or "").upper()
+    score = payload.get("score")
+    try:
+        score_f = float(score) if score is not None else None
+    except Exception:
+        score_f = None
+    if sev in {"HIGH", "CRITICAL"}:
+        return True
+    if score_f is not None and score_f >= 0.7:
+        return True
+    if score_f is not None and score_f < 0.5:
+        return False
+    # 중간값 구간도 None으로 남기지 않고 보수적으로 분기
+    if score_f is not None:
+        return score_f >= 0.5
+    return False
+
+
+def _safe_float(v: Any) -> float | None:
+    try:
+        if v is None:
+            return None
+        return float(v)
+    except Exception:
+        return None
+
+
+def _coverage_from_payload(payload: dict[str, Any] | None) -> float | None:
+    if not isinstance(payload, dict):
+        return None
+    # completed payload direct
+    cov = _safe_float(payload.get("grounding_coverage_ratio"))
+    if cov is not None:
+        return cov
+    # nested breakdown fallback
+    bd = payload.get("analysis_score_breakdown")
+    if isinstance(bd, dict):
+        return _safe_float(bd.get("groundingCoverageRatio") or bd.get("grounding_coverage_ratio"))
+    return None
 
 
 def _stable_payload_hash(payload: dict[str, Any]) -> str:
@@ -77,7 +131,7 @@ def _build_agent_event(
     if event_name == "AGENT_EVENT":
         return None
     event_key = str(event_name or "").strip().lower()
-    node = payload.get("label") or payload.get("step_label")
+    node = payload.get("label") or payload.get("step_label") or payload.get("node")
     tool = payload.get("tool")
     decision_code = payload.get("decisionCode") or payload.get("decision_code")
     event_type: str | None = None
@@ -129,12 +183,15 @@ def _build_agent_event(
         or payload.get("content")
         or payload.get("summary")
         or payload.get("message")
+        or payload.get("thought_stream")
     )
     # 실 이벤트를 정규 스키마로만 래핑 (임의 요약/추론 문구 생성 금지)
     return {
         "event_type": event_type,
+        "source": "analysis_pipeline",
         "node": node,
         "tool": tool,
+        "debug_only": event_type in {"TOOL_CALL", "TOOL_RESULT"},
         "input_hash": _stable_payload_hash(payload),
         "output_ref": payload.get("runId") or run_id,
         "evidence_ids": evidence_ids,
@@ -186,8 +243,10 @@ async def _emit_agent_event_to_synapse(
             traceId=str(agent_event.get("trace_id") or ""),
             payload={
                 "event_type": agent_event.get("event_type"),
+                "source": agent_event.get("source") or "analysis_pipeline",
                 "node": agent_event.get("node"),
                 "tool": agent_event.get("tool"),
+                "debug_only": bool(agent_event.get("debug_only")),
                 "decision_code": agent_event.get("decision_code"),
                 "input_hash": agent_event.get("input_hash"),
                 "output_ref": agent_event.get("output_ref"),
@@ -258,6 +317,69 @@ def _resolve_shadow_agent_key(primary_agent_key: str, settings: Any) -> str:
     if shadow_key == primary_agent_key:
         return "finance_aura" if primary_agent_key != "finance_aura" else "finance_aura_v2_agentic"
     return shadow_key
+
+
+async def _resolve_agent_config_with_doc_fallback(
+    *,
+    tenant_id: str,
+    primary_agent_key: str,
+    legacy_agent_key: str,
+) -> tuple[Any, str]:
+    """
+    v2 에이전트 설정/지식 보강.
+    - 원칙: primary agent를 유지
+    - primary doc_ids가 비어 있으면 legacy doc_ids를 런타임으로 주입해 primary를 계속 사용
+    - 둘 다 비어 있으면 최종적으로 legacy fallback
+    """
+    from core.analysis.agent_factory import fetch_agent_config
+
+    cfg = await fetch_agent_config(agent_id=primary_agent_key, tenant_id=tenant_id)
+    if getattr(cfg, "doc_ids", []):
+        return cfg, primary_agent_key
+
+    legacy_cfg = await fetch_agent_config(agent_id=legacy_agent_key, tenant_id=tenant_id)
+    legacy_docs = list(getattr(legacy_cfg, "doc_ids", []) or [])
+    if legacy_docs:
+        patched = cfg.model_copy(deep=True)
+        patched.doc_ids = legacy_docs
+        # primary 기본 config(404 fallback)는 tenant_id=0일 수 있어 all-tenant 조회로 흐를 수 있음.
+        # doc_ids를 legacy에서 주입할 때 tenant_id도 동일하게 맞춰 불필요한 tenant=0 재조회 방지.
+        try:
+            legacy_tid = int(getattr(legacy_cfg, "tenant_id", 0) or 0)
+        except Exception:
+            legacy_tid = 0
+        if legacy_tid > 0:
+            patched.tenant_id = legacy_tid
+        logger.warning(
+            "agent_config doc_ids runtime-patched: tenant=%s primary=%s injected_from=%s doc_ids=%s patched_tenant_id=%s",
+            tenant_id,
+            primary_agent_key,
+            legacy_agent_key,
+            legacy_docs[:5],
+            getattr(patched, "tenant_id", None),
+        )
+        return patched, primary_agent_key
+
+    logger.warning(
+        "agent_config fallback to legacy: tenant=%s primary=%s legacy=%s reason=docids_empty_both",
+        tenant_id,
+        primary_agent_key,
+        legacy_agent_key,
+    )
+    return legacy_cfg, legacy_agent_key
+
+
+async def _wait_primary_summary(run_id: str, timeout_sec: float = 8.0) -> dict[str, Any]:
+    """shadow 비교 시 primary 완료 요약이 늦게 들어오는 케이스를 짧게 대기."""
+    waited = 0.0
+    interval = 0.2
+    while waited < timeout_sec:
+        found = _PRIMARY_RUN_SUMMARY.get(run_id)
+        if isinstance(found, dict) and found:
+            return found
+        await asyncio.sleep(interval)
+        waited += interval
+    return _PRIMARY_RUN_SUMMARY.get(run_id) or {}
 
 
 def _should_run_shadow(settings: Any, body_evidence: dict[str, Any] | None) -> bool:
@@ -423,17 +545,23 @@ async def _run_analysis_background(
                 context={"caseId": case_id, "evidence": body_evidence},
                 tenant_id=tenant_id,
             )
-        config = await fetch_agent_config(agent_id=agent_id_val, tenant_id=tenant_id)
-        if agent_id_val == (getattr(settings, "agentic_v2_primary_agent_key", "") or "finance_aura_v2_agentic").strip() and not getattr(config, "doc_ids", []):
-            fallback_agent = (getattr(settings, "agentic_v2_legacy_agent_key", "") or "finance_aura").strip()
-            logger.warning(
-                "analysis_background agentic_v2 fallback to legacy: case_id=%s run_id=%s reason=v2_config_missing_or_docids_empty v2=%s legacy=%s",
-                case_id,
-                run_id,
-                agent_id_val,
-                fallback_agent,
+        if agent_id_val == (getattr(settings, "agentic_v2_primary_agent_key", "") or "finance_aura_v2_agentic").strip():
+            legacy_agent = (getattr(settings, "agentic_v2_legacy_agent_key", "") or "finance_aura").strip()
+            config, resolved_agent_id = await _resolve_agent_config_with_doc_fallback(
+                tenant_id=tenant_id,
+                primary_agent_key=agent_id_val,
+                legacy_agent_key=legacy_agent,
             )
-            agent_id_val = fallback_agent
+            if resolved_agent_id != agent_id_val:
+                logger.warning(
+                    "analysis_background agentic_v2 fallback to legacy-final: case_id=%s run_id=%s v2=%s legacy=%s",
+                    case_id,
+                    run_id,
+                    agent_id_val,
+                    resolved_agent_id,
+                )
+                agent_id_val = resolved_agent_id
+        else:
             config = await fetch_agent_config(agent_id=agent_id_val, tenant_id=tenant_id)
         async for event_type, payload in run_audit_analysis(
             case_id,
@@ -528,6 +656,8 @@ async def _run_analysis_background(
                 break
 
         if event_type == "completed":
+            # shadow 비교를 위한 primary 요약 저장
+            _PRIMARY_RUN_SUMMARY[run_id] = payload if isinstance(payload, dict) else {}
             result = get_audit_analysis_result(case_id)
             if result:
                 await send_callback(run_id, case_id, "COMPLETED", final_result=result, agent_id=config.agent_id, version=config.version)
@@ -606,7 +736,13 @@ async def _run_shadow_analysis_background(
     )
 
     try:
-        shadow_config = await fetch_agent_config(agent_id=shadow_agent_key, tenant_id=tenant_id)
+        # shadow도 동일하게 doc_ids 보강 로직 적용
+        shadow_config, shadow_resolved_key = await _resolve_agent_config_with_doc_fallback(
+            tenant_id=tenant_id,
+            primary_agent_key=shadow_agent_key,
+            legacy_agent_key=primary_agent_key,
+        )
+        shadow_agent_key = shadow_resolved_key
         last_completed: dict[str, Any] = {}
         async for ev_name, ev_payload in run_audit_analysis(
             case_id,
@@ -630,15 +766,80 @@ async def _run_shadow_analysis_background(
                 )
                 return
 
+        primary_completed = await _wait_primary_summary(run_id, timeout_sec=8.0)
+        primary_score = _safe_float(primary_completed.get("score"))
+        shadow_score = _safe_float(last_completed.get("score"))
+        score_delta = None
+        if primary_score is not None and shadow_score is not None:
+            score_delta = round(shadow_score - primary_score, 4)
+        primary_cov = _coverage_from_payload(primary_completed)
+        shadow_cov = _coverage_from_payload(last_completed)
+        citation_coverage_delta = None
+        if primary_cov is not None and shadow_cov is not None:
+            citation_coverage_delta = round(shadow_cov - primary_cov, 4)
+
+        primary_verdict = _bool_verdict_from_payload(primary_completed)
+        shadow_verdict = _bool_verdict_from_payload(last_completed)
+        verdict_match = (
+            None if primary_verdict is None or shadow_verdict is None else (primary_verdict == shadow_verdict)
+        )
+
         logger.info(
-            "shadow_compare summary: case_id=%s run_id=%s primary=%s shadow=%s shadow_score=%s shadow_severity=%s shadow_gate_codes=%s",
+            "shadow_compare summary: case_id=%s run_id=%s primary=%s shadow=%s verdict_match=%s score_delta=%s citation_coverage_delta=%s primary_score=%s shadow_score=%s primary_cov=%s shadow_cov=%s primary_gate=%s shadow_gate=%s",
             case_id,
             run_id,
             primary_agent_key,
             shadow_agent_key,
-            last_completed.get("score"),
-            last_completed.get("severity"),
+            verdict_match,
+            score_delta,
+            citation_coverage_delta,
+            primary_score,
+            shadow_score,
+            primary_cov,
+            shadow_cov,
+            (primary_completed.get("quality_gate_codes") or []),
             (last_completed.get("quality_gate_codes") or []),
+        )
+
+        # Shadow 비교 결과를 표준 이벤트로도 남긴다(조회/감사 추적용).
+        shadow_event = {
+            "event_type": "GATE_APPLIED",
+            "source": "shadow_compare",
+            "node": "SHADOW_COMPARE",
+            "tool": None,
+            "debug_only": False,
+            "decision_code": "SHADOW_MATCH" if verdict_match is True else ("SHADOW_MISMATCH" if verdict_match is False else "SHADOW_UNKNOWN"),
+            "input_hash": _stable_payload_hash(
+                {
+                    "case_id": case_id,
+                    "run_id": run_id,
+                    "primary": primary_agent_key,
+                    "shadow": shadow_agent_key,
+                    "primary_score": primary_score,
+                    "shadow_score": shadow_score,
+                }
+            ),
+            "output_ref": _stable_payload_hash(
+                {
+                    "verdict_match": verdict_match,
+                    "score_delta": score_delta,
+                    "citation_coverage_delta": citation_coverage_delta,
+                }
+            ),
+            "evidence_ids": [],
+            "summary_message": (
+                f"shadow 비교 결과: verdict_match={verdict_match}, score_delta={score_delta}, "
+                f"citation_coverage_delta={citation_coverage_delta}"
+            ),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "run_id": run_id,
+            "case_id": case_id,
+        }
+        put_event(run_id, "AGENT_EVENT", shadow_event)
+        await _emit_agent_event_to_synapse(
+            tenant_id=tenant_id,
+            case_id=case_id,
+            agent_event=shadow_event,
         )
     except Exception as exc:
         logger.warning(
@@ -649,6 +850,8 @@ async def _run_shadow_analysis_background(
             shadow_agent_key,
             exc,
         )
+    finally:
+        _PRIMARY_RUN_SUMMARY.pop(run_id, None)
 
 
 @router.post("/{case_id}/analysis-runs")
@@ -736,6 +939,7 @@ async def case_analysis_stream(
     runId: str,
     user: CurrentUser,
     tenant_id: TenantId,
+    debugEvents: bool = False,
 ):
     """
     감사 분석 스트림 (SSE)
@@ -782,6 +986,17 @@ async def case_analysis_stream(
                     logger.info("case_analysis_stream: get_event None (timeout or queue removed) run_id=%s", run_id)
                     break
                 event_type, payload = ev
+                # 기본 스트림은 compact 모드:
+                # - 디버그 이벤트(tool_call/tool_result/thought_pending/proposal/confidence) 숨김
+                # - 대용량 evidence(COLLECTED) 숨김
+                # - 필요 시 debugEvents=true로 전체 이벤트 확인
+                if not debugEvents:
+                    if event_type in ("thought_pending", "tool_call", "tool_result", "proposal", "confidence"):
+                        continue
+                    if event_type == "AGENT_EVENT" and bool((payload or {}).get("debug_only")):
+                        continue
+                    if event_type == "evidence" and (payload or {}).get("type") != "SENTENCE_CITATION_MAP":
+                        continue
                 if event_type == "started":
                     case_id_val = payload.get("caseId", "")
                 if event_type in ("AGENT_STREAM", "step", "completed", "failed") or (

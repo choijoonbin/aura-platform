@@ -1260,14 +1260,28 @@ def retrieve_rag_pgvector(
         logger.warning("[RAG Search] 에이전트에게 할당된 지식(doc_ids)이 없습니다. 연결된 지식이 없으므로 RAG 검색 결과 0건 반환.")
         incr("rag_retrieve_doc_scope_empty_total")
         return []
-    
+
+    # ── Query Rewriter: SAP 코드·줄임말을 의미어로 사전 확장 ─────────────────
+    # 필요한 쿼리만 LLM 재작성 (이미 명확한 쿼리는 그대로 통과, 비용 없음)
+    _rewritten_query: str | None = None
+    try:
+        from core.analysis.rag_query_rewriter import rewrite_query
+        _expanded, _was_rewritten = rewrite_query(query)
+        if _was_rewritten:
+            _rewritten_query = _expanded
+            incr("rag_query_rewrite_triggered_total")
+    except Exception as _qr_err:
+        logger.debug("rag_query_rewriter: 비활성 또는 오류 (%s)", _qr_err)
+
     emb = _get_embedding_client()
     if emb is None:
         return []
     from database.engine import get_session
     from database.models.rag_chunk import FULL_TABLE
 
-    query_embedding = emb.embed_query(query)
+    # 재작성된 쿼리가 있으면 먼저 시도, 없으면 원본 사용
+    active_query = _rewritten_query if _rewritten_query else query
+    query_embedding = emb.embed_query(active_query)
     if len(query_embedding) != EMBEDDING_DIM:
         return []
     vec_str = _embedding_to_pgvector(query_embedding)
@@ -1292,6 +1306,31 @@ def retrieve_rag_pgvector(
                 doc_ids=doc_ids,
                 tenant_id=tenant_id if tenant_id and tenant_id > 0 else None,
             )
+            if not rows and _rewritten_query:
+                # 재작성 쿼리로 0건 → 원본 쿼리로 재시도 (안전망)
+                logger.info(
+                    "[RAG Search] rewritten query 0건 → 원본 쿼리로 재시도 original='%s'",
+                    (query or "")[:120],
+                )
+                incr("rag_query_rewrite_fallback_total")
+                _original_embedding = emb.embed_query(query)
+                if len(_original_embedding) == EMBEDDING_DIM:
+                    _orig_vec = _embedding_to_pgvector(_original_embedding)
+                    rows = _pgvector_search(
+                        session,
+                        FULL_TABLE,
+                        embedding=_orig_vec,
+                        k=k,
+                        max_distance=max_distance,
+                        metadata_filter=metadata_filter,
+                        prioritize_chapters=prioritize_chapters or (),
+                        doc_ids=doc_ids,
+                        tenant_id=tenant_id if tenant_id and tenant_id > 0 else None,
+                    )
+                    if rows:
+                        incr("rag_query_rewrite_fallback_hit_total")
+                        logger.info("[RAG Search] 원본 쿼리 재시도 성공 rows=%d", len(rows))
+
             if not rows:
                 incr("rag_retrieve_vector_zero_total")
                 kw_terms = _extract_query_keywords(query)
@@ -1391,6 +1430,12 @@ def retrieve_rag_pgvector(
         out.append(item)
     if out:
         incr("rag_retrieve_nonzero_total")
+        # 진짜 피드백 루프: 검색 결과 score를 Redis에 누적 (동기, non-blocking)
+        try:
+            from core.analysis.rag_score_tracker import record_search_scores
+            record_search_scores(out)
+        except Exception as _tracker_err:
+            logger.debug("rag_score_tracker record failed (non-critical): %s", _tracker_err)
     else:
         incr("rag_retrieve_zero_total")
     return out
